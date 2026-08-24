@@ -1,23 +1,28 @@
-//! The `DogStore` trait shared by all three backends, and its error type.
+//! The `DogStore` trait shared by all four backends, and its error type.
 //!
 //! See `docs/decisions/ADR-0001-three-backend-empirical-comparison.md` for
-//! why these three implementations are compared behind one trait, and
-//! `docs/specifications/storage/STORAGE-002-dogstore-backends.md` for the
-//! requirements each implementation satisfies.
+//! why the first three implementations are compared behind one trait,
+//! `docs/decisions/ADR-0003-eager-write-through-cache-invalidation.md` for
+//! the fourth (`CanonicalCachedStore`), and
+//! `docs/specifications/storage/STORAGE-002-dogstore-backends.md` /
+//! `STORAGE-005-canonical-cached-backend.md` for the requirements each
+//! implementation satisfies.
 
 pub mod aos;
 pub mod canonical;
+pub mod canonical_cached;
 pub mod soa;
 
 pub use aos::AosStore;
 pub use canonical::CanonicalStore;
+pub use canonical_cached::CanonicalCachedStore;
 pub use soa::SoaStore;
 
 use crate::record::DogRecord;
 use thiserror::Error;
 use uuid::Uuid;
 
-/// The one fallible operation across all three backends.
+/// The one fallible operation across all four backends.
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
 pub enum StoreError {
     /// `update_age` was called with a UUID no record has.
@@ -26,8 +31,9 @@ pub enum StoreError {
 }
 
 /// Shared storage interface implemented by [`AosStore`] (row-oriented),
-/// [`SoaStore`] (column-oriented), and [`CanonicalStore`] (UUID-canonical
-/// with derived views).
+/// [`SoaStore`] (column-oriented), [`CanonicalStore`] (UUID-canonical with
+/// derived views), and [`CanonicalCachedStore`] (UUID-canonical plus a
+/// materialized age cache).
 ///
 /// `get` and `same_breed` treat an unknown UUID as a normal empty result
 /// (`None` / `Vec::new()`), not an error — "not found" is an ordinary

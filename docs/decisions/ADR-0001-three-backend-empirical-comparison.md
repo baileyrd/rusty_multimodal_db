@@ -147,6 +147,10 @@ to a baseline.
 - Revisit if: a fourth backend (e.g. materialized column cache hybrid) is
   added — this ADR's "same trait, same generated input" structure should
   extend to it directly, but note the extension here or in a new ADR.
+  **Done**: `CanonicalCachedStore` was added per
+  `docs/decisions/ADR-0003-eager-write-through-cache-invalidation.md`,
+  reusing this ADR's trait/dataset structure unchanged — see `RESULTS.md`'s
+  revised 4-way comparison.
 - Revisit if: `DogRecord`'s shape changes — per the charter, that's a
   hard-to-reverse decision requiring explicit sign-off, and would warrant
   re-running this comparison rather than assuming these results still

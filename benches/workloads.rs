@@ -10,7 +10,7 @@ use criterion::{
     black_box, criterion_group, criterion_main, BenchmarkGroup, BenchmarkId, Criterion,
 };
 use rusty_multimodal_db::bench_support::{build_dataset, Dataset, RoundRobin, SIZES};
-use rusty_multimodal_db::store::{AosStore, CanonicalStore, SoaStore};
+use rusty_multimodal_db::store::{AosStore, CanonicalCachedStore, CanonicalStore, SoaStore};
 use rusty_multimodal_db::{DogRecord, DogStore};
 
 fn bench_get(c: &mut Criterion) {
@@ -20,6 +20,7 @@ fn bench_get(c: &mut Criterion) {
         run_get::<AosStore>(&mut group, "aos", n, &dataset);
         run_get::<SoaStore>(&mut group, "soa", n, &dataset);
         run_get::<CanonicalStore>(&mut group, "canonical", n, &dataset);
+        run_get::<CanonicalCachedStore>(&mut group, "canonical_cached", n, &dataset);
     }
     group.finish();
 }
@@ -45,6 +46,7 @@ fn bench_scan_ages(c: &mut Criterion) {
         run_scan_ages::<AosStore>(&mut group, "aos", n, &dataset);
         run_scan_ages::<SoaStore>(&mut group, "soa", n, &dataset);
         run_scan_ages::<CanonicalStore>(&mut group, "canonical", n, &dataset);
+        run_scan_ages::<CanonicalCachedStore>(&mut group, "canonical_cached", n, &dataset);
     }
     group.finish();
 }
@@ -70,6 +72,7 @@ fn bench_update_age(c: &mut Criterion) {
         run_update_age::<AosStore>(&mut group, "aos", n, &dataset);
         run_update_age::<SoaStore>(&mut group, "soa", n, &dataset);
         run_update_age::<CanonicalStore>(&mut group, "canonical", n, &dataset);
+        run_update_age::<CanonicalCachedStore>(&mut group, "canonical_cached", n, &dataset);
     }
     group.finish();
 }
@@ -109,6 +112,7 @@ fn bench_same_breed(c: &mut Criterion) {
         run_same_breed::<AosStore>(&mut group, "aos", n, &dataset);
         run_same_breed::<SoaStore>(&mut group, "soa", n, &dataset);
         run_same_breed::<CanonicalStore>(&mut group, "canonical", n, &dataset);
+        run_same_breed::<CanonicalCachedStore>(&mut group, "canonical_cached", n, &dataset);
     }
     group.finish();
 }
