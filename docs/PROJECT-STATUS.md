@@ -1,8 +1,8 @@
 # Project Status
 
-- Last verified main commit: `5bfc8c5` (bootstrap: charter/ADRs/spec tree/3-backend suite/`RESULTS.md`, first pass) — `main` and the feature branch were identical at this commit (GitHub auto-set `main` to the first push into an otherwise-empty repo), so the owner elected to leave `main` as-is rather than force-reset it for a formal PR; see this file's git history / session record for that call.
+- Last verified main commit: `d1d9169` (merge of PR #1, `HYBRID-BACKEND` — `CanonicalCachedStore`, ADR-0003, 4-way `RESULTS.md`). Prior checkpoint: `5bfc8c5` (bootstrap, first pass) — `main` and the feature branch were identical at that commit (GitHub auto-set `main` to the first push into an otherwise-empty repo), so the owner elected to leave `main` as-is rather than force-reset it for a formal PR; PR #1 is the first real PR/merge in this repo's history.
 - Verified at: 2026-08-24
-- Current milestone: `HYBRID-BACKEND` (4th backend, `CanonicalCachedStore`) implemented on `claude/storage-hypothesis-benchmark-c26t7h`, ahead of `main` this time (real diff exists, so this one *can* go through an actual PR) — see "Next" below.
+- Current milestone: none active — `HYBRID-BACKEND` is the newest completed unit; see "Next" for the unstarted follow-ups it left open.
 - Health: green (no blockers; two deferred items — real cache-miss numbers, and the memory/write-heavy-workload open questions — tracked as open questions, not blockers)
 
 ## Completed
@@ -13,13 +13,13 @@
 - `BENCH-SUITE` — Criterion suite (`benches/workloads.rs`), 4 workloads × 3 sizes × 3 backends = 36 cases, all run successfully. On `main`.
 - `CACHE-MISS` — `perf-events`-gated target (`benches/cache_events.rs`), builds and links on Linux; confirmed (via both `perf stat` and running the built binary) that this session's own environment lacks hardware performance-counter access, so real numbers are deferred to a run on real hardware (see ADR-0002, `RESULTS.md`). On `main`.
 - `RESULTS` — `RESULTS.md` published with real `cargo bench` numbers, a verdict per workload, explicit canonical-store win/loss call-outs, and an open-questions section (first pass, 3 backends). On `main`.
-- `HYBRID-BACKEND` — `CanonicalCachedStore` (`src/store/canonical_cached.rs`): `CanonicalStore`'s map + breed index, plus a packed `Vec<u32>` age cache kept in sync by eager write-through (ADR-0003). 8 unit tests (staleness test highest-priority) + 5 cross-backend tests, all passing. Wired into both `benches/workloads.rs` and `benches/cache_events.rs`. `RESULTS.md` revised to a 4-way comparison: `scan_ages` gap closed (from losing to both baselines to beating AoS by ~17.7× and landing within ~14% of SoA); `update_age` write-through costs ~1.5× at every size (well under the ~10× check-in threshold, so this proceeded without pausing) while remaining 4–5 orders of magnitude faster than AoS/SoA. On `claude/storage-hypothesis-benchmark-c26t7h`, not yet merged.
+- `HYBRID-BACKEND` — `CanonicalCachedStore` (`src/store/canonical_cached.rs`): `CanonicalStore`'s map + breed index, plus a packed `Vec<u32>` age cache kept in sync by eager write-through (ADR-0003). 8 unit tests (staleness test highest-priority) + 5 cross-backend tests, all passing. Wired into both `benches/workloads.rs` and `benches/cache_events.rs`. `RESULTS.md` revised to a 4-way comparison: `scan_ages` gap closed (from losing to both baselines to beating AoS by ~17.7× and landing within ~14% of SoA); `update_age` write-through costs ~1.5× at every size (well under the ~10× check-in threshold, so this proceeded without pausing) while remaining 4–5 orders of magnitude faster than AoS/SoA. Merged via PR #1 (`fa80a74` → merge commit `d1d9169`), CI green (`fmt, clippy, test`) before merge.
 
-Evidence: `cargo test --all-features` / `cargo bench` output referenced in `RESULTS.md`; this session's diff.
+Evidence: `cargo test --all-features` / `cargo bench` output referenced in `RESULTS.md`; PR #1 diff and CI run.
 
 ## In progress
 
-- None — `HYBRID-BACKEND` is implemented pending PR review/merge.
+- None.
 
 ## Blocked
 
@@ -27,10 +27,8 @@ Evidence: `cargo test --all-features` / `cargo bench` output referenced in `RESU
 
 ## Next
 
-1. Open a PR for `HYBRID-BACKEND` (branch now genuinely diverges from `main` — unlike the bootstrap PR attempt, this one is mergeable normally), get it reviewed, and merge.
-2. After merge: refresh `main`, record the real merge commit SHA here.
-3. Real cache-miss numbers from `baileyai` (or equivalent bare-metal Linux): `cargo bench --features perf-events --bench cache_events`, now covering all four backends, folded into `RESULTS.md`.
-4. Decide whether a write-heavy mixed-workload benchmark or a lazy-invalidation fifth backend/mode is worth pursuing, per `RESULTS.md`'s and ADR-0003's open questions — owner's call, not made here.
+1. Real cache-miss numbers from `baileyai` (or equivalent bare-metal Linux): `cargo bench --features perf-events --bench cache_events`, now covering all four backends, folded into `RESULTS.md`.
+2. Decide whether a write-heavy mixed-workload benchmark or a lazy-invalidation fifth backend/mode is worth pursuing, per `RESULTS.md`'s and ADR-0003's open questions — owner's call, not made here.
 
 ## Validation
 
