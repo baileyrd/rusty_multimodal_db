@@ -1,0 +1,56 @@
+[package]
+name = "rusty_multimodal_db"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Benchmark harness comparing AoS, SoA, and UUID-canonical-store views as storage backends"
+repository = "https://github.com/baileyrd/rusty_multimodal_db"
+license = "MIT"
+publish = false
+
+[lib]
+name = "rusty_multimodal_db"
+path = "src/lib.rs"
+
+[[bench]]
+name = "workloads"
+harness = false
+
+[[bench]]
+name = "cache_events"
+harness = false
+required-features = ["perf-events"]
+
+[dependencies]
+# UUID type + deterministic construction from seeded random bytes (Builder::from_random_bytes
+# needs no extra feature — Uuid::new_v4()'s OS-randomness feature is deliberately not enabled,
+# since dataset generation must be reproducible from a seed, not OS-random).
+uuid = { version = "1", default-features = false, features = ["std"] }
+# Error type for the one fallible DogStore operation (update_age on an unknown UUID).
+thiserror = "1"
+
+[dependencies.rand]
+# Seeded, reproducible RNG for dataset generation (StdRng::seed_from_u64) and for benchmark
+# target-UUID selection. Pinned to the well-established 0.8 API rather than the newer 0.10
+# line to reduce API-churn risk in a small experimental crate.
+version = "0.8"
+
+[dev-dependencies]
+# Benchmark harness. Pinned to 0.5 (not the latest 0.8) so it resolves to the same major
+# version criterion-perf-events 0.4 depends on, avoiding two copies of criterion in the graph.
+criterion = "0.5"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Wraps Linux perf_event_open for hardware cache-miss counters; Linux-only by construction.
+# See ADR-0002 — optional, behind the `perf-events` feature, not part of the default build.
+criterion-perf-events = { version = "0.4", optional = true }
+# criterion-perf-events' own event-type/builder types (HardwareEventType, PerfCounterBuilderLinux),
+# used directly in benches/cache_events.rs to select the CacheMisses/CacheReferences events.
+perfcnt = { version = "0.8", optional = true }
+
+[features]
+perf-events = ["dep:criterion-perf-events", "dep:perfcnt"]
+
+[profile.bench]
+opt-level = 3
+lto = true
