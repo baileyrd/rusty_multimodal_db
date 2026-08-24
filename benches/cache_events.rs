@@ -19,9 +19,9 @@
 //! Covers `get` and `same_breed` — the two workloads whose cost is most
 //! directly a function of memory-access pattern rather than allocation
 //! or hashing overhead (`scan_ages` is dominated by the size of the
-//! output `Vec` itself for all three backends, `update_age` by the
+//! output `Vec` itself for all four backends, `update_age` by the
 //! lookup-then-write pattern already exercised by `get`) — across all
-//! three backends and three dataset sizes.
+//! four backends and three dataset sizes.
 
 #![cfg(target_os = "linux")]
 
@@ -32,7 +32,7 @@ use criterion_perf_events::Perf;
 use perfcnt::linux::HardwareEventType as Hardware;
 use perfcnt::linux::PerfCounterBuilderLinux as Builder;
 use rusty_multimodal_db::bench_support::{build_dataset, Dataset, RoundRobin, SIZES};
-use rusty_multimodal_db::store::{AosStore, CanonicalStore, SoaStore};
+use rusty_multimodal_db::store::{AosStore, CanonicalCachedStore, CanonicalStore, SoaStore};
 use rusty_multimodal_db::{DogRecord, DogStore};
 
 fn run_get<S>(group: &mut BenchmarkGroup<'_, Perf>, name: &str, n: usize, dataset: &Dataset)
@@ -70,6 +70,7 @@ fn cache_misses(c: &mut Criterion<Perf>) {
         run_get::<AosStore>(&mut get_group, "aos", n, &dataset);
         run_get::<SoaStore>(&mut get_group, "soa", n, &dataset);
         run_get::<CanonicalStore>(&mut get_group, "canonical", n, &dataset);
+        run_get::<CanonicalCachedStore>(&mut get_group, "canonical_cached", n, &dataset);
     }
     get_group.finish();
 
@@ -79,6 +80,12 @@ fn cache_misses(c: &mut Criterion<Perf>) {
         run_same_breed::<AosStore>(&mut same_breed_group, "aos", n, &dataset);
         run_same_breed::<SoaStore>(&mut same_breed_group, "soa", n, &dataset);
         run_same_breed::<CanonicalStore>(&mut same_breed_group, "canonical", n, &dataset);
+        run_same_breed::<CanonicalCachedStore>(
+            &mut same_breed_group,
+            "canonical_cached",
+            n,
+            &dataset,
+        );
     }
     same_breed_group.finish();
 }
@@ -90,6 +97,7 @@ fn cache_references(c: &mut Criterion<Perf>) {
         run_get::<AosStore>(&mut get_group, "aos", n, &dataset);
         run_get::<SoaStore>(&mut get_group, "soa", n, &dataset);
         run_get::<CanonicalStore>(&mut get_group, "canonical", n, &dataset);
+        run_get::<CanonicalCachedStore>(&mut get_group, "canonical_cached", n, &dataset);
     }
     get_group.finish();
 
@@ -99,6 +107,12 @@ fn cache_references(c: &mut Criterion<Perf>) {
         run_same_breed::<AosStore>(&mut same_breed_group, "aos", n, &dataset);
         run_same_breed::<SoaStore>(&mut same_breed_group, "soa", n, &dataset);
         run_same_breed::<CanonicalStore>(&mut same_breed_group, "canonical", n, &dataset);
+        run_same_breed::<CanonicalCachedStore>(
+            &mut same_breed_group,
+            "canonical_cached",
+            n,
+            &dataset,
+        );
     }
     same_breed_group.finish();
 }
