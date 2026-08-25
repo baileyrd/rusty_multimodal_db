@@ -27,7 +27,7 @@
 //! reading of what an mmap-backed store's value proposition actually is
 //! for this crate's fixed three-field record.
 
-use super::DurabilityError;
+use super::{DurabilityError, PARALLEL_CONSTRUCTION_THRESHOLD};
 use crate::record::DogRecord;
 use crate::store::{DogStore, StoreError};
 use memmap2::MmapMut;
@@ -65,8 +65,14 @@ struct Indexes {
 /// no-merge shape, same `std::thread::scope` fix, duplicated here rather
 /// than shared per this crate's existing convention of small explicit
 /// duplication across structurally similar backends (see `wal_buffered.rs`'s
-/// own module docs).
+/// own module docs). Below `PARALLEL_CONSTRUCTION_THRESHOLD` records, falls
+/// back to `build_indexes_sequential` — see that constant's own doc comment
+/// (`src/durability/mod.rs`) for why and how it was measured.
 fn build_indexes(records: &[DogRecord], edges: Vec<(Uuid, Uuid)>) -> Indexes {
+    if records.len() < PARALLEL_CONSTRUCTION_THRESHOLD {
+        return build_indexes_sequential(records, edges);
+    }
+
     let (adjacency_index, (breed_index, position_index, records_map)) =
         std::thread::scope(|scope| {
             let adjacency_handle = scope.spawn(move || {
@@ -97,6 +103,34 @@ fn build_indexes(records: &[DogRecord], edges: Vec<(Uuid, Uuid)>) -> Indexes {
             (adjacency_index, (breed_index, position_index, records_map))
         });
 
+    Indexes {
+        records: records_map,
+        breed_index,
+        adjacency_index,
+        position_index,
+    }
+}
+
+/// The original, single-threaded construction — same phases as
+/// `build_indexes`'s parallel path, just run in sequence on one thread.
+/// Used below `PARALLEL_CONSTRUCTION_THRESHOLD`, where spawning a thread
+/// would cost more than it saves.
+fn build_indexes_sequential(records: &[DogRecord], edges: Vec<(Uuid, Uuid)>) -> Indexes {
+    let mut breed_index: HashMap<String, Vec<Uuid>> = HashMap::new();
+    let mut position_index = HashMap::with_capacity(records.len());
+    for (position, record) in records.iter().enumerate() {
+        breed_index
+            .entry(record.breed.clone())
+            .or_default()
+            .push(record.id);
+        position_index.insert(record.id, position);
+    }
+    let mut adjacency_index: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
+    for (a, b) in edges {
+        adjacency_index.entry(a).or_default().push(b);
+        adjacency_index.entry(b).or_default().push(a);
+    }
+    let records_map = records.iter().cloned().map(|r| (r.id, r)).collect();
     Indexes {
         records: records_map,
         breed_index,

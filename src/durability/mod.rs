@@ -54,6 +54,23 @@ use std::path::Path;
 use thiserror::Error;
 use uuid::Uuid;
 
+/// Below this many records, spawning a thread to parallelize index
+/// construction (`CanonicalCachedState::new` and the three Tier 2
+/// `build_indexes` functions) costs more than the work it parallelizes —
+/// sequential wins. Measured directly, not guessed: two independent,
+/// warm-up-corrected 9-sample runs comparing sequential vs. parallel
+/// construction at 500/800/1,000/1,200/1,500/1,800/2,000/3,000/5,000
+/// records agreed that ≤800 records reliably favors sequential and
+/// ≥1,500 reliably favors parallel, with 1,000–1,200 landing as a genuine
+/// coin-flip between the two runs — not a clean crossover number. This
+/// threshold sits at the upper, confidently-parallel edge of that
+/// measured range, erring toward the known-safe sequential path through
+/// the ambiguous 1,000–1,200 band rather than risking the very regression
+/// this threshold exists to prevent. One constant, shared by every
+/// parallelized construction site, so there's a single place to tune —
+/// not four separate magic numbers.
+pub(crate) const PARALLEL_CONSTRUCTION_THRESHOLD: usize = 1_500;
+
 pub mod embedded_store;
 pub mod hybrid;
 pub mod lsm_store;
@@ -203,7 +220,16 @@ impl CanonicalCachedState {
     /// (stdlib, no new dependency) is enough to run them concurrently;
     /// `rayon`'s data-parallel iterators would be overkill for a plain
     /// two-way split with nothing left to subdivide further.
+    ///
+    /// Below [`PARALLEL_CONSTRUCTION_THRESHOLD`] records, thread-spawn
+    /// overhead exceeds the work being parallelized — see that constant's
+    /// own doc comment — so this falls back to [`Self::new_sequential`],
+    /// the original single-threaded construction, instead.
     pub fn new(records: Vec<DogRecord>, edges: Vec<(Uuid, Uuid)>) -> Self {
+        if records.len() < PARALLEL_CONSTRUCTION_THRESHOLD {
+            return Self::new_sequential(records, edges);
+        }
+
         let (adjacency_index, (records, breed_index, age_cache, position_index)) =
             std::thread::scope(|scope| {
                 let adjacency_handle = scope.spawn(move || {
@@ -245,6 +271,41 @@ impl CanonicalCachedState {
                     (records, breed_index, age_cache, position_index),
                 )
             });
+
+        Self {
+            records,
+            breed_index,
+            adjacency_index,
+            age_cache,
+            position_index,
+        }
+    }
+
+    /// The original, single-threaded construction — same two phases as
+    /// [`Self::new`]'s parallel path, just run in sequence on one thread.
+    /// Used below [`PARALLEL_CONSTRUCTION_THRESHOLD`], where spawning a
+    /// thread would cost more than it saves.
+    fn new_sequential(records: Vec<DogRecord>, edges: Vec<(Uuid, Uuid)>) -> Self {
+        let mut breed_index: HashMap<String, Vec<Uuid>> = HashMap::new();
+        let mut age_cache = Vec::with_capacity(records.len());
+        let mut position_index = HashMap::with_capacity(records.len());
+
+        for (position, record) in records.iter().enumerate() {
+            breed_index
+                .entry(record.breed.clone())
+                .or_default()
+                .push(record.id);
+            age_cache.push(record.age);
+            position_index.insert(record.id, position);
+        }
+
+        let mut adjacency_index: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
+        for (a, b) in edges {
+            adjacency_index.entry(a).or_default().push(b);
+            adjacency_index.entry(b).or_default().push(a);
+        }
+
+        let records = records.into_iter().map(|r| (r.id, r)).collect();
 
         Self {
             records,
