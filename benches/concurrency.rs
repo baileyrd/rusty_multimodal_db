@@ -41,22 +41,26 @@
 //! that's exactly the kind of thing `RESULTS.md`'s open questions exist to
 //! flag for a 1M follow-up.
 //!
-//! # Thread counts: 1/4/24/48, picked for this machine's real core count
+//! # Thread counts: 1/4/32/64, picked for `baileyai`'s real core count
 //!
 //! The original container run swept 1/4/8/16 unconditionally on a 4-core
 //! container, so 8 and 16 were honest but oversubscribed data points, not
-//! genuine added parallelism. This machine (the owner's Windows dev
-//! machine, not the container) reports 24 logical processors via both
-//! `std::thread::available_parallelism()` and `nproc`/WMIC (12 physical
-//! cores, hyperthreaded) — so the swept counts were changed to match: `1`
-//! (serial baseline), `4` (kept, specifically so it's directly comparable
-//! to the container's own non-oversubscribed 4-thread row), `24` (this
+//! genuine added parallelism. A second pass substituted the owner's Windows
+//! dev machine (24 logical / 12 physical cores) because `baileyai` was
+//! unreachable over SSH from that session, and swept 1/4/24/48 to match. A
+//! third pass (this one) runs directly on `baileyai` itself — this session
+//! executes on that machine, so no SSH substitution is needed. `baileyai`
+//! reports 32 logical processors via both `std::thread::available_parallelism()`
+//! and `nproc` (16 physical cores, AMD Ryzen AI MAX+ 395, SMT enabled) — so
+//! the swept counts are changed to match: `1` (serial baseline), `4` (kept,
+//! specifically so it's directly comparable to both the container's and the
+//! Windows machine's own non-oversubscribed 4-thread rows), `32` (this
 //! machine's actual core count — the first *genuinely* non-oversubscribed
-//! high-thread-count data point either environment has produced), and `48`
-//! (2x cores, meaningfully past it, on purpose). 8/16 are dropped here
-//! since they'd land in the middle of real headroom on this machine, not
-//! at or past it — they no longer test the thing they tested on the
-//! container.
+//! high-thread-count data point this environment can produce), and `64` (2x
+//! cores, meaningfully past it, on purpose, matching the "2x cores" pattern
+//! the Windows-machine pass already established at 48). 8/16/24/48 are
+//! dropped here since none of them are at or past this machine's real
+//! headroom — they'd land in the middle of it instead.
 
 use rusty_multimodal_db::bench_support::{
     build_dataset, Dataset, MixedWorkloadConfig, MixedWorkloadDriver, MIXED_WRITE_RATIOS, SEED,
@@ -70,9 +74,9 @@ use std::time::{Duration, Instant};
 
 /// Dataset sizes swept — see module docs for why 1M is excluded here.
 const SIZES: [usize; 2] = [1_000, 100_000];
-/// Thread counts swept — see module docs for why these aren't scaled down
-/// to this environment's actual core count.
-const THREAD_COUNTS: [usize; 4] = [1, 4, 24, 48];
+/// Thread counts swept — see module docs for why these match `baileyai`'s
+/// real core count rather than reusing an earlier environment's list.
+const THREAD_COUNTS: [usize; 4] = [1, 4, 32, 64];
 /// Operations each worker thread performs per (variant, size, ratio,
 /// thread-count) case — fixed regardless of thread count, so higher
 /// thread counts do proportionally more total work, which is what "does
@@ -148,9 +152,9 @@ fn main() {
         .unwrap_or(0);
     println!("std::thread::available_parallelism() reports: {available_parallelism}");
     println!(
-        "(thread counts below are swept at 1/4/24/48 — 24 is this machine's \
+        "(thread counts below are swept at 1/4/32/64 — 32 is this machine's \
          reported core count, so that row and the 4-thread row are genuine, \
-         non-oversubscribed parallelism; the 48-thread row is deliberate \
+         non-oversubscribed parallelism; the 64-thread row is deliberate \
          oversubscription (2x cores); see RESULTS.md's ## Concurrency section \
          for how to read them)"
     );
