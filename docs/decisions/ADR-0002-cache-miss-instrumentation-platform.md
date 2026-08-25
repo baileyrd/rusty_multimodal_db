@@ -124,7 +124,9 @@ as available for this purpose.
   cache-miss numbers this hypothesis most needs are deferred to a
   follow-up run on hardware this session doesn't have access to. This is
   flagged explicitly in `RESULTS.md`'s open questions rather than
-  presented as a completed measurement.
+  presented as a completed measurement. **Resolved**: obtained on
+  `baileyai` via PR #3 — see the "Validation and revisit triggers"
+  update below and `RESULTS.md`'s cache-miss section.
 - No Windows-native cache-miss path exists, so the owner's primary dev
   machine can't self-serve this measurement without either using
   `baileyai` or WSL2 (which the owner has already moved away from) or a
@@ -135,9 +137,17 @@ as available for this purpose.
 - Validated by: `cargo bench --features perf-events --bench cache_events`
   succeeding and reporting real (non-`<not supported>`) counter values
   when run on `baileyai` or equivalent bare-metal Linux.
+  **Done**: run on `baileyai` (PR #3, `fe59233` → merge commit `ec67ba3`)
+  — real hardware counters, all four backends, all four workloads. One
+  operational note for future runs on the same box: `perf_event_paranoid`
+  was `2` by default, which fails every counter with a `PermissionDenied`
+  error; `sudo sysctl -w kernel.perf_event_paranoid=1` (a session-only,
+  non-persisted write) was sufficient. Results and the `scan_ages`
+  finding they resolved are in `RESULTS.md`'s cache-miss section.
 - Revisit if: the owner wants Windows-native counters badly enough to
   justify the ETW investigation this ADR declined to do now.
 - Revisit if: `baileyai` also turns out not to expose PMU access (e.g. if
   it's itself virtualized) — in that case the cache-miss question would
   need a different resolution and should come back to this ADR rather
-  than being silently dropped again.
+  than being silently dropped again. **Did not occur** — `baileyai` had
+  working PMU access once `perf_event_paranoid` was relaxed.
