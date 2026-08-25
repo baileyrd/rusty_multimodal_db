@@ -41,17 +41,22 @@
 //! that's exactly the kind of thing `RESULTS.md`'s open questions exist to
 //! flag for a 1M follow-up.
 //!
-//! # Thread counts: 1/4/8/16, whatever this machine's core count is
+//! # Thread counts: 1/4/24/48, picked for this machine's real core count
 //!
-//! These counts are used exactly as given, not scaled down to match this
-//! environment's core count — `std::thread::available_parallelism()` is
-//! reported below and in `RESULTS.md` precisely so the numbers can be read
-//! correctly: on a machine with fewer than 8/16 real cores, those rows
-//! measure genuine *oversubscription* (more runnable threads than
-//! hardware can run at once), which is itself an informative, honestly
-//! labeled data point about how gracefully each variant degrades under
-//! contention it can't actually parallelize away — not a mistake to
-//! correct for.
+//! The original container run swept 1/4/8/16 unconditionally on a 4-core
+//! container, so 8 and 16 were honest but oversubscribed data points, not
+//! genuine added parallelism. This machine (the owner's Windows dev
+//! machine, not the container) reports 24 logical processors via both
+//! `std::thread::available_parallelism()` and `nproc`/WMIC (12 physical
+//! cores, hyperthreaded) — so the swept counts were changed to match: `1`
+//! (serial baseline), `4` (kept, specifically so it's directly comparable
+//! to the container's own non-oversubscribed 4-thread row), `24` (this
+//! machine's actual core count — the first *genuinely* non-oversubscribed
+//! high-thread-count data point either environment has produced), and `48`
+//! (2x cores, meaningfully past it, on purpose). 8/16 are dropped here
+//! since they'd land in the middle of real headroom on this machine, not
+//! at or past it — they no longer test the thing they tested on the
+//! container.
 
 use rusty_multimodal_db::bench_support::{
     build_dataset, Dataset, MixedWorkloadConfig, MixedWorkloadDriver, MIXED_WRITE_RATIOS, SEED,
@@ -67,7 +72,7 @@ use std::time::{Duration, Instant};
 const SIZES: [usize; 2] = [1_000, 100_000];
 /// Thread counts swept — see module docs for why these aren't scaled down
 /// to this environment's actual core count.
-const THREAD_COUNTS: [usize; 4] = [1, 4, 8, 16];
+const THREAD_COUNTS: [usize; 4] = [1, 4, 24, 48];
 /// Operations each worker thread performs per (variant, size, ratio,
 /// thread-count) case — fixed regardless of thread count, so higher
 /// thread counts do proportionally more total work, which is what "does
@@ -143,9 +148,11 @@ fn main() {
         .unwrap_or(0);
     println!("std::thread::available_parallelism() reports: {available_parallelism}");
     println!(
-        "(thread counts below are swept at 1/4/8/16 regardless of this figure — \
-         rows above it measure oversubscription, not additional real parallelism; \
-         see RESULTS.md's ## Concurrency section for how to read them)"
+        "(thread counts below are swept at 1/4/24/48 — 24 is this machine's \
+         reported core count, so that row and the 4-thread row are genuine, \
+         non-oversubscribed parallelism; the 48-thread row is deliberate \
+         oversubscription (2x cores); see RESULTS.md's ## Concurrency section \
+         for how to read them)"
     );
     println!();
     println!(

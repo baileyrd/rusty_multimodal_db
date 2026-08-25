@@ -2,7 +2,7 @@
 
 This is the decision document per `docs/specifications/storage/STORAGE-004-results-writeup.md` (extended by `STORAGE-005` for the fourth backend, by `STORAGE-006` for the `## Graph traversal` section, by `STORAGE-007` for the `## Mixed read/write workload` section, by `STORAGE-008`/`STORAGE-009` for the `## Durability` section, and by `STORAGE-010` for the `## Concurrency` section below). It reports real numbers from an actual `cargo bench` run, structured workload × dataset size × backend, with a **verdict per workload** — not one overall winner. See `docs/charter/CHARTER.md` for the hypothesis under test, `docs/decisions/ADR-0001-three-backend-empirical-comparison.md` for why the first three backends are compared this way, `docs/decisions/ADR-0003-eager-write-through-cache-invalidation.md` for the fourth, `docs/decisions/ADR-0004-one-hop-neighbors-trait-method.md` for the graph-traversal trait design, `docs/decisions/ADR-0005-wal-snapshot-hybrid-durability.md`/`ADR-0006-tier-2-durability-architectures.md` for the durability designs, and `docs/decisions/ADR-0007-concurrency-strategies.md` for the concurrency designs.
 
-**Revision note**: the first pass of this document (three backends: AoS, SoA, `CanonicalStore`) found `CanonicalStore` losing `scan_ages` to *both* baselines. A second pass added a fourth backend, `CanonicalCachedStore` — `CanonicalStore`'s `HashMap` as source of truth, plus a materialized, packed `Vec<u32>` age cache kept in sync by eager write-through on every `update_age` — built specifically to close that gap. The `get`/`update_age`/`same_breed` sections below are unchanged in structure from that pass and **report the closed row/column verdict — not re-litigated by later revisions**. A third pass added the `## Graph traversal` section, testing the previously-untested graph leg of the original hypothesis with a real edge relationship (`littermate_of`) rather than `same_breed`'s shared-attribute stand-in. A fourth pass added the `## Mixed read/write workload` section: every workload above isolates one call type, so this tests whether `CanonicalCachedStore`'s known write-through tax changes the recommendation once reads and writes are actually blended together, across a 10%/50%/90% write-ratio sweep. It doesn't (see that section for the numbers) — no other section was altered. This revision adds the `## Durability` section: everything above this point is purely in-memory, so this asks what it costs to make `CanonicalCachedStore` (only — see that section for why) durable across a process restart, across eight prototyped designs. No other section is altered. A sixth pass adds the `## Concurrency` section: everything above (including `## Durability`) assumes single-threaded access — this asks what happens once real reader/writer threads contend for one shared `CanonicalCachedStore` instance, across four concurrency strategies, deliberately *not* paired with any specific durability variant (see that section for why). No other section is altered.
+**Revision note**: the first pass of this document (three backends: AoS, SoA, `CanonicalStore`) found `CanonicalStore` losing `scan_ages` to *both* baselines. A second pass added a fourth backend, `CanonicalCachedStore` — `CanonicalStore`'s `HashMap` as source of truth, plus a materialized, packed `Vec<u32>` age cache kept in sync by eager write-through on every `update_age` — built specifically to close that gap. The `get`/`update_age`/`same_breed` sections below are unchanged in structure from that pass and **report the closed row/column verdict — not re-litigated by later revisions**. A third pass added the `## Graph traversal` section, testing the previously-untested graph leg of the original hypothesis with a real edge relationship (`littermate_of`) rather than `same_breed`'s shared-attribute stand-in. A fourth pass added the `## Mixed read/write workload` section: every workload above isolates one call type, so this tests whether `CanonicalCachedStore`'s known write-through tax changes the recommendation once reads and writes are actually blended together, across a 10%/50%/90% write-ratio sweep. It doesn't (see that section for the numbers) — no other section was altered. This revision adds the `## Durability` section: everything above this point is purely in-memory, so this asks what it costs to make `CanonicalCachedStore` (only — see that section for why) durable across a process restart, across eight prototyped designs. No other section is altered. A sixth pass adds the `## Concurrency` section: everything above (including `## Durability`) assumes single-threaded access — this asks what happens once real reader/writer threads contend for one shared `CanonicalCachedStore` instance, across four concurrency strategies, deliberately *not* paired with any specific durability variant (see that section for why). No other section is altered. A seventh pass re-runs `## Concurrency`'s throughput sweep on real multi-core hardware — the original run's 8/16-thread rows were honest but oversubscribed on a 4-core container; this asks whether sharded locking's advantage and global `RwLock`'s near-universal win actually hold up once threads genuinely run in parallel rather than time-slicing. See that section's new subsection for the numbers, the machine substitution (not `baileyai` — see why there), and what changed. No other section is altered.
 
 ## Methodology
 
@@ -408,15 +408,103 @@ Criterion's `b.iter` model times repeated calls to one closure on one thread —
 - **`actor` is bounded by its single worker thread's own serial processing rate, and that ceiling doesn't move with more client threads past about 4.** At 1K it plateaus around 95,000–104,000 ops/sec from 4 threads onward regardless of write ratio; at 100K it plateaus around 64,000–96,000 ops/sec (higher at higher write ratios, since scan_ages is rarer). Going from 1 to 4 threads gains roughly 2–2.7× at both sizes — enough concurrent requesters to keep the actor's channel pipeline full, closing the gap between "wait a full round-trip per call" (the 1-thread case) and "the actor is never idle between requests." Adding threads beyond that buys nothing: the ceiling is the one thread's own throughput, not the number of clients waiting on it.
 - **8→16 threads is flat or noisy for every variant at both sizes** — the expected signature of oversubscription on a 4-core machine: once thread count exceeds real cores by 2×, adding more contending threads doesn't create more real parallelism, just more context-switching overhead competing for the same 4 cores.
 
+### Real multi-core follow-up: the owner's Windows dev machine, not `baileyai`
+
+**Machine substitution, disclosed up front.** The task behind this subsection asked for a re-run on `baileyai` specifically (the bare-metal Fedora box named in the cache-miss section above, 32 threads). `baileyai` was not reachable from this session — `ssh baileyai` and the two configured aliases that resolve to it (`ai`/`tail_ai`, both `192.168.50.148`/`100.83.168.90:30556` via `~/.ssh/beast`) both failed (connection refused, then a publickey rejection), and the user redirected this pass to run locally instead of debugging remote access. So the numbers below are from **the owner's Windows dev machine** (`C:\dev\rusty_multimodal_db`'s own host) — genuinely more cores than the 4-core container, just not `baileyai`. Re-running this same sweep on `baileyai` once it's reachable is a natural, cheap follow-up (see Open Questions) — the point of this pass (real vs. oversubscribed parallelism) doesn't depend on which real machine supplies the extra cores.
+
+**Core count, double-checked the same way the cache-miss section checked `baileyai`'s.** `std::thread::available_parallelism()` (printed by `benches/concurrency.rs` itself) reports **24**; `nproc` and `wmic cpu get NumberOfCores,NumberOfLogicalProcessors` independently agree (**12 physical cores, 24 logical** — AMD Ryzen 9 7900X3D, SMT enabled). No environment setup was needed to get this (unlike the cache-miss section's `perf_event_paranoid` sysctl change) — plain `cargo build --release --bench concurrency` and running the resulting binary was sufficient, so there's nothing to revert.
+
+**Thread counts changed from the container's `[1, 4, 8, 16]` to `[1, 4, 24, 48]`.** Reusing 8/16 on a 24-core machine would've just added two more comfortably-under-subscribed rows, not the "real non-oversubscribed data point" this pass exists to get. `4` is kept as-is specifically so it's directly comparable to the container's own non-oversubscribed 4-thread row; `24` is this machine's actual core count — the first genuinely non-oversubscribed *high*-thread-count row either environment has produced; `48` is 2× cores, meaningfully past it, on purpose. This is a one-line constant change in `benches/concurrency.rs` (`THREAD_COUNTS`), kept in the tree as this pass's contribution — not reverted, since sweeping the right thread counts for the machine actually running the benchmark is the deliverable, not a throwaway probe. Same sizes (1K/100K) and write ratios (10/50/90%) as the container run — unchanged, per the task's scope.
+
+**1,000 records**
+
+*10% writes (45% get / 45% scan_ages)*
+
+| Variant | 1 thread | 4 threads | 24 threads (cores) | 48 threads (2× cores) |
+|---|---:|---:|---:|---:|
+| global_rwlock | 11,071,745 | **14,201,520** | 3,326,897 | 3,769,599 |
+| sharded | 1,353,510 | 2,695,127 | **4,224,363** | **4,312,444** |
+| dashmap | 154,758 | 533,368 | 1,265,061 | 1,272,693 |
+| actor | 421,622 | 2,876,953 | 464,106 | 425,050 |
+
+*50% writes (25% get / 25% scan_ages)*
+
+| Variant | 1 thread | 4 threads | 24 threads (cores) | 48 threads (2× cores) |
+|---|---:|---:|---:|---:|
+| global_rwlock | **18,793,460** | 6,933,611 | 1,872,488 | 2,204,498 |
+| sharded | 2,397,104 | 6,198,475 | **6,760,525** | **6,846,667** |
+| dashmap | 287,655 | 1,059,451 | 2,185,291 | 2,177,642 |
+| actor | 547,079 | 3,042,658 | 437,411 | 437,776 |
+
+*90% writes (5% get / 5% scan_ages)*
+
+| Variant | 1 thread | 4 threads | 24 threads (cores) | 48 threads (2× cores) |
+|---|---:|---:|---:|---:|
+| global_rwlock | **25,025,025** | 6,814,891 | 2,042,383 | 2,116,585 |
+| sharded | 10,240,655 | **13,044,187** | **19,361,709** | **21,320,825** |
+| dashmap | 1,463,700 | 4,983,741 | 9,135,375 | 9,358,166 |
+| actor | 281,867 | 3,650,468 | 385,857 | 402,520 |
+
+**100,000 records**
+
+*10% writes (45% get / 45% scan_ages)*
+
+| Variant | 1 thread | 4 threads | 24 threads (cores) | 48 threads (2× cores) |
+|---|---:|---:|---:|---:|
+| global_rwlock | **379,635** | **141,380** | **97,739** | **109,745** |
+| sharded | 12,450 | 29,955 | 51,038 | 60,149 |
+| dashmap | 2,028 | 7,754 | 26,760 | 30,606 |
+| actor | 70,591 | 169,513 | 166,579 | 163,717 |
+
+*50% writes (25% get / 25% scan_ages)*
+
+| Variant | 1 thread | 4 threads | 24 threads (cores) | 48 threads (2× cores) |
+|---|---:|---:|---:|---:|
+| global_rwlock | **694,102** | **353,152** | **246,611** | 144,217 |
+| sharded | 23,665 | 62,438 | 112,819 | **106,379** |
+| dashmap | 3,842 | 15,010 | 52,614 | 56,572 |
+| actor | 91,833 | 258,223 | 231,800 | 224,759 |
+
+*90% writes (5% get / 5% scan_ages)*
+
+| Variant | 1 thread | 4 threads | 24 threads (cores) | 48 threads (2× cores) |
+|---|---:|---:|---:|---:|
+| global_rwlock | **3,126,954** | **1,538,426** | **867,998** | **607,235** |
+| sharded | 112,067 | 256,677 | 468,036 | 507,808 |
+| dashmap | 20,246 | 70,039 | 268,843 | 283,435 |
+| actor | 307,511 | 751,017 | 386,523 | 371,338 |
+
+**Directly answering the task's core question: sharded's advantage widens sharply with real cores, and shows up in configurations where it never won on the container at all.**
+
+- **At 1K/90% writes — the container's one sharded win — the margin roughly quadruples.** Container: sharded beats global_rwlock by 2.4–2.9× across its non-1-thread rows (4/8/16 threads). This machine: 9.5× at 24 threads (19,361,709 vs. 2,042,383), 10.1× at 48 threads (21,320,825 vs. 2,116,585) — genuinely more concurrent writers hitting genuinely more independent shards, not just more time-sliced ones.
+- **New crossovers the container never showed, at 1K/10% and 1K/50% writes.** On the container, global `RwLock` won *every* thread count at both ratios — sharding's thesis never paid off there. Here, global_rwlock still wins at 1 and 4 threads (real single/few-core throughput favors one lock over 64), but **sharded overtakes it at 24 and 48 threads at every write ratio tested** — 1.27× ahead at 10% writes/24 threads, 3.6× ahead at 50% writes/24 threads. The container's 4-core ceiling never let enough genuinely-simultaneous writers pile up on the one global lock to make sharding's per-shard independence pay off outside the 90%-write case; 24 real cores does.
+- **At 1K/10%/4 threads, global_rwlock's throughput *rises* above its 1-thread number (11.07M → 14.20M)** — something that never happens anywhere in the container's numbers, where global_rwlock only ever degrades as thread count rises (see the container verdict above). With genuinely parallel cores and a 90%-read mix, `std::sync::RwLock`'s shared-read path can actually execute reads concurrently across real cores before write-lock contention (the remaining 10%) starts to dominate — a real parallelism gain the container's 4 cores, mostly consumed by base OS/container overhead, couldn't surface.
+
+**Global `RwLock`'s 100K win holds at every thread count tested — but the margin collapses toward parity as real core count rises, in a way the container's oversubscribed 8/16 rows never hinted at.**
+
+| Write ratio | Container's tightest margin (any of 4/8/16 threads) | This machine's margin at 24 threads | This machine's margin at 48 threads |
+|---|---:|---:|---:|
+| 10% | 7.4× (16 threads) | 1.9× | 1.8× |
+| 50% | 4.1× (16 threads) | 2.2× | 1.4× |
+| 90% | 3.6× (16 threads) | 1.9× | **1.2×** |
+
+Global_rwlock never actually loses a 100K cell in this sweep — the headline "wins every single cell" verdict from the container run still technically holds — but at 90% writes/48 threads the margin is down to 1.2×, close enough to parity that a slightly larger real-core machine (the original `baileyai` target, 32 threads / 16 cores, or higher) plausibly flips at least one cell. The mechanism the container's own verdict already identified — `scan_ages`'s packed-`Vec<u32>` clone beating sharded's 64-separate-`HashMap` drain regardless of lock contention — is still real and still the reason global_rwlock doesn't collapse outright; what's new here is that *lock contention itself* is worse under genuine parallelism than the container's oversubscription-only numbers implied, so the two effects are now much closer to canceling out.
+
+**A shape the container's flat "actor plateaus past 4 threads" story didn't predict: actor's throughput can fall well below its 4-thread peak, and even below its 1-thread number, once real cores let many client threads genuinely race the channel at once.** At 1K/90% writes: 1 thread → 281,867; 4 threads → 3,650,468 (13× jump, itself bigger than any container jump); 24 threads → 385,857; 48 threads → 402,520 — a collapse back to near the 1-thread number after the 4-thread peak, not the container's flat plateau. Plausible mechanism, not verified further this pass: with 4 real cores' worth of client threads keeping the single actor's `mpsc` channel saturated, the pipeline stays full and throughput peaks; past that, dozens of threads genuinely contending (not time-slicing) to send on the same channel and block on their own reply channel adds real cross-core synchronization and scheduling cost the container's oversubscription (all threads sharing 4 real cores anyway) never exposed. The 100K rows show the same shape but far more mildly (24/48-thread numbers dip below the 4-thread peak but stay above the 1-thread number) — consistent with per-op cost being large enough at 100K that channel overhead is a smaller fraction of it.
+
+- **`dashmap` still never wins a single configuration** — same as the container, across every size/ratio/thread-count cell in this sweep too.
+
 ### Recommendation
 
-**No single variant is "the" answer — situational, matching the pattern `## Durability` already established (a verdict per configuration, not one overall winner).**
+**No single variant is "the" answer — situational, matching the pattern `## Durability` already established (a verdict per configuration, not one overall winner). The bullets below are the container-run recommendation; the real multi-core follow-up above sharpens two of them — see the callout after this list.**
 
 - **Default choice for most shapes tested here: global `RwLock`.** It's the fastest or clearly-fastest option in 5 of the 6 (size × write-ratio) configurations swept, at every thread count within each — including every 100K configuration, where its single lock's overhead turns out to matter far less than `CanonicalCachedStore`'s already-efficient packed data structures. Its one real weakness — aggregate throughput actively degrading, not just plateauing, as thread count rises — is worst specifically under sustained high-thread-count, write-heavy contention on a small dataset.
 - **Sharded locking, specifically for that one weak spot**: a small dataset (this pass's 1,000-record case) under a write-heavy load (90%) with genuine multi-thread contention (≥4 threads) is the one tested configuration where sharding's thesis pays off, 2.4–2.7× ahead of global_rwlock. It is not a general win — at every other tested configuration, including every 100K case, it loses to global_rwlock, because sharding a `scan_ages`-heavy workload trades lock contention (which it fixes) for scan efficiency (which it loses, by giving up the packed-vector layout).
 - **`dashmap`, as a "least code" tradeoff, not a throughput one**: it never wins a benchmark configuration in this sweep, so it isn't recommended when raw aggregate throughput is the deciding factor — but it is the only Tier 1 variant that required writing essentially no synchronization logic at all (see `dashmap_store.rs`), a real engineering-cost argument `## Durability`'s `redb` recommendation made in a similar spirit, just not a performance one here.
 - **Actor / single-writer-thread**: recommended only when the access pattern genuinely fits one serial owner (e.g. a design that wants ordering guarantees, or an existing single-threaded store that can't be made internally thread-safe) and target aggregate throughput is comfortably under this pass's measured serial ceiling (roughly 65,000–105,000 ops/sec, depending on write ratio and dataset size). It does not scale by adding more actor threads — that would mean sharding the *actors* themselves, which converges back toward the sharded-locking design above.
 - **Concurrency + durability, combined, remains the natural next round** — every variant above is purely in-memory; how these numbers change once each is paired with a real durability design (e.g. a sharded store where each shard also owns its own WAL) is unmeasured and out of scope for this pass, by design (see the scope note at the top of this section).
+
+**What the real multi-core follow-up changes about this recommendation.** "Global `RwLock` by default, sharded only at 1K/90%-writes/high-thread-count" was the container's honest read of its own data, but it's a 4-core read. On real cores: sharded is competitive or ahead at 1K across *all three* write ratios once thread count reaches the machine's real core count, not just at 90%, and global_rwlock's 100K lead — while it never actually loses a tested cell — shrinks to as little as 1.2× at high write ratios and high real thread counts, not the comfortable 3.6–8.9× the container's oversubscribed rows suggested. **The practical recommendation for a small (~1K-record), high-thread-count, write-heavy deployment on genuinely many-core hardware should lean toward sharded locking, not global `RwLock`** — the opposite of the container-only default above for that specific shape. For 100K-record, read-or-mixed workloads, global `RwLock` remains the recommended default — it still wins every tested cell — but the margin is thin enough at high real core counts that this is worth re-measuring on hardware with meaningfully more cores than either environment tested here (32+) before treating it as settled at larger core counts.
 
 ## Open questions
 
@@ -442,3 +530,5 @@ Criterion's `b.iter` model times repeated calls to one closure on one thread —
 - **Concurrency benchmark dataset sizes stop at 100,000, not 1,000,000**: new this pass — dropped specifically to keep the new four-axis (size × ratio × thread-count × variant) sweep tractable in one pass (see `benches/concurrency.rs`'s own module docs). Whether global_rwlock's structural advantage over sharded/dashmap at 100K (driven by `scan_ages`'s packed-vector-vs.-64-shards cost, not lock contention) holds, narrows, or reverses at 1M is unmeasured.
 - **Actor variant scaled beyond one owning thread**: new this pass — `ActorStore`'s measured throughput ceiling (roughly 65,000–105,000 ops/sec) is the cost of routing every operation through exactly one serial owner. Whether sharding the actors themselves (N owning threads, each responsible for a disjoint id range) would recover sharded-locking-like scaling while keeping the actor pattern's structural simplicity is a natural extension, not attempted this pass.
 - **Bursty/skewed access patterns for the concurrency stress test and benchmark alike**: new this pass — both the correctness stress test (20 contended ids) and the throughput benchmark (`MixedWorkloadDriver`'s uniform-random target selection over a 200-id rotation pool) spread contention evenly. A workload with a genuine hot key (one id hit far more often than the rest) could show a different, more adversarial contention story for the lock-based variants specifically — unmeasured.
+- **The real multi-core follow-up ran on the owner's Windows dev machine (24 logical processors), not `baileyai`**: new this pass — `baileyai` (the bare-metal, 32-thread machine the cache-miss section already used) was unreachable from this session (`ssh baileyai`/`ai`/`tail_ai` all failed — connection refused, then a publickey rejection), so the real-multi-core concurrency numbers above are from a different, also-genuinely-multi-core machine at the user's redirection. The core finding (sharded's advantage widens with real parallelism; global_rwlock's 100K margin shrinks toward parity) is unlikely to be an artifact of *which* real machine supplied the cores, but re-running `benches/concurrency.rs` on `baileyai` once it's reachable — 32 threads / 16 cores, even more headroom past this pass's 24 — would confirm directly, and is specifically worth doing for the 100K/90%-writes cell, which was down to a 1.2× global_rwlock margin at 48 threads here and is the most likely cell to actually flip with a few more real cores.
+- **Actor's throughput collapse at real high thread counts (1K, 24/48 threads) vs. the container's flat plateau**: new this pass — plausible mechanism named (real cross-core contention on the single `mpsc` channel and its per-call reply channel, once enough client threads are genuinely running in parallel rather than time-slicing on 4 cores) but not verified further (e.g. by profiling where the actor-side thread or the channel itself becomes the bottleneck at 24+ concurrent senders). The 100K rows show the same shape far more mildly, consistent with per-op cost dominating channel overhead at that size — also not verified beyond the observed numbers.
