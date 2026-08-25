@@ -30,6 +30,10 @@ required-features = ["perf-events"]
 name = "durability"
 harness = false
 
+[[bench]]
+name = "concurrency"
+harness = false
+
 [dependencies]
 # UUID type + deterministic construction from seeded random bytes (Builder::from_random_bytes
 # needs no extra feature — Uuid::new_v4()'s OS-randomness feature is deliberately not enabled,
@@ -61,6 +65,12 @@ memmap2 = "0.9"
 # younger but built around explicit ACID transactions from the start, with no equivalent
 # caveat, and is pure Rust with no C dependency to build/vendor.
 redb = "2"
+# New as of the concurrency work (STORAGE-010): a sharded, lock-free-for-most-operations
+# concurrent hash map. Chosen specifically because variant 3 exists to test "how far do you get
+# with an off-the-shelf concurrent map instead of hand-rolling locking" — writing that variant
+# without a real concurrent map would just be a worse version of variant 1 or 2. The de facto
+# standard crate for this in the Rust ecosystem.
+dashmap = "6"
 
 [dependencies.rand]
 # Seeded, reproducible RNG for dataset generation (StdRng::seed_from_u64) and for benchmark

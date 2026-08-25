@@ -17,6 +17,7 @@ Status vocabulary: `Proposed`, `Draft`, `Accepted`, `In Progress`,
 | `MIXED-WORKLOAD` | `MixedWorkloadDriver` (blended `get`/`update_age`/`scan_ages`, reusing `RoundRobin`); `mixed_workload_write{10,50,90}` benchmarks; `RESULTS.md`'s `## Mixed read/write workload` section, directly answering whether `CanonicalCachedStore` ever loses to `CanonicalStore`/`SoaStore` at any tested write ratio | `GRAPH-TRAVERSAL` | `STORAGE-007` | `cargo test`/`cargo bench` green for all 36 mixed-workload cases; `RESULTS.md` reports a verdict per (write ratio × size) | Implemented | follow-on PR |
 | `DURABILITY-TIER1` | `CanonicalCachedStore`-only durability, five variants (WAL fsync, WAL buffered, snapshot rebuild, snapshot save-as-is, hybrid snapshot+WAL), built around a new shared `CanonicalCachedState` core; ADR-0005; `benches/durability.rs`'s per-write/checkpoint/load suite; `RESULTS.md`'s `## Durability` section | `MIXED-WORKLOAD` | `STORAGE-008` | `cargo test`/`cargo bench --bench durability` green for all 5 Tier 1 variants; `RESULTS.md` reports per-configuration numbers, the 1,000-write recoverability comparison, and an explicit recommendation | Implemented | follow-on PR |
 | `DURABILITY-TIER2` | Three alternate durability architectures for `CanonicalCachedStore` (mmap-backed ages, LSM-tree-style with no compaction, `redb`-backed embedded engine), each scoped to the mutable `age` field only; ADR-0006; `RESULTS.md`'s `## Durability` section extended to cover all eight variants | `DURABILITY-TIER1` | `STORAGE-009` | `cargo test`/`cargo bench --bench durability` green for all 3 Tier 2 variants; `RESULTS.md` reports per-configuration numbers with the same rigor as Tier 1 | Implemented | follow-on PR |
+| `CONCURRENCY-PROTOTYPES` | Four concurrent access strategies for `CanonicalCachedStore` (global `RwLock`, sharded locking, `dashmap`, actor/single-writer-thread), a new `ConcurrentStore` trait, a linearizability-style stress test, and a custom multi-threaded throughput harness; ADR-0007; `RESULTS.md`'s `## Concurrency` section | `DURABILITY-TIER2` | `STORAGE-010` | `cargo test` green for all four variants' flagship stress tests (16 threads × 2,000 iterations each, no lost updates/torn reads); `cargo bench --bench concurrency` completes the full size×ratio×thread-count×variant sweep; `RESULTS.md` reports a verdict per (size × write-ratio) configuration and an explicit recommendation | Implemented | follow-on PR |
 
 ## Sequencing notes
 
@@ -63,6 +64,19 @@ not held to the same production-hardening bar. Both apply to
 nobody would deploy" reasoning `HYBRID-BACKEND` established for choosing
 which backend gets new capability.
 
+`CONCURRENCY-PROTOTYPES` follows `DURABILITY-TIER1`/`DURABILITY-TIER2` as
+the next previously-out-of-scope axis: every workload up to and including
+durability assumes single-threaded access, and reader/writer safety was
+the natural next open question once `CanonicalCachedStore` had both a
+recommendation and a durability story. Deliberately kept as one unit,
+unlike the durability split, because the task's own two-tier rigor split
+(three full-rigor Tier 1 variants, one lighter Tier 2 variant) fit inside
+a single roadmap entry without needing a second one — and deliberately
+*not* combined with `DURABILITY-TIER1`/`DURABILITY-TIER2` into a
+"concurrent durable store" unit, since the motivating task named that
+combination as a distinct, later follow-up round rather than part of this
+one (see ADR-0007's Context).
+
 ## Out of scope for this roadmap (see architecture doc "where this can go
 next")
 
@@ -94,6 +108,20 @@ next")
   see ADR-0005's Consequences and revisit triggers.
 - Batching multiple writes into one `redb` transaction — `RedbStore`
   commits one transaction per `update_age` call; see ADR-0006.
+- A concurrency strategy paired with a specific durability variant (e.g.
+  a sharded store where each shard also owns its own WAL) — named
+  explicitly by the motivating task as a distinct future round, not part
+  of `CONCURRENCY-PROTOTYPES`; see ADR-0007's Context.
+- `ShardedStore`'s shard count swept against alternatives to its fixed
+  `SHARD_COUNT = 64` — see `RESULTS.md`'s concurrency open questions.
+- Scaling `ActorStore` beyond one owning thread (e.g. sharding the actors
+  themselves) — its measured throughput ceiling is a structural property
+  of the single-writer-thread pattern this pass didn't attempt to lift;
+  see ADR-0007's revisit triggers.
+- `same_breed`/`neighbors` support for the sharded-locking and `dashmap`
+  concurrency variants — both cover only `get`/`update_age`/`scan_ages`,
+  the `ConcurrentStore` trait's scope; see ADR-0007's Considered options
+  and `STORAGE-010`'s Non-goals.
 
 These may become future roadmap units if `RESULTS.md`'s open questions
 motivate them, but are not committed to now.

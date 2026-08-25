@@ -11,6 +11,7 @@
 //! together is workload logic, not something a backend needs to know how
 //! to do.
 
+use crate::concurrency::{ConcurrencyError, ConcurrentStore};
 use crate::generator::{generate, generate_littermates, GeneratorConfig};
 use crate::record::DogRecord;
 use crate::store::{DogStore, StoreError};
@@ -245,6 +246,43 @@ impl MixedWorkloadDriver {
             }
             MixedOp::ScanAges => {
                 black_box(store.scan_ages());
+            }
+        }
+        Ok(())
+    }
+
+    /// Same blended sequence as [`Self::run_one`], driven against a
+    /// [`ConcurrentStore`] (`&S`, shared — e.g. behind an `Arc` across
+    /// threads) instead of a [`DogStore`] (`&mut S`, exclusively owned).
+    /// New method, not a change to `run_one` — the concurrency work
+    /// (`STORAGE-010`) reuses this driver rather than building a second
+    /// workload generator, but every existing `run_one` call site and its
+    /// benchmarks/tests are untouched.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConcurrencyError::Store`] wrapping [`StoreError::NotFound`]
+    /// only if `sample_ids` contains a UUID `store` doesn't have — same
+    /// non-issue as `run_one`'s own doc comment describes, for the same
+    /// reason (`sample_ids` always comes from the same generated dataset
+    /// `store` was built from).
+    pub fn run_one_concurrent<S: ConcurrentStore>(
+        &mut self,
+        store: &S,
+        sample_ids: &[Uuid],
+    ) -> Result<(), ConcurrencyError> {
+        match self.next_op() {
+            MixedOp::Get => {
+                let id = sample_ids[self.cursor.advance()];
+                black_box(store.get(id)?);
+            }
+            MixedOp::UpdateAge => {
+                let id = sample_ids[self.cursor.advance()];
+                self.next_age = self.next_age.wrapping_add(1) % 21;
+                store.update_age(id, self.next_age)?;
+            }
+            MixedOp::ScanAges => {
+                black_box(store.scan_ages()?);
             }
         }
         Ok(())
