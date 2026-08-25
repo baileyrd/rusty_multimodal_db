@@ -5,10 +5,9 @@ storage-design hypothesis before anyone commits engineering time to
 building around it:
 
 > A canonical store, keyed by UUID, can serve as the single source of
-> truth for row-oriented, column-oriented, and (eventually)
-> graph-oriented access — with row/column/graph implemented as **views**
-> over that one canonical store rather than as separate physical copies
-> of the data.
+> truth for row-oriented, column-oriented, and graph-oriented access —
+> with row/column/graph implemented as **views** over that one canonical
+> store rather than as separate physical copies of the data.
 
 It's tested against two conventional baselines, all three behind the same
 `DogStore` trait so results are directly comparable:
@@ -17,7 +16,9 @@ It's tested against two conventional baselines, all three behind the same
 - **SoA** (struct of arrays) — parallel `Vec<Uuid>`/`Vec<String>`/`Vec<u32>`,
   column-oriented.
 - **Canonical** — `HashMap<Uuid, DogRecord>` as the only physical copy,
-  with column-scan and one-hop-lookup access implemented as derived views
+  with column-scan and one-hop-lookup access (both a shared-attribute
+  grouping, `same_breed`, and real edge traversal over a generated
+  `littermate_of` relationship, `neighbors`) implemented as derived views
   over it.
 
 See `docs/charter/CHARTER.md` for the full framing, `docs/decisions/` for

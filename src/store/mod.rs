@@ -3,9 +3,12 @@
 //! See `docs/decisions/ADR-0001-three-backend-empirical-comparison.md` for
 //! why the first three implementations are compared behind one trait,
 //! `docs/decisions/ADR-0003-eager-write-through-cache-invalidation.md` for
-//! the fourth (`CanonicalCachedStore`), and
+//! the fourth (`CanonicalCachedStore`),
+//! `docs/decisions/ADR-0004-one-hop-neighbors-trait-method.md` for why
+//! `neighbors` stops at one hop, and
 //! `docs/specifications/storage/STORAGE-002-dogstore-backends.md` /
-//! `STORAGE-005-canonical-cached-backend.md` for the requirements each
+//! `STORAGE-005-canonical-cached-backend.md` /
+//! `STORAGE-006-littermate-graph-traversal.md` for the requirements each
 //! implementation satisfies.
 
 pub mod aos;
@@ -59,7 +62,24 @@ pub trait DogStore {
     fn update_age(&mut self, id: Uuid, age: u32) -> Result<(), StoreError>;
 
     /// All UUIDs (excluding `id` itself) sharing `id`'s breed. Stands in
-    /// for a one-hop graph-view access pattern. Returns an empty `Vec` if
-    /// `id` is unknown or no other record shares its breed.
+    /// for a one-hop graph-view access pattern over a shared *attribute*,
+    /// not a real edge — see `neighbors` for an actual relationship.
+    /// Returns an empty `Vec` if `id` is unknown or no other record shares
+    /// its breed.
     fn same_breed(&self, id: Uuid) -> Vec<Uuid>;
+
+    /// All UUIDs connected to `id` by a `littermate_of` edge, in either
+    /// direction (the relationship is symmetric — if `a` is a littermate of
+    /// `b`, `b` is a littermate of `a`). Unlike `same_breed`, this is a real
+    /// one-hop graph traversal over a generated edge relationship, not a
+    /// shared-attribute grouping. Returns an empty `Vec` if `id` is unknown
+    /// or has no littermate edges.
+    ///
+    /// Deliberately one-hop only: multi-hop traversal (e.g. "littermates of
+    /// littermates") is built generically on top of repeated `neighbors`
+    /// calls in benchmark/test code (see
+    /// `rusty_multimodal_db::bench_support::two_hop_neighbors`), not as a
+    /// trait method — see
+    /// `docs/decisions/ADR-0004-one-hop-neighbors-trait-method.md`.
+    fn neighbors(&self, id: Uuid) -> Vec<Uuid>;
 }

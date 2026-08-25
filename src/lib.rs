@@ -10,6 +10,6 @@ pub mod generator;
 pub mod record;
 pub mod store;
 
-pub use generator::{generate, GeneratorConfig};
+pub use generator::{generate, generate_littermates, GeneratorConfig};
 pub use record::DogRecord;
 pub use store::{DogStore, StoreError};

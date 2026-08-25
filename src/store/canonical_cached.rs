@@ -19,9 +19,13 @@ use uuid::Uuid;
 /// UUID-canonical backend with a materialized age cache: the `HashMap` is
 /// still the only copy of `breed` and full-record data, but `age` is
 /// additionally held in a packed `Vec<u32>`, kept in sync on every write.
+/// `neighbors` uses the same `littermate_of` adjacency-index pattern as
+/// [`CanonicalStore`](crate::store::CanonicalStore) — this backend doesn't
+/// change that pattern, just inherits it alongside the age cache.
 pub struct CanonicalCachedStore {
     records: HashMap<Uuid, DogRecord>,
     breed_index: HashMap<String, Vec<Uuid>>,
+    adjacency_index: HashMap<Uuid, Vec<Uuid>>,
     /// Packed ages, in the same order as `position_index` assigns.
     age_cache: Vec<u32>,
     /// UUID -> index into `age_cache`, so `update_age` can write through
@@ -30,11 +34,11 @@ pub struct CanonicalCachedStore {
 }
 
 impl CanonicalCachedStore {
-    /// Build a store from generated records: the canonical map and breed
-    /// index (identical to [`CanonicalStore`](crate::store::CanonicalStore)),
-    /// plus a packed age cache and the position index needed to write
-    /// through to it.
-    pub fn new(records: Vec<DogRecord>) -> Self {
+    /// Build a store from generated records and littermate edges: the
+    /// canonical map, breed index, and adjacency index (identical to
+    /// [`CanonicalStore`](crate::store::CanonicalStore)), plus a packed age
+    /// cache and the position index needed to write through to it.
+    pub fn new(records: Vec<DogRecord>, edges: Vec<(Uuid, Uuid)>) -> Self {
         let mut breed_index: HashMap<String, Vec<Uuid>> = HashMap::new();
         let mut age_cache = Vec::with_capacity(records.len());
         let mut position_index = HashMap::with_capacity(records.len());
@@ -48,11 +52,18 @@ impl CanonicalCachedStore {
             position_index.insert(record.id, position);
         }
 
+        let mut adjacency_index: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
+        for (a, b) in edges {
+            adjacency_index.entry(a).or_default().push(b);
+            adjacency_index.entry(b).or_default().push(a);
+        }
+
         let records = records.into_iter().map(|r| (r.id, r)).collect();
 
         Self {
             records,
             breed_index,
+            adjacency_index,
             age_cache,
             position_index,
         }
@@ -60,8 +71,16 @@ impl CanonicalCachedStore {
 }
 
 impl From<Vec<DogRecord>> for CanonicalCachedStore {
+    /// Convenience for workloads that don't exercise `neighbors` — builds
+    /// with no littermate edges.
     fn from(records: Vec<DogRecord>) -> Self {
-        Self::new(records)
+        Self::new(records, Vec::new())
+    }
+}
+
+impl From<(Vec<DogRecord>, Vec<(Uuid, Uuid)>)> for CanonicalCachedStore {
+    fn from((records, edges): (Vec<DogRecord>, Vec<(Uuid, Uuid)>)) -> Self {
+        Self::new(records, edges)
     }
 }
 
@@ -101,6 +120,10 @@ impl DogStore for CanonicalCachedStore {
             None => Vec::new(),
         }
     }
+
+    fn neighbors(&self, id: Uuid) -> Vec<Uuid> {
+        self.adjacency_index.get(&id).cloned().unwrap_or_default()
+    }
 }
 
 #[cfg(test)]
@@ -115,12 +138,18 @@ mod tests {
         ]
     }
 
+    /// One `littermate_of` edge: dog 1 and dog 2 are littermates; dog 3 has
+    /// none.
+    fn edges_sample() -> Vec<(Uuid, Uuid)> {
+        vec![(Uuid::from_u128(1), Uuid::from_u128(2))]
+    }
+
     /// The one bug this backend can introduce that the other three can't:
     /// a stale cache. `scan_ages` must reflect an `update_age` immediately,
     /// with no separate "flush" step. Highest-priority test in this file.
     #[test]
     fn scan_ages_reflects_update_age_immediately() {
-        let mut store = CanonicalCachedStore::new(sample());
+        let mut store = CanonicalCachedStore::new(sample(), Vec::new());
         store.update_age(Uuid::from_u128(1), 99).unwrap();
 
         let ages = store.scan_ages();
@@ -136,14 +165,14 @@ mod tests {
 
     #[test]
     fn get_hit_and_miss() {
-        let store = CanonicalCachedStore::new(sample());
+        let store = CanonicalCachedStore::new(sample(), Vec::new());
         assert_eq!(store.get(Uuid::from_u128(1)).unwrap().breed, "labrador");
         assert_eq!(store.get(Uuid::from_u128(99)), None);
     }
 
     #[test]
     fn scan_ages_returns_every_age() {
-        let store = CanonicalCachedStore::new(sample());
+        let store = CanonicalCachedStore::new(sample(), Vec::new());
         let mut ages = store.scan_ages();
         ages.sort_unstable();
         assert_eq!(ages, vec![2, 3, 5]);
@@ -151,7 +180,7 @@ mod tests {
 
     #[test]
     fn update_age_success_and_not_found() {
-        let mut store = CanonicalCachedStore::new(sample());
+        let mut store = CanonicalCachedStore::new(sample(), Vec::new());
         store.update_age(Uuid::from_u128(1), 10).unwrap();
         assert_eq!(store.get(Uuid::from_u128(1)).unwrap().age, 10);
 
@@ -161,7 +190,7 @@ mod tests {
 
     #[test]
     fn update_age_on_unknown_id_does_not_touch_the_cache() {
-        let mut store = CanonicalCachedStore::new(sample());
+        let mut store = CanonicalCachedStore::new(sample(), Vec::new());
         let before = {
             let mut ages = store.scan_ages();
             ages.sort_unstable();
@@ -180,7 +209,7 @@ mod tests {
 
     #[test]
     fn same_breed_finds_shared_and_excludes_self() {
-        let store = CanonicalCachedStore::new(sample());
+        let store = CanonicalCachedStore::new(sample(), Vec::new());
         let mut result = store.same_breed(Uuid::from_u128(1));
         result.sort();
         assert_eq!(result, vec![Uuid::from_u128(2)]);
@@ -188,13 +217,38 @@ mod tests {
 
     #[test]
     fn same_breed_unique_breed_is_empty() {
-        let store = CanonicalCachedStore::new(sample());
+        let store = CanonicalCachedStore::new(sample(), Vec::new());
         assert!(store.same_breed(Uuid::from_u128(3)).is_empty());
     }
 
     #[test]
     fn same_breed_unknown_id_is_empty() {
-        let store = CanonicalCachedStore::new(sample());
+        let store = CanonicalCachedStore::new(sample(), Vec::new());
         assert!(store.same_breed(Uuid::from_u128(99)).is_empty());
+    }
+
+    #[test]
+    fn neighbors_finds_edge_in_either_direction() {
+        let store = CanonicalCachedStore::new(sample(), edges_sample());
+        assert_eq!(
+            store.neighbors(Uuid::from_u128(1)),
+            vec![Uuid::from_u128(2)]
+        );
+        assert_eq!(
+            store.neighbors(Uuid::from_u128(2)),
+            vec![Uuid::from_u128(1)]
+        );
+    }
+
+    #[test]
+    fn neighbors_no_edges_is_empty() {
+        let store = CanonicalCachedStore::new(sample(), edges_sample());
+        assert!(store.neighbors(Uuid::from_u128(3)).is_empty());
+    }
+
+    #[test]
+    fn neighbors_unknown_id_is_empty() {
+        let store = CanonicalCachedStore::new(sample(), edges_sample());
+        assert!(store.neighbors(Uuid::from_u128(99)).is_empty());
     }
 }

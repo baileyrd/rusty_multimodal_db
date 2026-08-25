@@ -11,9 +11,9 @@ empirically test one hypothesis before anyone commits engineering time to
 building a real storage engine around it:
 
 > A canonical store, keyed by UUID, can serve as the single source of truth
-> for row-oriented, column-oriented, and (eventually) graph-oriented access
-> — with row/column/graph implemented as **views** over that one canonical
-> store rather than as separate physical copies of the data.
+> for row-oriented, column-oriented, and graph-oriented access — with
+> row/column/graph implemented as **views** over that one canonical store
+> rather than as separate physical copies of the data.
 
 The alternative, conventional designs under test alongside it:
 
@@ -30,11 +30,13 @@ audience and no production deployment target.
 
 ## Primary use case
 
-Run the same generated dataset and the same four workloads (point read,
-column scan/aggregate, single-field update, one-hop "same breed" lookup)
-against three backend implementations behind one trait, at three dataset
-sizes, and produce numbers — wall-clock and, where the platform allows,
-cache-miss counts — that support a real decision.
+Run the same generated dataset and the same workloads (point read, column
+scan/aggregate, single-field update, one-hop "same breed" lookup, and —
+added once a real edge relationship existed to traverse — one-hop and
+two-hop `littermate_of` graph traversal) against all backend
+implementations behind one trait, at three dataset sizes, and produce
+numbers — wall-clock and, where the platform allows, cache-miss counts —
+that support a real decision.
 
 ## Product shape
 
@@ -51,9 +53,13 @@ benchmark run.
   fixed at three fields (`id: Uuid`, `breed: String`, `age: u32`) for this
   pass — see ADR-0001 and the "avoid speculative generality" engineering
   constraint.
-- Not implementing real graph traversal, multi-hop queries, or a query
-  language. `same_breed` is a deliberately narrow stand-in for a
-  graph-view access pattern (one-hop lookup via an index).
+- Not implementing a general-purpose graph query language or arbitrary-hop
+  traversal. `same_breed` remains a narrow shared-attribute stand-in, not a
+  real edge; one real edge relationship (`littermate_of`) and one-hop
+  (`DogStore::neighbors`) plus generically-composed two-hop traversal were
+  added as a scoped follow-on once that relationship existed (see
+  `STORAGE-006` and ADR-0004) — still not a general graph engine, multiple
+  relationship types, or N-hop (3+) traversal.
 - Not implementing persistence, durability, transactions, or concurrency
   control. Everything is single-threaded, in-memory, and rebuilt fresh per
   benchmark iteration.
