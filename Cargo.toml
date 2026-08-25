@@ -21,6 +21,11 @@ name = "cache_events"
 harness = false
 required-features = ["perf-events"]
 
+[[bench]]
+name = "scan_ages_crossover"
+harness = false
+required-features = ["perf-events"]
+
 [dependencies]
 # UUID type + deterministic construction from seeded random bytes (Builder::from_random_bytes
 # needs no extra feature — Uuid::new_v4()'s OS-randomness feature is deliberately not enabled,
