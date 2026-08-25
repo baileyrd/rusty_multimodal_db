@@ -116,7 +116,12 @@ fn cache_misses(c: &mut Criterion<Perf>) {
         run_scan_ages::<AosStore>(&mut scan_ages_group, "aos", n, &dataset);
         run_scan_ages::<SoaStore>(&mut scan_ages_group, "soa", n, &dataset);
         run_scan_ages::<CanonicalStore>(&mut scan_ages_group, "canonical", n, &dataset);
-        run_scan_ages::<CanonicalCachedStore>(&mut scan_ages_group, "canonical_cached", n, &dataset);
+        run_scan_ages::<CanonicalCachedStore>(
+            &mut scan_ages_group,
+            "canonical_cached",
+            n,
+            &dataset,
+        );
     }
     scan_ages_group.finish();
 
@@ -168,7 +173,12 @@ fn cache_references(c: &mut Criterion<Perf>) {
         run_scan_ages::<AosStore>(&mut scan_ages_group, "aos", n, &dataset);
         run_scan_ages::<SoaStore>(&mut scan_ages_group, "soa", n, &dataset);
         run_scan_ages::<CanonicalStore>(&mut scan_ages_group, "canonical", n, &dataset);
-        run_scan_ages::<CanonicalCachedStore>(&mut scan_ages_group, "canonical_cached", n, &dataset);
+        run_scan_ages::<CanonicalCachedStore>(
+            &mut scan_ages_group,
+            "canonical_cached",
+            n,
+            &dataset,
+        );
     }
     scan_ages_group.finish();
 
