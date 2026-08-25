@@ -28,7 +28,10 @@
 //! from wall-clock noise. See `RESULTS.md`'s cache-miss section for the
 //! `scan_ages` finding this coverage was specifically added to check.
 //! `neighbors_one_hop`/`neighbors_two_hop` were added alongside the
-//! `littermate_of` graph-traversal feature (`STORAGE-006`).
+//! `littermate_of` graph-traversal feature (`STORAGE-006`). Also covers a
+//! blended `mixed_workload_write{10,50,90}` group per write ratio (see
+//! `MixedWorkloadDriver` in `src/bench_support.rs` and `STORAGE-007`),
+//! each again spanning all four backends and three sizes.
 
 #![cfg(target_os = "linux")]
 
@@ -39,7 +42,8 @@ use criterion_perf_events::Perf;
 use perfcnt::linux::HardwareEventType as Hardware;
 use perfcnt::linux::PerfCounterBuilderLinux as Builder;
 use rusty_multimodal_db::bench_support::{
-    build_dataset, two_hop_neighbors, Dataset, RoundRobin, SIZES,
+    build_dataset, two_hop_neighbors, Dataset, MixedWorkloadConfig, MixedWorkloadDriver,
+    RoundRobin, MIXED_WRITE_RATIOS, SEED, SIZES,
 };
 use rusty_multimodal_db::store::{AosStore, CanonicalCachedStore, CanonicalStore, SoaStore};
 use rusty_multimodal_db::{DogRecord, DogStore};
@@ -143,6 +147,26 @@ fn run_neighbors_two_hop<S>(
     });
 }
 
+/// Mirrors `benches/workloads.rs::run_mixed_workload` — see
+/// `MixedWorkloadDriver`'s docs for the blended-sequence design.
+fn run_mixed_workload<S>(
+    group: &mut BenchmarkGroup<'_, Perf>,
+    name: &str,
+    n: usize,
+    dataset: &Dataset,
+    config: MixedWorkloadConfig,
+) where
+    S: DogStore + From<Vec<DogRecord>>,
+{
+    let mut store = S::from(dataset.records.clone());
+    let mut driver = MixedWorkloadDriver::new(config, SEED, dataset.sample_ids.len());
+    group.bench_with_input(BenchmarkId::new(name, n), &n, |b, _| {
+        b.iter(|| {
+            let _ = black_box(driver.run_one(&mut store, &dataset.sample_ids));
+        });
+    });
+}
+
 fn cache_misses(c: &mut Criterion<Perf>) {
     let mut get_group = c.benchmark_group("get_cache_misses");
     for &n in &SIZES {
@@ -238,6 +262,38 @@ fn cache_misses(c: &mut Criterion<Perf>) {
         );
     }
     neighbors_two_hop_group.finish();
+
+    for &write_ratio in &MIXED_WRITE_RATIOS {
+        let Ok(config) = MixedWorkloadConfig::new(write_ratio) else {
+            // MIXED_WRITE_RATIOS is a fixed [0.0, 1.0] constant array
+            // (bench_support.rs) — this branch is unreachable.
+            continue;
+        };
+        let mut mixed_group = c.benchmark_group(format!(
+            "mixed_workload_write{}_cache_misses",
+            (write_ratio * 100.0).round() as u32
+        ));
+        for &n in &SIZES {
+            let dataset = build_dataset(n);
+            run_mixed_workload::<AosStore>(&mut mixed_group, "aos", n, &dataset, config);
+            run_mixed_workload::<SoaStore>(&mut mixed_group, "soa", n, &dataset, config);
+            run_mixed_workload::<CanonicalStore>(
+                &mut mixed_group,
+                "canonical",
+                n,
+                &dataset,
+                config,
+            );
+            run_mixed_workload::<CanonicalCachedStore>(
+                &mut mixed_group,
+                "canonical_cached",
+                n,
+                &dataset,
+                config,
+            );
+        }
+        mixed_group.finish();
+    }
 }
 
 fn cache_references(c: &mut Criterion<Perf>) {
@@ -335,6 +391,38 @@ fn cache_references(c: &mut Criterion<Perf>) {
         );
     }
     neighbors_two_hop_group.finish();
+
+    for &write_ratio in &MIXED_WRITE_RATIOS {
+        let Ok(config) = MixedWorkloadConfig::new(write_ratio) else {
+            // MIXED_WRITE_RATIOS is a fixed [0.0, 1.0] constant array
+            // (bench_support.rs) — this branch is unreachable.
+            continue;
+        };
+        let mut mixed_group = c.benchmark_group(format!(
+            "mixed_workload_write{}_cache_references",
+            (write_ratio * 100.0).round() as u32
+        ));
+        for &n in &SIZES {
+            let dataset = build_dataset(n);
+            run_mixed_workload::<AosStore>(&mut mixed_group, "aos", n, &dataset, config);
+            run_mixed_workload::<SoaStore>(&mut mixed_group, "soa", n, &dataset, config);
+            run_mixed_workload::<CanonicalStore>(
+                &mut mixed_group,
+                "canonical",
+                n,
+                &dataset,
+                config,
+            );
+            run_mixed_workload::<CanonicalCachedStore>(
+                &mut mixed_group,
+                "canonical_cached",
+                n,
+                &dataset,
+                config,
+            );
+        }
+        mixed_group.finish();
+    }
 }
 
 criterion_group!(

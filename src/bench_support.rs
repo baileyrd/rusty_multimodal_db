@@ -6,14 +6,19 @@
 //! traversal (see [`two_hop_neighbors`]) — see
 //! `docs/decisions/ADR-0004-one-hop-neighbors-trait-method.md` for why that
 //! logic lives here, in benchmark/test-facing code, rather than as a
-//! `DogStore` trait method.
+//! `DogStore` trait method — and for the mixed read/write workload driver
+//! (see [`MixedWorkloadDriver`]), for the same reason: blending calls
+//! together is workload logic, not something a backend needs to know how
+//! to do.
 
 use crate::generator::{generate, generate_littermates, GeneratorConfig};
 use crate::record::DogRecord;
-use crate::store::DogStore;
+use crate::store::{DogStore, StoreError};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use std::collections::HashSet;
+use std::hint::black_box;
+use thiserror::Error;
 use uuid::Uuid;
 
 /// Dataset sizes compared across every benchmark in this crate. 1M rather
@@ -43,6 +48,17 @@ pub const LITTERMATE_AVG_DEGREE: f64 = 1.5;
 /// How many distinct target UUIDs to rotate through for point-workload
 /// benchmarks (`get`, `update_age`, `same_breed`, `neighbors`).
 pub const SAMPLE_TARGET_COUNT: usize = 200;
+
+/// Write ratios swept by the mixed read/write workload
+/// ([`MixedWorkloadDriver`]): 10%, 50%, and 90% `update_age` calls, with
+/// the remainder in each case split evenly between `get` and `scan_ages`.
+pub const MIXED_WRITE_RATIOS: [f64; 3] = [0.10, 0.50, 0.90];
+
+/// XORed into [`SEED`] to derive [`MixedWorkloadDriver`]'s op-selection RNG
+/// stream, independent of every other seeded stream in this crate (mirrors
+/// `build_dataset`'s `SEED ^ 0xA5A5_A5A5` and the generator's
+/// `LITTERMATE_SEED_XOR`).
+const MIXED_WORKLOAD_SEED_XOR: u64 = 0x2244_6688_AACC_EE00;
 
 /// A generated dataset plus a pre-selected pool of target UUIDs for
 /// point-workload benchmarks.
@@ -109,6 +125,132 @@ impl RoundRobin {
     }
 }
 
+/// One operation [`MixedWorkloadDriver::run_one`] can choose to run.
+/// Exposed (rather than kept private) so the configured ratio's long-run
+/// distribution can be tested directly, without needing a real store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MixedOp {
+    Get,
+    UpdateAge,
+    ScanAges,
+}
+
+/// Configuration error for [`MixedWorkloadConfig::new`].
+#[derive(Debug, Error, PartialEq)]
+pub enum MixedWorkloadConfigError {
+    /// `write_ratio` isn't a valid probability.
+    #[error("write_ratio must be within [0.0, 1.0] (got {write_ratio})")]
+    InvalidWriteRatio { write_ratio: f64 },
+}
+
+/// The write/read split [`MixedWorkloadDriver`] draws operations from:
+/// `write_ratio` chance of `update_age` on any given call, with the
+/// remainder split evenly between `get` and `scan_ages`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MixedWorkloadConfig {
+    write_ratio: f64,
+}
+
+impl MixedWorkloadConfig {
+    /// # Errors
+    ///
+    /// Returns [`MixedWorkloadConfigError::InvalidWriteRatio`] if
+    /// `write_ratio` is outside `[0.0, 1.0]` (including `NaN`, which no
+    /// range comparison ever contains).
+    pub fn new(write_ratio: f64) -> Result<Self, MixedWorkloadConfigError> {
+        if !(0.0..=1.0).contains(&write_ratio) {
+            return Err(MixedWorkloadConfigError::InvalidWriteRatio { write_ratio });
+        }
+        Ok(Self { write_ratio })
+    }
+
+    pub fn write_ratio(&self) -> f64 {
+        self.write_ratio
+    }
+}
+
+/// Issues a deterministic, seeded sequence of `get`/`update_age`/`scan_ages`
+/// calls against a [`DogStore`], drawn per [`MixedWorkloadConfig`]'s
+/// write/read split — a blended access pattern none of this crate's other
+/// benchmarks exercise (they each isolate one call type). Reuses
+/// [`RoundRobin`] for target-UUID selection, the same sample-ID rotation
+/// every other point-workload benchmark in this crate uses, rather than
+/// building a new ID sampler.
+///
+/// Each call to [`Self::run_one`] performs exactly one operation, so a
+/// Criterion `b.iter(|| driver.run_one(...))` loop times the blended
+/// sequence one call at a time — the reported median is already "time per
+/// operation in the blended sequence," with no separate per-call-type
+/// breakout needed.
+pub struct MixedWorkloadDriver {
+    config: MixedWorkloadConfig,
+    rng: StdRng,
+    cursor: RoundRobin,
+    next_age: u32,
+}
+
+impl MixedWorkloadDriver {
+    /// `sample_id_count` must match the length of the `sample_ids` slice
+    /// later passed to [`Self::run_one`] — it's taken up front so the
+    /// internal [`RoundRobin`] cursor can be built once, not re-derived
+    /// from the slice's length on every call.
+    pub fn new(config: MixedWorkloadConfig, seed: u64, sample_id_count: usize) -> Self {
+        Self {
+            config,
+            rng: StdRng::seed_from_u64(seed ^ MIXED_WORKLOAD_SEED_XOR),
+            cursor: RoundRobin::new(sample_id_count),
+            next_age: 0,
+        }
+    }
+
+    /// Which op the next [`Self::run_one`] call will perform, without
+    /// touching a store — exposed so the configured ratio's long-run
+    /// distribution can be tested directly.
+    pub fn next_op(&mut self) -> MixedOp {
+        if self.rng.gen_bool(self.config.write_ratio) {
+            MixedOp::UpdateAge
+        } else if self.rng.gen_bool(0.5) {
+            MixedOp::Get
+        } else {
+            MixedOp::ScanAges
+        }
+    }
+
+    /// Run one operation drawn from the configured mix against `store`.
+    /// `get`/`scan_ages` results are discarded but `black_box`ed first, so
+    /// this crate's aggressive bench profile (`opt-level = 3, lto = true`)
+    /// can't prove an unused pure read is dead code and elide the call.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::NotFound`] only if `sample_ids` contains a
+    /// UUID `store` doesn't have — never happens when `sample_ids` comes
+    /// from the same generated dataset `store` was built from, which is
+    /// the only way this crate constructs a [`MixedWorkloadDriver`] (see
+    /// `mixed_workload_driver_never_errors_against_its_own_dataset`).
+    pub fn run_one<S: DogStore>(
+        &mut self,
+        store: &mut S,
+        sample_ids: &[Uuid],
+    ) -> Result<(), StoreError> {
+        match self.next_op() {
+            MixedOp::Get => {
+                let id = sample_ids[self.cursor.advance()];
+                black_box(store.get(id));
+            }
+            MixedOp::UpdateAge => {
+                let id = sample_ids[self.cursor.advance()];
+                self.next_age = self.next_age.wrapping_add(1) % 21;
+                store.update_age(id, self.next_age)?;
+            }
+            MixedOp::ScanAges => {
+                black_box(store.scan_ages());
+            }
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -157,5 +299,152 @@ mod tests {
 
         let store = AosStore::new(Vec::new(), Vec::new());
         assert!(two_hop_neighbors(&store, Uuid::from_u128(0)).is_empty());
+    }
+
+    #[test]
+    fn mixed_workload_config_rejects_out_of_range_write_ratio() {
+        assert_eq!(
+            MixedWorkloadConfig::new(-0.01),
+            Err(MixedWorkloadConfigError::InvalidWriteRatio { write_ratio: -0.01 })
+        );
+        assert_eq!(
+            MixedWorkloadConfig::new(1.01),
+            Err(MixedWorkloadConfigError::InvalidWriteRatio { write_ratio: 1.01 })
+        );
+    }
+
+    #[test]
+    fn mixed_workload_config_accepts_inclusive_bounds() {
+        assert!(MixedWorkloadConfig::new(0.0).is_ok());
+        assert!(MixedWorkloadConfig::new(1.0).is_ok());
+    }
+
+    #[test]
+    fn mixed_workload_config_rejects_nan() {
+        assert!(MixedWorkloadConfig::new(f64::NAN).is_err());
+    }
+
+    /// The highest-priority correctness property for this driver: every
+    /// UUID it draws from `sample_ids` must be one `store` actually has, or
+    /// the reported benchmark numbers would be silently corrupted by
+    /// `update_age`'s much-cheaper `NotFound` fast path standing in for a
+    /// real write.
+    #[test]
+    fn mixed_workload_driver_never_errors_against_its_own_dataset() {
+        use crate::store::AosStore;
+
+        let dataset = build_dataset(500);
+        let mut store = AosStore::from(dataset.records.clone());
+        let config = MixedWorkloadConfig::new(0.5).unwrap();
+        let mut driver = MixedWorkloadDriver::new(config, SEED, dataset.sample_ids.len());
+
+        for _ in 0..5_000 {
+            assert!(driver.run_one(&mut store, &dataset.sample_ids).is_ok());
+        }
+    }
+
+    #[test]
+    fn mixed_workload_driver_is_deterministic_given_same_seed() {
+        let ids: Vec<Uuid> = (0..10).map(Uuid::from_u128).collect();
+        let config = MixedWorkloadConfig::new(0.3).unwrap();
+
+        let mut a = MixedWorkloadDriver::new(config, 42, ids.len());
+        let mut b = MixedWorkloadDriver::new(config, 42, ids.len());
+
+        let sequence_a: Vec<MixedOp> = (0..200).map(|_| a.next_op()).collect();
+        let sequence_b: Vec<MixedOp> = (0..200).map(|_| b.next_op()).collect();
+        assert_eq!(sequence_a, sequence_b);
+    }
+
+    #[test]
+    fn mixed_workload_driver_different_seed_gives_different_sequence() {
+        let ids: Vec<Uuid> = (0..10).map(Uuid::from_u128).collect();
+        let config = MixedWorkloadConfig::new(0.5).unwrap();
+
+        let mut a = MixedWorkloadDriver::new(config, 1, ids.len());
+        let mut b = MixedWorkloadDriver::new(config, 2, ids.len());
+
+        let sequence_a: Vec<MixedOp> = (0..200).map(|_| a.next_op()).collect();
+        let sequence_b: Vec<MixedOp> = (0..200).map(|_| b.next_op()).collect();
+        assert_ne!(sequence_a, sequence_b);
+    }
+
+    /// Statistical check that `next_op`'s long-run distribution matches the
+    /// configured split: `write_ratio` for `UpdateAge`, with the remainder
+    /// split evenly between `Get` and `ScanAges`. N is large enough (200k)
+    /// that binomial variance at these probabilities is well under 0.1
+    /// percentage points, so a 2-percentage-point tolerance is generous
+    /// and non-flaky, not a hand-tuned near-miss.
+    #[test]
+    fn mixed_workload_op_distribution_matches_configured_write_ratio() {
+        let ids: Vec<Uuid> = (0..10).map(Uuid::from_u128).collect();
+        const N: u32 = 200_000;
+        const TOLERANCE: f64 = 0.02;
+
+        for &write_ratio in &MIXED_WRITE_RATIOS {
+            let config = MixedWorkloadConfig::new(write_ratio).unwrap();
+            let mut driver = MixedWorkloadDriver::new(config, SEED, ids.len());
+
+            let mut updates = 0u32;
+            let mut gets = 0u32;
+            let mut scans = 0u32;
+            for _ in 0..N {
+                match driver.next_op() {
+                    MixedOp::UpdateAge => updates += 1,
+                    MixedOp::Get => gets += 1,
+                    MixedOp::ScanAges => scans += 1,
+                }
+            }
+
+            let update_fraction = f64::from(updates) / f64::from(N);
+            let get_fraction = f64::from(gets) / f64::from(N);
+            let scan_fraction = f64::from(scans) / f64::from(N);
+            let expected_read_fraction = (1.0 - write_ratio) / 2.0;
+
+            assert!(
+                (update_fraction - write_ratio).abs() < TOLERANCE,
+                "write_ratio={write_ratio}: expected update fraction ~{write_ratio}, got {update_fraction}"
+            );
+            assert!(
+                (get_fraction - expected_read_fraction).abs() < TOLERANCE,
+                "write_ratio={write_ratio}: expected get fraction ~{expected_read_fraction}, got {get_fraction}"
+            );
+            assert!(
+                (scan_fraction - expected_read_fraction).abs() < TOLERANCE,
+                "write_ratio={write_ratio}: expected scan fraction ~{expected_read_fraction}, got {scan_fraction}"
+            );
+        }
+    }
+
+    /// End-to-end sanity check that `run_one`'s `UpdateAge` branch actually
+    /// mutates the store (not just that it returns `Ok`): forcing
+    /// `write_ratio = 1.0` and confirming every sampled id's age changed
+    /// from its original value at least once.
+    #[test]
+    fn mixed_workload_driver_write_only_actually_mutates_ages() {
+        use crate::store::AosStore;
+        use std::collections::HashMap;
+
+        let dataset = build_dataset(50);
+        let original_ages: HashMap<Uuid, u32> =
+            dataset.records.iter().map(|r| (r.id, r.age)).collect();
+        let mut store = AosStore::from(dataset.records.clone());
+        let config = MixedWorkloadConfig::new(1.0).unwrap();
+        let mut driver = MixedWorkloadDriver::new(config, SEED, dataset.sample_ids.len());
+
+        for _ in 0..dataset.sample_ids.len() * 3 {
+            driver.run_one(&mut store, &dataset.sample_ids).unwrap();
+        }
+
+        let changed = dataset
+            .sample_ids
+            .iter()
+            .filter(|id| store.get(**id).unwrap().age != original_ages[id])
+            .count();
+        assert!(
+            changed > 0,
+            "write_ratio=1.0 for {} iterations changed no ages",
+            dataset.sample_ids.len() * 3
+        );
     }
 }
