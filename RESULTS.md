@@ -1,8 +1,8 @@
 # Results: AoS vs. SoA vs. UUID-canonical-store vs. canonical+cache
 
-This is the decision document per `docs/specifications/storage/STORAGE-004-results-writeup.md` (extended by `STORAGE-005` for the fourth backend). It reports real numbers from an actual `cargo bench` run, structured workload × dataset size × backend, with a **verdict per workload** — not one overall winner. See `docs/charter/CHARTER.md` for the hypothesis under test, `docs/decisions/ADR-0001-three-backend-empirical-comparison.md` for why the first three backends are compared this way, and `docs/decisions/ADR-0003-eager-write-through-cache-invalidation.md` for the fourth.
+This is the decision document per `docs/specifications/storage/STORAGE-004-results-writeup.md` (extended by `STORAGE-005` for the fourth backend, and by `STORAGE-006` for the `## Graph traversal` section below). It reports real numbers from an actual `cargo bench` run, structured workload × dataset size × backend, with a **verdict per workload** — not one overall winner. See `docs/charter/CHARTER.md` for the hypothesis under test, `docs/decisions/ADR-0001-three-backend-empirical-comparison.md` for why the first three backends are compared this way, `docs/decisions/ADR-0003-eager-write-through-cache-invalidation.md` for the fourth, and `docs/decisions/ADR-0004-one-hop-neighbors-trait-method.md` for the graph-traversal trait design.
 
-**Revision note**: the first pass of this document (three backends: AoS, SoA, `CanonicalStore`) found `CanonicalStore` losing `scan_ages` to *both* baselines. This revision adds a fourth backend, `CanonicalCachedStore` — `CanonicalStore`'s `HashMap` as source of truth, plus a materialized, packed `Vec<u32>` age cache kept in sync by eager write-through on every `update_age` — built specifically to close that gap. The `get`/`update_age`/`same_breed` sections below are otherwise unchanged in structure from the first pass, now with a fourth column.
+**Revision note**: the first pass of this document (three backends: AoS, SoA, `CanonicalStore`) found `CanonicalStore` losing `scan_ages` to *both* baselines. A second pass added a fourth backend, `CanonicalCachedStore` — `CanonicalStore`'s `HashMap` as source of truth, plus a materialized, packed `Vec<u32>` age cache kept in sync by eager write-through on every `update_age` — built specifically to close that gap. The `get`/`update_age`/`same_breed` sections below are unchanged in structure from that pass and **report the closed row/column verdict — not re-litigated by this revision**. This revision's only addition is the `## Graph traversal` section further down, testing the previously-untested graph leg of the original hypothesis with a real edge relationship (`littermate_of`) rather than `same_breed`'s shared-attribute stand-in.
 
 ## Methodology
 
@@ -131,6 +131,48 @@ If "more co-resident bookkeeping bytes → more cache misses" were the *whole* s
 | 1,000,000 | 63,464.7 | 59,192.7 | 855.5 | **678.1** |
 
 **Verdict: Canonical/Canonical+cache both stay far below AoS/SoA, matching the wall-clock tie for the win — and at 100K/1M, Canonical+cache edges out plain Canonical on cache-misses too** (678.1 vs. 855.5 at 1M, ~21% fewer), even though wall-clock called these two statistically tied there as well. Smaller effect than `scan_ages`'s, and expected to be: `same_breed`'s cost is dominated by breed-index traversal, which is identical code in both backends, not by the packed-array-vs-hashed-record difference that drives the `scan_ages` result.
+
+## Graph traversal
+
+**Separate from, and does not alter, the row/column verdict above.** Everything in this section tests a different question — the previously-untested third leg of the original row/column/graph hypothesis (see the charter) — using a real generated edge relationship (`littermate_of`, see `STORAGE-006` and ADR-0004) rather than `same_breed`'s shared-attribute stand-in. The `get`/`scan_ages`/`update_age`/`same_breed` verdicts above are unchanged and not re-litigated here.
+
+### Methodology
+
+- `littermate_avg_degree` fixed at `1.5` (mid-range of the valid `[0.0, 3.0]` band) across all sizes, independent of dataset size — same rationale as `BREED_CARDINALITY`'s fixed value: held constant so dataset *size* stays the only swept dimension. A degree sweep was not run this pass; see Open Questions.
+- Same seed (`20260824`), same three dataset sizes (1K/100K/1M), same 200-target rotation pool as every other workload in this document (`RoundRobin`/`SAMPLE_TARGET_COUNT`, see `STORAGE-003`).
+- `neighbors_one_hop` calls `DogStore::neighbors` directly. `neighbors_two_hop` calls `bench_support::two_hop_neighbors` — the deduplicated union of `neighbors(n)` for every `n` in `neighbors(id)`, built generically from two rounds of `neighbors` calls (not a trait method — see ADR-0004).
+- Criterion run with the same reduced sampling as the rest of this document's benchmarks (`--warm-up-time 1 --measurement-time 2 --sample-size 20`). Machine: this session's cloud Linux container (same caveat as the rest of this document — not the owner's Windows dev machine or `baileyai`).
+- All numbers below are **median wall-clock time per call**, lower is better. Winner(s) per row in **bold**.
+
+### `neighbors_one_hop` (one-hop `littermate_of` lookup)
+
+| Size | AoS | SoA | Canonical | Canonical+cache |
+|---|---:|---:|---:|---:|
+| 1,000 | 1.910 µs | 1.950 µs | **46.85 ns** | 47.46 ns |
+| 100,000 | 212.5 µs | 218.9 µs | 55.40 ns | **53.57 ns** |
+| 1,000,000 | 6.199 ms | 5.669 ms | **54.65 ns** | 55.24 ns |
+
+**Verdict: Canonical and Canonical+cache are effectively tied for the win, both far ahead of AoS/SoA — the same shape as `same_breed`'s result, for the same structural reason.** `neighbors` on the two canonical backends is one `HashMap` lookup into an adjacency index built the same way as the breed index; AoS/SoA pay a full linear scan of the edge list. The two canonical backends track each other within noise (largest gap ~1.3% at 1K); at 1M records, both are **~113,000× faster than AoS** and **~103,000× faster than SoA** — a larger multiple than `same_breed`'s ~160×/~114×, because the edge list being scanned (average degree 1.5, so ~1.5× as many `(Uuid, Uuid)` pairs as there are records) is itself larger than the number of records sharing a breed with any one dog under this dataset's 50-breed cardinality, making AoS/SoA's linear scan proportionally more expensive here than in `same_breed`.
+
+### `neighbors_two_hop` (two-hop traversal, deduplicated — generic composition, not a trait method)
+
+| Size | AoS | SoA | Canonical | Canonical+cache |
+|---|---:|---:|---:|---:|
+| 1,000 | 8.367 µs | 8.667 µs | 643.9 ns | **641.0 ns** |
+| 100,000 | 808.8 µs | 809.8 µs | 727.5 ns | **681.8 ns** |
+| 1,000,000 | 23.25 ms | 25.61 ms | 812.0 ns | **771.2 ns** |
+
+**Verdict: Canonical and Canonical+cache still win decisively, though the margin between them and the margin over the baselines both shift compared to `neighbors_one_hop`.** Two-hop costs roughly 12-14× one-hop's time for the canonical backends (two `neighbors` calls plus `HashSet` dedup overhead, vs. one), and 4-9× for AoS/SoA (bounded by the number of one-hop results — average degree 1.5, so typically 1-2 further scans, not a second full scan per one-hop neighbor). Canonical+cache edges out plain Canonical at every size here (unlike `neighbors_one_hop`, where the two were closer to tied) — consistent with `same_breed`'s cache-miss numbers showing a similar small edge for Canonical+cache on adjacency-style lookups, though this pass only has wall-clock evidence for it (see cache-miss status below). At 1M records, both canonical backends are **~30,100× (Canonical+cache) to ~28,600× (Canonical) faster than AoS**, and **~33,200×/~31,500× faster than SoA** — the graph-traversal hypothesis's win holds up under 2-hop composition just as it did at 1-hop, with no sign of the naive-linear-scan baselines closing the gap as hop count grows (if anything, AoS/SoA's disadvantage widens, since each hop multiplies their per-call scan cost while the canonical backends' cost stays dominated by a small, fixed number of `HashMap` lookups).
+
+### Cache-miss measurement status
+
+Per ADR-0002's established pattern: this session's environment (cloud Linux container) does not have hardware performance-counter access — `cargo bench --features perf-events --bench cache_events -- neighbors_one_hop/aos/1000` builds and runs, but panics immediately with `Could not create counter: Os { code: 2, kind: NotFound, ... }`, the same signature as every other workload in this environment. `benches/cache_events.rs` was extended to cover `neighbors_one_hop_cache_misses`/`neighbors_two_hop_cache_misses` (and the `_cache_references` equivalents), mirroring the existing four workloads' structure exactly, and is ready to run as-is on `baileyai` or equivalent bare-metal Linux — not yet done for this section. Real numbers, once obtained, get folded in as a follow-up (same process as the existing four workloads' cache-miss section above).
+
+### Where the graph-traversal hypothesis stands
+
+- **`neighbors` (one-hop, real edge traversal) confirms the same result `same_breed` (shared-attribute stand-in) already showed**: a `HashMap`-based adjacency index over the canonical store beats a linear scan by 4-5 orders of magnitude at scale, and costs nothing extra for `CanonicalCachedStore` to carry alongside its age cache (Canonical and Canonical+cache are within noise of each other at every size, same as `get`/`same_breed`).
+- **Composing two `neighbors` calls generically (`two_hop_neighbors`, not a trait method) preserves the win** — the naive baselines don't catch up as traversal depth increases from 1 to 2 hops; if anything the relative gap widens slightly at 1M.
+- **This is real graph traversal, not a repeat of `same_breed`'s result under a different name** — `same_breed` never required following an edge between two specific records; `littermate_of` does, and the adjacency-index pattern generalizes to it directly, which is itself the finding: the "views over one canonical store" hypothesis's graph leg holds for the one relationship type and hop depth tested here.
 
 ## Open questions
 

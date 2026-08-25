@@ -16,17 +16,19 @@
 //! counter access (e.g. `baileyai`). See
 //! `docs/decisions/ADR-0002-cache-miss-instrumentation-platform.md`.
 //!
-//! Covers all four workloads (`get`, `scan_ages`, `update_age`,
-//! `same_breed`) across all four backends and three dataset sizes, to
-//! match `benches/workloads.rs`. An earlier draft of this file limited
-//! coverage to `get`/`same_breed` on the theory that `scan_ages` is
-//! dominated by the output `Vec` allocation and `update_age` by the
-//! lookup-then-write pattern already exercised by `get` — but that was
-//! a guess made without real hardware-counter access to check it
-//! against, and the whole point of running on `baileyai` is to test
-//! hypotheses like that one directly rather than reason about them from
-//! wall-clock noise. See `RESULTS.md`'s cache-miss section for the
+//! Covers all six workloads (`get`, `scan_ages`, `update_age`,
+//! `same_breed`, `neighbors_one_hop`, `neighbors_two_hop`) across all four
+//! backends and three dataset sizes, to match `benches/workloads.rs`. An
+//! earlier draft of this file limited coverage to `get`/`same_breed` on the
+//! theory that `scan_ages` is dominated by the output `Vec` allocation and
+//! `update_age` by the lookup-then-write pattern already exercised by
+//! `get` — but that was a guess made without real hardware-counter access
+//! to check it against, and the whole point of running on `baileyai` is to
+//! test hypotheses like that one directly rather than reason about them
+//! from wall-clock noise. See `RESULTS.md`'s cache-miss section for the
 //! `scan_ages` finding this coverage was specifically added to check.
+//! `neighbors_one_hop`/`neighbors_two_hop` were added alongside the
+//! `littermate_of` graph-traversal feature (`STORAGE-006`).
 
 #![cfg(target_os = "linux")]
 
@@ -36,9 +38,12 @@ use criterion::{
 use criterion_perf_events::Perf;
 use perfcnt::linux::HardwareEventType as Hardware;
 use perfcnt::linux::PerfCounterBuilderLinux as Builder;
-use rusty_multimodal_db::bench_support::{build_dataset, Dataset, RoundRobin, SIZES};
+use rusty_multimodal_db::bench_support::{
+    build_dataset, two_hop_neighbors, Dataset, RoundRobin, SIZES,
+};
 use rusty_multimodal_db::store::{AosStore, CanonicalCachedStore, CanonicalStore, SoaStore};
 use rusty_multimodal_db::{DogRecord, DogStore};
+use uuid::Uuid;
 
 fn run_get<S>(group: &mut BenchmarkGroup<'_, Perf>, name: &str, n: usize, dataset: &Dataset)
 where
@@ -99,6 +104,45 @@ where
     });
 }
 
+fn run_neighbors_one_hop<S>(
+    group: &mut BenchmarkGroup<'_, Perf>,
+    name: &str,
+    n: usize,
+    dataset: &Dataset,
+) where
+    S: DogStore + From<(Vec<DogRecord>, Vec<(Uuid, Uuid)>)>,
+{
+    let store = S::from((dataset.records.clone(), dataset.edges.clone()));
+    let mut cursor = RoundRobin::new(dataset.sample_ids.len());
+    group.bench_with_input(BenchmarkId::new(name, n), &n, |b, _| {
+        b.iter(|| {
+            let id = dataset.sample_ids[cursor.advance()];
+            black_box(store.neighbors(black_box(id)))
+        });
+    });
+}
+
+/// Mirrors `benches/workloads.rs::run_neighbors_two_hop` — 2-hop is not a
+/// trait method (ADR-0004), so this benchmarks
+/// `bench_support::two_hop_neighbors` built from two rounds of `neighbors`.
+fn run_neighbors_two_hop<S>(
+    group: &mut BenchmarkGroup<'_, Perf>,
+    name: &str,
+    n: usize,
+    dataset: &Dataset,
+) where
+    S: DogStore + From<(Vec<DogRecord>, Vec<(Uuid, Uuid)>)>,
+{
+    let store = S::from((dataset.records.clone(), dataset.edges.clone()));
+    let mut cursor = RoundRobin::new(dataset.sample_ids.len());
+    group.bench_with_input(BenchmarkId::new(name, n), &n, |b, _| {
+        b.iter(|| {
+            let id = dataset.sample_ids[cursor.advance()];
+            black_box(two_hop_neighbors(&store, black_box(id)))
+        });
+    });
+}
+
 fn cache_misses(c: &mut Criterion<Perf>) {
     let mut get_group = c.benchmark_group("get_cache_misses");
     for &n in &SIZES {
@@ -154,6 +198,46 @@ fn cache_misses(c: &mut Criterion<Perf>) {
         );
     }
     same_breed_group.finish();
+
+    let mut neighbors_one_hop_group = c.benchmark_group("neighbors_one_hop_cache_misses");
+    for &n in &SIZES {
+        let dataset = build_dataset(n);
+        run_neighbors_one_hop::<AosStore>(&mut neighbors_one_hop_group, "aos", n, &dataset);
+        run_neighbors_one_hop::<SoaStore>(&mut neighbors_one_hop_group, "soa", n, &dataset);
+        run_neighbors_one_hop::<CanonicalStore>(
+            &mut neighbors_one_hop_group,
+            "canonical",
+            n,
+            &dataset,
+        );
+        run_neighbors_one_hop::<CanonicalCachedStore>(
+            &mut neighbors_one_hop_group,
+            "canonical_cached",
+            n,
+            &dataset,
+        );
+    }
+    neighbors_one_hop_group.finish();
+
+    let mut neighbors_two_hop_group = c.benchmark_group("neighbors_two_hop_cache_misses");
+    for &n in &SIZES {
+        let dataset = build_dataset(n);
+        run_neighbors_two_hop::<AosStore>(&mut neighbors_two_hop_group, "aos", n, &dataset);
+        run_neighbors_two_hop::<SoaStore>(&mut neighbors_two_hop_group, "soa", n, &dataset);
+        run_neighbors_two_hop::<CanonicalStore>(
+            &mut neighbors_two_hop_group,
+            "canonical",
+            n,
+            &dataset,
+        );
+        run_neighbors_two_hop::<CanonicalCachedStore>(
+            &mut neighbors_two_hop_group,
+            "canonical_cached",
+            n,
+            &dataset,
+        );
+    }
+    neighbors_two_hop_group.finish();
 }
 
 fn cache_references(c: &mut Criterion<Perf>) {
@@ -211,6 +295,46 @@ fn cache_references(c: &mut Criterion<Perf>) {
         );
     }
     same_breed_group.finish();
+
+    let mut neighbors_one_hop_group = c.benchmark_group("neighbors_one_hop_cache_references");
+    for &n in &SIZES {
+        let dataset = build_dataset(n);
+        run_neighbors_one_hop::<AosStore>(&mut neighbors_one_hop_group, "aos", n, &dataset);
+        run_neighbors_one_hop::<SoaStore>(&mut neighbors_one_hop_group, "soa", n, &dataset);
+        run_neighbors_one_hop::<CanonicalStore>(
+            &mut neighbors_one_hop_group,
+            "canonical",
+            n,
+            &dataset,
+        );
+        run_neighbors_one_hop::<CanonicalCachedStore>(
+            &mut neighbors_one_hop_group,
+            "canonical_cached",
+            n,
+            &dataset,
+        );
+    }
+    neighbors_one_hop_group.finish();
+
+    let mut neighbors_two_hop_group = c.benchmark_group("neighbors_two_hop_cache_references");
+    for &n in &SIZES {
+        let dataset = build_dataset(n);
+        run_neighbors_two_hop::<AosStore>(&mut neighbors_two_hop_group, "aos", n, &dataset);
+        run_neighbors_two_hop::<SoaStore>(&mut neighbors_two_hop_group, "soa", n, &dataset);
+        run_neighbors_two_hop::<CanonicalStore>(
+            &mut neighbors_two_hop_group,
+            "canonical",
+            n,
+            &dataset,
+        );
+        run_neighbors_two_hop::<CanonicalCachedStore>(
+            &mut neighbors_two_hop_group,
+            "canonical_cached",
+            n,
+            &dataset,
+        );
+    }
+    neighbors_two_hop_group.finish();
 }
 
 criterion_group!(

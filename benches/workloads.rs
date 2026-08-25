@@ -9,9 +9,12 @@ use criterion::measurement::WallTime;
 use criterion::{
     black_box, criterion_group, criterion_main, BenchmarkGroup, BenchmarkId, Criterion,
 };
-use rusty_multimodal_db::bench_support::{build_dataset, Dataset, RoundRobin, SIZES};
+use rusty_multimodal_db::bench_support::{
+    build_dataset, two_hop_neighbors, Dataset, RoundRobin, SIZES,
+};
 use rusty_multimodal_db::store::{AosStore, CanonicalCachedStore, CanonicalStore, SoaStore};
 use rusty_multimodal_db::{DogRecord, DogStore};
+use uuid::Uuid;
 
 fn bench_get(c: &mut Criterion) {
     let mut group = c.benchmark_group("get");
@@ -135,11 +138,76 @@ fn run_same_breed<S>(
     });
 }
 
+fn bench_neighbors_one_hop(c: &mut Criterion) {
+    let mut group = c.benchmark_group("neighbors_one_hop");
+    for &n in &SIZES {
+        let dataset = build_dataset(n);
+        run_neighbors_one_hop::<AosStore>(&mut group, "aos", n, &dataset);
+        run_neighbors_one_hop::<SoaStore>(&mut group, "soa", n, &dataset);
+        run_neighbors_one_hop::<CanonicalStore>(&mut group, "canonical", n, &dataset);
+        run_neighbors_one_hop::<CanonicalCachedStore>(&mut group, "canonical_cached", n, &dataset);
+    }
+    group.finish();
+}
+
+fn run_neighbors_one_hop<S>(
+    group: &mut BenchmarkGroup<'_, WallTime>,
+    name: &str,
+    n: usize,
+    dataset: &Dataset,
+) where
+    S: DogStore + From<(Vec<DogRecord>, Vec<(Uuid, Uuid)>)>,
+{
+    let store = S::from((dataset.records.clone(), dataset.edges.clone()));
+    let mut cursor = RoundRobin::new(dataset.sample_ids.len());
+    group.bench_with_input(BenchmarkId::new(name, n), &n, |b, _| {
+        b.iter(|| {
+            let id = dataset.sample_ids[cursor.advance()];
+            black_box(store.neighbors(black_box(id)))
+        });
+    });
+}
+
+/// 2-hop traversal is not a trait method (see ADR-0004) — this benchmarks
+/// `bench_support::two_hop_neighbors`, which is built entirely out of two
+/// rounds of `neighbors` calls, generically over any `DogStore`.
+fn bench_neighbors_two_hop(c: &mut Criterion) {
+    let mut group = c.benchmark_group("neighbors_two_hop");
+    for &n in &SIZES {
+        let dataset = build_dataset(n);
+        run_neighbors_two_hop::<AosStore>(&mut group, "aos", n, &dataset);
+        run_neighbors_two_hop::<SoaStore>(&mut group, "soa", n, &dataset);
+        run_neighbors_two_hop::<CanonicalStore>(&mut group, "canonical", n, &dataset);
+        run_neighbors_two_hop::<CanonicalCachedStore>(&mut group, "canonical_cached", n, &dataset);
+    }
+    group.finish();
+}
+
+fn run_neighbors_two_hop<S>(
+    group: &mut BenchmarkGroup<'_, WallTime>,
+    name: &str,
+    n: usize,
+    dataset: &Dataset,
+) where
+    S: DogStore + From<(Vec<DogRecord>, Vec<(Uuid, Uuid)>)>,
+{
+    let store = S::from((dataset.records.clone(), dataset.edges.clone()));
+    let mut cursor = RoundRobin::new(dataset.sample_ids.len());
+    group.bench_with_input(BenchmarkId::new(name, n), &n, |b, _| {
+        b.iter(|| {
+            let id = dataset.sample_ids[cursor.advance()];
+            black_box(two_hop_neighbors(&store, black_box(id)))
+        });
+    });
+}
+
 criterion_group!(
     benches,
     bench_get,
     bench_scan_ages,
     bench_update_age,
-    bench_same_breed
+    bench_same_breed,
+    bench_neighbors_one_hop,
+    bench_neighbors_two_hop
 );
 criterion_main!(benches);

@@ -4,23 +4,28 @@
 //! Fast column scans by construction (`ages` is already one contiguous
 //! `Vec<u32>`); full-record reconstruction and lookup-by-id pay for a
 //! linear scan of `ids` plus touching two other arrays at the found
-//! position.
+//! position. `neighbors` is a linear scan of a flat `littermate_of` edge
+//! list — same naive-baseline role as `AosStore`'s; there's no columnar
+//! layout that helps an edge-list scan the way parallel arrays help a
+//! field scan.
 
 use crate::record::DogRecord;
 use crate::store::{DogStore, StoreError};
 use uuid::Uuid;
 
-/// Column-oriented backend: three parallel `Vec`s, one per field.
+/// Column-oriented backend: three parallel `Vec`s, one per field, plus a
+/// flat `littermate_of` edge list scanned linearly by `neighbors`.
 pub struct SoaStore {
     ids: Vec<Uuid>,
     breeds: Vec<String>,
     ages: Vec<u32>,
+    edges: Vec<(Uuid, Uuid)>,
 }
 
 impl SoaStore {
-    /// Build a store from generated records, splitting each record's
-    /// fields into the three parallel arrays.
-    pub fn new(records: Vec<DogRecord>) -> Self {
+    /// Build a store from generated records and littermate edges,
+    /// splitting each record's fields into the three parallel arrays.
+    pub fn new(records: Vec<DogRecord>, edges: Vec<(Uuid, Uuid)>) -> Self {
         let mut ids = Vec::with_capacity(records.len());
         let mut breeds = Vec::with_capacity(records.len());
         let mut ages = Vec::with_capacity(records.len());
@@ -29,7 +34,12 @@ impl SoaStore {
             breeds.push(record.breed);
             ages.push(record.age);
         }
-        Self { ids, breeds, ages }
+        Self {
+            ids,
+            breeds,
+            ages,
+            edges,
+        }
     }
 
     /// Array position of `id`, or `None` if it isn't present. All three
@@ -41,8 +51,16 @@ impl SoaStore {
 }
 
 impl From<Vec<DogRecord>> for SoaStore {
+    /// Convenience for workloads that don't exercise `neighbors` — builds
+    /// with no littermate edges.
     fn from(records: Vec<DogRecord>) -> Self {
-        Self::new(records)
+        Self::new(records, Vec::new())
+    }
+}
+
+impl From<(Vec<DogRecord>, Vec<(Uuid, Uuid)>)> for SoaStore {
+    fn from((records, edges): (Vec<DogRecord>, Vec<(Uuid, Uuid)>)) -> Self {
+        Self::new(records, edges)
     }
 }
 
@@ -79,6 +97,21 @@ impl DogStore for SoaStore {
         }
         result
     }
+
+    fn neighbors(&self, id: Uuid) -> Vec<Uuid> {
+        self.edges
+            .iter()
+            .filter_map(|&(a, b)| {
+                if a == id {
+                    Some(b)
+                } else if b == id {
+                    Some(a)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -93,16 +126,22 @@ mod tests {
         ]
     }
 
+    /// One `littermate_of` edge: dog 1 and dog 2 are littermates; dog 3 has
+    /// none.
+    fn edges_sample() -> Vec<(Uuid, Uuid)> {
+        vec![(Uuid::from_u128(1), Uuid::from_u128(2))]
+    }
+
     #[test]
     fn get_hit_and_miss() {
-        let store = SoaStore::new(sample());
+        let store = SoaStore::new(sample(), Vec::new());
         assert_eq!(store.get(Uuid::from_u128(1)).unwrap().breed, "labrador");
         assert_eq!(store.get(Uuid::from_u128(99)), None);
     }
 
     #[test]
     fn scan_ages_returns_every_age() {
-        let store = SoaStore::new(sample());
+        let store = SoaStore::new(sample(), Vec::new());
         let mut ages = store.scan_ages();
         ages.sort_unstable();
         assert_eq!(ages, vec![2, 3, 5]);
@@ -110,7 +149,7 @@ mod tests {
 
     #[test]
     fn update_age_success_and_not_found() {
-        let mut store = SoaStore::new(sample());
+        let mut store = SoaStore::new(sample(), Vec::new());
         store.update_age(Uuid::from_u128(1), 10).unwrap();
         assert_eq!(store.get(Uuid::from_u128(1)).unwrap().age, 10);
 
@@ -120,14 +159,14 @@ mod tests {
 
     #[test]
     fn update_age_does_not_disturb_other_records() {
-        let mut store = SoaStore::new(sample());
+        let mut store = SoaStore::new(sample(), Vec::new());
         store.update_age(Uuid::from_u128(1), 10).unwrap();
         assert_eq!(store.get(Uuid::from_u128(2)).unwrap().age, 5);
     }
 
     #[test]
     fn same_breed_finds_shared_and_excludes_self() {
-        let store = SoaStore::new(sample());
+        let store = SoaStore::new(sample(), Vec::new());
         let mut result = store.same_breed(Uuid::from_u128(1));
         result.sort();
         assert_eq!(result, vec![Uuid::from_u128(2)]);
@@ -135,7 +174,32 @@ mod tests {
 
     #[test]
     fn same_breed_unique_breed_is_empty() {
-        let store = SoaStore::new(sample());
+        let store = SoaStore::new(sample(), Vec::new());
         assert!(store.same_breed(Uuid::from_u128(3)).is_empty());
+    }
+
+    #[test]
+    fn neighbors_finds_edge_in_either_direction() {
+        let store = SoaStore::new(sample(), edges_sample());
+        assert_eq!(
+            store.neighbors(Uuid::from_u128(1)),
+            vec![Uuid::from_u128(2)]
+        );
+        assert_eq!(
+            store.neighbors(Uuid::from_u128(2)),
+            vec![Uuid::from_u128(1)]
+        );
+    }
+
+    #[test]
+    fn neighbors_no_edges_is_empty() {
+        let store = SoaStore::new(sample(), edges_sample());
+        assert!(store.neighbors(Uuid::from_u128(3)).is_empty());
+    }
+
+    #[test]
+    fn neighbors_unknown_id_is_empty() {
+        let store = SoaStore::new(sample(), edges_sample());
+        assert!(store.neighbors(Uuid::from_u128(99)).is_empty());
     }
 }
