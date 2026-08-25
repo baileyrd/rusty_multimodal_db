@@ -1,8 +1,20 @@
 # rusty_multimodal_db
 
-A benchmark harness, not a database. It exists to empirically test one
-storage-design hypothesis before anyone commits engineering time to
-building around it:
+A benchmark harness, not a database — but if you're looking for what to
+actually use, it's `ProductionStore` (`src/production.rs`):
+`CanonicalCachedStore`'s storage architecture, made durable via mmap, made
+safe for concurrent reader/writer access via one global `RwLock`. Six
+rounds of empirical work (row/column/graph, mixed-workload, durability,
+and three concurrency-throughput passes) converged on that combination —
+see `docs/decisions/ADR-0008-production-default.md` for which round
+justified each layer and `RESULTS.md`'s `## Production recommendation`
+section for the numbers.
+
+Everything below this point — three other storage backends, seven other
+durability variants, three other concurrency strategies — is the
+benchmarked evidence that recommendation is built on, not the recommended
+path. It exists to empirically test one storage-design hypothesis before
+anyone commits engineering time to building around it:
 
 > A canonical store, keyed by UUID, can serve as the single source of
 > truth for row-oriented, column-oriented, and graph-oriented access —
@@ -41,8 +53,9 @@ the benchmark's shape was clear.
 ## Using this repo
 
 ```sh
-cargo test --all-features            # unit tests
-cargo bench                          # wall-clock Criterion suite (cross-platform)
+cargo test --all-features            # unit tests, including ProductionStore's flagship integration test
+cargo bench                          # wall-clock Criterion suite (cross-platform), ProductionStore listed first in every workload
+cargo bench --bench concurrency      # concurrency throughput sweep, ProductionStore included alongside every strategy
 cargo bench --features perf-events --bench cache_events   # cache-miss counts, Linux bare-metal only — see ADR-0002
 ```
 

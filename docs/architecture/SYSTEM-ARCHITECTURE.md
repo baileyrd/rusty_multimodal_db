@@ -1,5 +1,29 @@
 # System Architecture
 
+## Start here: `ProductionStore`
+
+Six rounds of benchmarking after this document's original context below
+was written (mixed-workload, durability, and three concurrency-throughput
+passes) converged on one recommended combination:
+`CanonicalCachedStore`'s architecture, made durable via mmap, made safe
+for concurrent reader/writer access via one global `RwLock`. That
+combination is `src/production.rs`'s `ProductionStore` —
+`RwLock<MmapAgeStore>`, implementing both `DogStore` (drop-in for
+single-owner code) and `ConcurrentStore` (for genuine multi-threaded
+sharing behind an `Arc`). See `docs/decisions/ADR-0008-production-default.md`
+for which round justified each layer and `RESULTS.md`'s `## Production
+recommendation` section for the numbers.
+
+Everything else described below — the three-backend comparison this
+document was originally written around, plus the durability
+(`src/durability/`) and concurrency (`src/concurrency/`) modules added in
+later rounds — remains in the tree as the empirical evidence
+`ProductionStore` is built on, not the recommended path. Reach for one of
+them directly only if your workload's shape is genuinely one of the narrow
+corners named in ADR-0008/ADR-0007/ADR-0006 (e.g. sharded locking for a
+small, write-heavy, high-thread-count deployment); otherwise, use
+`ProductionStore`.
+
 ## Context
 
 This crate has one runtime shape: a benchmark process (`cargo bench`) that,
@@ -86,11 +110,17 @@ that same process on Linux.
 | `store::aos` | Row-oriented backend | `store`, `record` |
 | `store::soa` | Column-oriented backend | `store`, `record` |
 | `store::canonical` | UUID-canonical backend with derived views | `store`, `record` |
-| `benches/workloads` | Criterion harness, backend-agnostic | `generator`, `store`, all three backends |
+| `store::canonical_cached` | Canonical store + materialized age cache (the architecture `production` builds on) | `store`, `record` |
+| `durability` | Eight durability prototypes for `CanonicalCachedStore`'s architecture (WAL/snapshot/hybrid/mmap/LSM/`redb`) | `store`, `record` |
+| `concurrency` | Four concurrent-access strategies for `CanonicalCachedStore` (global `RwLock`/sharded/`dashmap`/actor) | `store`, `record` |
+| `production` | **Start here** — `ProductionStore`, wiring `durability::MmapAgeStore` and the `concurrency::global_rwlock` pattern together | `durability`, `concurrency`, `store`, `record`, `bench_support` |
+| `benches/workloads` | Criterion harness, backend-agnostic | `generator`, `store`, all backends including `production` |
 
 Dependency direction is one-way: backends depend on `store` and `record`,
-never the reverse; the bench harness depends on everything, nothing
-depends on the bench harness.
+never the reverse; `production` depends on one durability variant and one
+concurrency variant (both otherwise-independent siblings of every other
+variant in their own modules); the bench harness depends on everything,
+nothing depends on the bench harness.
 
 ## Data model
 

@@ -14,13 +14,19 @@ use rusty_multimodal_db::bench_support::{
     RoundRobin, MIXED_WRITE_RATIOS, SEED, SIZES,
 };
 use rusty_multimodal_db::store::{AosStore, CanonicalCachedStore, CanonicalStore, SoaStore};
-use rusty_multimodal_db::{DogRecord, DogStore};
+use rusty_multimodal_db::{DogRecord, DogStore, ProductionStore};
 use uuid::Uuid;
 
+/// `production` is listed first in every workload below: it's the crate's
+/// recommended entry point (see `src/production.rs`, `RESULTS.md`'s
+/// `## Production recommendation`), so its numbers lead each comparison
+/// rather than reading as one more variant among the four benchmarked
+/// alternatives that follow it.
 fn bench_get(c: &mut Criterion) {
     let mut group = c.benchmark_group("get");
     for &n in &SIZES {
         let dataset = build_dataset(n);
+        run_get::<ProductionStore>(&mut group, "production", n, &dataset);
         run_get::<AosStore>(&mut group, "aos", n, &dataset);
         run_get::<SoaStore>(&mut group, "soa", n, &dataset);
         run_get::<CanonicalStore>(&mut group, "canonical", n, &dataset);
@@ -47,6 +53,7 @@ fn bench_scan_ages(c: &mut Criterion) {
     let mut group = c.benchmark_group("scan_ages");
     for &n in &SIZES {
         let dataset = build_dataset(n);
+        run_scan_ages::<ProductionStore>(&mut group, "production", n, &dataset);
         run_scan_ages::<AosStore>(&mut group, "aos", n, &dataset);
         run_scan_ages::<SoaStore>(&mut group, "soa", n, &dataset);
         run_scan_ages::<CanonicalStore>(&mut group, "canonical", n, &dataset);
@@ -73,6 +80,7 @@ fn bench_update_age(c: &mut Criterion) {
     let mut group = c.benchmark_group("update_age");
     for &n in &SIZES {
         let dataset = build_dataset(n);
+        run_update_age::<ProductionStore>(&mut group, "production", n, &dataset);
         run_update_age::<AosStore>(&mut group, "aos", n, &dataset);
         run_update_age::<SoaStore>(&mut group, "soa", n, &dataset);
         run_update_age::<CanonicalStore>(&mut group, "canonical", n, &dataset);
@@ -113,6 +121,7 @@ fn bench_same_breed(c: &mut Criterion) {
     let mut group = c.benchmark_group("same_breed");
     for &n in &SIZES {
         let dataset = build_dataset(n);
+        run_same_breed::<ProductionStore>(&mut group, "production", n, &dataset);
         run_same_breed::<AosStore>(&mut group, "aos", n, &dataset);
         run_same_breed::<SoaStore>(&mut group, "soa", n, &dataset);
         run_same_breed::<CanonicalStore>(&mut group, "canonical", n, &dataset);
@@ -143,6 +152,7 @@ fn bench_neighbors_one_hop(c: &mut Criterion) {
     let mut group = c.benchmark_group("neighbors_one_hop");
     for &n in &SIZES {
         let dataset = build_dataset(n);
+        run_neighbors_one_hop::<ProductionStore>(&mut group, "production", n, &dataset);
         run_neighbors_one_hop::<AosStore>(&mut group, "aos", n, &dataset);
         run_neighbors_one_hop::<SoaStore>(&mut group, "soa", n, &dataset);
         run_neighbors_one_hop::<CanonicalStore>(&mut group, "canonical", n, &dataset);
@@ -176,6 +186,7 @@ fn bench_neighbors_two_hop(c: &mut Criterion) {
     let mut group = c.benchmark_group("neighbors_two_hop");
     for &n in &SIZES {
         let dataset = build_dataset(n);
+        run_neighbors_two_hop::<ProductionStore>(&mut group, "production", n, &dataset);
         run_neighbors_two_hop::<AosStore>(&mut group, "aos", n, &dataset);
         run_neighbors_two_hop::<SoaStore>(&mut group, "soa", n, &dataset);
         run_neighbors_two_hop::<CanonicalStore>(&mut group, "canonical", n, &dataset);
@@ -221,6 +232,7 @@ fn bench_mixed_workload(c: &mut Criterion) {
         let mut group = c.benchmark_group(group_name);
         for &n in &SIZES {
             let dataset = build_dataset(n);
+            run_mixed_workload::<ProductionStore>(&mut group, "production", n, &dataset, config);
             run_mixed_workload::<AosStore>(&mut group, "aos", n, &dataset, config);
             run_mixed_workload::<SoaStore>(&mut group, "soa", n, &dataset, config);
             run_mixed_workload::<CanonicalStore>(&mut group, "canonical", n, &dataset, config);
