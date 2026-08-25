@@ -65,13 +65,66 @@ All numbers below are **median wall-clock time per call**, lower is better. Winn
 - **Canonical+cache wins everywhere Canonical won, at effectively no cost**: `get` and `same_breed` are identical between the two (neither touches the age cache), so Canonical+cache doesn't trade away any of Canonical's existing wins to fix `scan_ages`.
 - **Net picture, updated**: with the fourth backend, there is no longer a workload where the UUID-canonical family loses outright — `CanonicalCachedStore` wins or ties the win on all four workloads benchmarked. The interesting remaining tradeoff isn't "canonical vs. row/column baselines" anymore, it's "is the ~1.5× `update_age` tax and the extra `Vec<u32>` memory worth it," which is a much easier case to make than the first pass's genuine three-way split. See Open Questions for what would still need checking (write-heavy mixed workloads, memory overhead) before calling this fully settled.
 
-## Cache-miss measurement
+## Cache-miss measurement (real hardware counters, `baileyai`)
 
-Unchanged from the first pass — still not obtained from within this session's environment, confirmed the same two ways (see ADR-0002): `perf stat` reports `<not supported>` for every counter, and running the built `perf-events` binary fails fast and deterministically with `Could not create counter: Os { code: 2, kind: NotFound, ... }`. `benches/cache_events.rs` now also covers `CanonicalCachedStore` on `get` and `same_breed` (the two workloads it already ties Canonical on) so a future real-hardware run gets the full four-way comparison, not just the original three. **Still the single most important open item**: real cache-miss counts would directly confirm that `scan_ages`'s wall-clock improvement is actually a locality improvement (fewer misses reading the packed `Vec<u32>`) and not something else — this pass infers that from the numbers matching SoA's shape, which is strong but not the same as measuring it.
+Obtained this pass, on `baileyai` (bare-metal Fedora Server) — the machine named in ADR-0002 specifically because it has real PMU access, unlike every prior session's container. `cargo bench --bench cache_events --features perf-events` (note: the Cargo feature is `perf-events`, not `cache-events`) ran clean for all four backends.
+
+**PMU access needed one sysctl change.** `perf_event_paranoid` was `2` by default, which fails every hardware counter with `Could not create counter: Os { code: 13, kind: PermissionDenied, ... }`. `sudo sysctl -w kernel.perf_event_paranoid=1` was sufficient — didn't need `0` or `-1`. This is a live, non-persistent sysctl write (resets on reboot, no `/etc/sysctl.d` file added), so it's this-session-only, not a permanent host change.
+
+**Coverage gap fixed first.** `benches/cache_events.rs` as it stood only benchmarked `get` and `same_breed` — a prior session's own comment on the file argued `scan_ages` and `update_age` weren't worth measuring, on theories about what would dominate their cost. Those theories were never actually checked against hardware counters (the environment that wrote them had no PMU access at all), and `scan_ages` specifically is the workload this run most needed to check. `benches/cache_events.rs` was extended to cover all four workloads, mirroring `benches/workloads.rs`'s existing `run_scan_ages`/`run_update_age` patterns exactly — no `src/` changes, per the task constraints.
+
+**Unit note**: Criterion labels the measurement axis "cycles" regardless of which `Perf` counter is plugged in — for this run it's actually the selected hardware event's raw count per call (`cache-misses` or `cache-references`), not CPU cycles. Fractional values below 1 are real: Criterion's point estimate is a per-iteration average over a batch of iterations, and sub-1 averages just mean "usually zero misses this call."
+
+**Working-set caveat**: `get`/`update_age`/`same_breed` rotate through a pool of 200 pre-sampled UUIDs (`RoundRobin`, `SAMPLE_TARGET_COUNT`) across each benchmark's full measurement window (typically tens of thousands to low millions of iterations). For the two `HashMap`-based backends this means the *same* ~200 records get re-touched constantly within one measurement window, so they stay cache-resident after the first few iterations regardless of overall dataset size — that's why `canonical`/`canonical_cached`'s `get`/`update_age` miss counts below sit near zero even at 1M records. That's a real property of this benchmark's access pattern (and it's the same pattern the wall-clock suite already uses, so the two are comparable), not evidence that a HashMap lookup into an out-of-cache 1M-entry map costs nothing in general — a genuinely cold, uniformly-random-across-all-records access pattern would show more. AoS/SoA don't get this benefit because their `get` is a linear `.find()`/`.position()` scan that touches a scan-distance-dependent amount of memory per call.
+
+Machine: `baileyai`, AMD Ryzen AI Max+ 395 (32 threads), L1d 768 KiB/16 instances, L2 16 MiB/16 instances, L3 64 MiB across 2 instances (32 MiB per CCD) — noted because it's relevant to the `scan_ages` finding below: a 1M-record `AosStore` (~48 MB of `DogRecord`s alone, plus scattered heap-allocated breed `String`s) doesn't fit in one CCD's 32 MiB L3 share, while the 100K case (~4.8 MB) comfortably does.
+
+### `get` — cache-misses per call
+
+| Size | AoS | SoA | Canonical | Canonical+cache |
+|---|---:|---:|---:|---:|
+| 1,000 | 0.011 | 0.012 | **0.002** | **0.002** |
+| 100,000 | 1,479.9 | 336.9 | **0.002** | **0.002** |
+| 1,000,000 | 1,798.9 | 1,237.6 | **0.002** | 0.004 |
+
+**Verdict: Canonical and Canonical+cache both show dramatically fewer cache misses than AoS/SoA, matching the wall-clock win.** Given the working-set caveat above, this specific gap is partly an artifact of the 200-ID rotation pool keeping the `HashMap`-based backends' small working set resident — but AoS/SoA's `.find()`/`.position()` genuinely does scan real memory (338–1,800 misses/call, scaling with the touched-region size), so the *relative* story — hash lookup beats linear scan on cache behavior, not just wall-clock — holds regardless.
+
+### `scan_ages` — cache-misses per call
+
+| Size | AoS | SoA | Canonical | Canonical+cache |
+|---|---:|---:|---:|---:|
+| 1,000 | 0.015 | **0.003** | 0.045 | **0.003** |
+| 100,000 | 8,100.8 | **269.4** | 10,962.6 | 909.9 |
+| 1,000,000 | 44,872.2 | 23,816.8 | 1,100,195.9 | **7,097.9** |
+
+**Verdict, directly answering the task's core question: at 1M records — the size where wall-clock timing called Canonical+cache and SoA statistically tied — real hardware counters show Canonical+cache has a genuine structural advantage: ~3.36× fewer cache misses (7,097.9 vs. 23,816.8).** Cache-references at 1M are nearly identical between the two (Canonical+cache 250,317.8 vs. SoA 251,847.7 — both are `.clone()` of an already-packed `Vec<u32>`, so this checks out: same amount of data touched), which means the real signal is in the **miss rate**: Canonical+cache misses on 2.84% of references vs. SoA's 9.46% — over 3× more efficient per access, not just fewer total accesses. This is exactly the kind of thing wall-clock timing on a noisy/virtualized environment can't resolve but a hardware counter can: **the prior diagnostic session's conclusion that the ~14% wall-clock gap was "noise, not real" was correct about wall-clock time specifically, but cache-miss counts now show Canonical+cache is the structurally better choice at 1M, even though that didn't show up as a wall-clock win.**
+
+One honest wrinkle: at 100K, the direction flips — SoA has fewer misses (269.4 vs. 909.9) and a lower miss rate (2.06% vs. 6.06%) than Canonical+cache, even though both backends run the identical `.clone()`-of-a-packed-`Vec<u32>` code path at every size (verified in `src/store/soa.rs`/`src/store/canonical_cached.rs` — this isn't a code-path difference). The likely explanation is that Canonical+cache also carries a `HashMap<Uuid, DogRecord>`, a breed index, and a `HashMap<Uuid, usize>` position index alongside `age_cache`, all built during `Dataset` construction just before the benchmark runs — a much larger co-resident working set than SoA's three flat arrays, which could change cache-associativity conflicts differently at 100K's specific data volume (~a few hundred KB of just `age_cache`, well inside even one CPU core's L2) than it does at 1M's (~4 MB of `age_cache` alone, past L2 territory for one core, into shared-L3 territory where the CCD's total occupancy from those other structures matters more). This is a plausible mechanism, not a verified one — flagged as an open question below rather than asserted as settled.
+
+### `update_age` — cache-misses per call
+
+| Size | AoS | SoA | Canonical | Canonical+cache |
+|---|---:|---:|---:|---:|
+| 1,000 | 0.009 | 0.009 | **0.001** | 0.002 |
+| 100,000 | 1,322.8 | 318.3 | **0.001** | 0.002 |
+| 1,000,000 | 2,374.3 | 1,583.2 | **0.001** | 0.002 |
+
+**Verdict: Canonical wins outright on cache-misses, Canonical+cache close behind — both still ~1,000× fewer misses than AoS/SoA.** The write-through tax shows up here exactly as the wall-clock numbers predicted: Canonical+cache's miss count runs 36–85% higher than plain Canonical's at every size (the position-index lookup plus the extra array write), consistent in direction and rough scale with the ~1.5× wall-clock tax already reported above — just a second, independent measurement landing on the same conclusion.
+
+### `same_breed` — cache-misses per call
+
+| Size | AoS | SoA | Canonical | Canonical+cache |
+|---|---:|---:|---:|---:|
+| 1,000 | 0.143 | 0.128 | **0.008** | 0.009 |
+| 100,000 | 4,184.6 | 3,635.5 | 35.1 | **33.0** |
+| 1,000,000 | 63,464.7 | 59,192.7 | 855.5 | **678.1** |
+
+**Verdict: Canonical/Canonical+cache both stay far below AoS/SoA, matching the wall-clock tie for the win — and at 100K/1M, Canonical+cache edges out plain Canonical on cache-misses too** (678.1 vs. 855.5 at 1M, ~21% fewer), even though wall-clock called these two statistically tied there as well. Smaller effect than `scan_ages`'s, and expected to be: `same_breed`'s cost is dominated by breed-index traversal, which is identical code in both backends, not by the packed-array-vs-hashed-record difference that drives the `scan_ages` result.
 
 ## Open questions
 
-- **Cache-miss counts on real hardware** (the item above): run `cargo bench --features perf-events --bench cache_events` on `baileyai` or equivalent and fold the results in here — now covering all four backends.
+- **Cache-miss counts on real hardware**: done this pass — see the cache-miss section above. Resolved the `scan_ages` question the prior diagnostic session left open: Canonical+cache does have a real structural cache-miss advantage over SoA at 1M (not just noise), even though it doesn't show up in wall-clock time at that size.
+- **The `scan_ages` 100K cache-miss crossover**: new this pass. SoA has fewer cache misses than Canonical+cache at 100K (opposite of the 1M result), despite both running the identical `.clone()`-of-packed-`Vec<u32>` code path at every size. Suspected cause is the larger co-resident working set Canonical+cache carries (extra `HashMap`s and indices built alongside `age_cache`) interacting with L2/L3 capacity differently at 100K's data volume than at 1M's — plausible but not verified; would need e.g. `perf stat`'s more detailed L1/L2/L3-specific counters (this run only captured the generic `cache-misses`/`cache-references` hardware events) to actually confirm.
 - **Lazy/dirty-flag invalidation as a fifth backend or mode**: ADR-0003 chose eager write-through for correctness-first simplicity; the ~1.5× `update_age` tax measured here is small enough that lazy invalidation isn't obviously worth the added complexity, but a **write-heavy mixed workload** (see next item) is exactly the scenario where that calculus could flip — eager pays a little on every write regardless of whether a scan ever follows; lazy would pay more per scan but nothing extra on writes that are never followed by a scan.
 - **Write-heavy / mixed read-write workloads**: still not tested. This is now the most direct way to find out whether Canonical+cache's ~1.5× write tax is actually free in practice (writes are cheap in absolute terms either way) or whether it matters at write volumes far exceeding this benchmark's per-call measurement.
 - **Memory overhead per backend**: not measured this pass. Canonical+cache now carries a `HashMap<Uuid, DogRecord>`, a breed index, a packed `Vec<u32>`, *and* a `HashMap<Uuid, usize>` position index — meaningfully more bookkeeping than any of the other three backends. Given how decisively it wins every workload above, memory overhead is the most likely remaining reason not to default to it, and is unmeasured.
