@@ -188,27 +188,63 @@ pub struct CanonicalCachedState {
 impl CanonicalCachedState {
     /// Build from records and littermate edges — identical construction
     /// logic to `CanonicalCachedStore::new`/`CanonicalStore::new`.
+    ///
+    /// # Reopen-path profiling (STORAGE-008/009 follow-up)
+    ///
+    /// Real profiling of `SnapshotRebuildStore::open` (the one variant whose
+    /// benchmarked `open` calls this constructor — see
+    /// `benches/durability.rs`'s `run_load`/`RESULTS.md`'s reopen-cost
+    /// section for the full breakdown across all 8 variants) found the work
+    /// below splits into two genuinely independent phases at this dataset
+    /// shape's dominant cost: everything keyed by *record* (breed index,
+    /// age cache, position index, then the canonical records map) only
+    /// touches `records`; the adjacency index only touches `edges`.
+    /// Disjoint inputs, disjoint outputs, no merge step — `std::thread::scope`
+    /// (stdlib, no new dependency) is enough to run them concurrently;
+    /// `rayon`'s data-parallel iterators would be overkill for a plain
+    /// two-way split with nothing left to subdivide further.
     pub fn new(records: Vec<DogRecord>, edges: Vec<(Uuid, Uuid)>) -> Self {
-        let mut breed_index: HashMap<String, Vec<Uuid>> = HashMap::new();
-        let mut age_cache = Vec::with_capacity(records.len());
-        let mut position_index = HashMap::with_capacity(records.len());
+        let (adjacency_index, (records, breed_index, age_cache, position_index)) =
+            std::thread::scope(|scope| {
+                let adjacency_handle = scope.spawn(move || {
+                    let mut adjacency_index: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
+                    for (a, b) in edges {
+                        adjacency_index.entry(a).or_default().push(b);
+                        adjacency_index.entry(b).or_default().push(a);
+                    }
+                    adjacency_index
+                });
 
-        for (position, record) in records.iter().enumerate() {
-            breed_index
-                .entry(record.breed.clone())
-                .or_default()
-                .push(record.id);
-            age_cache.push(record.age);
-            position_index.insert(record.id, position);
-        }
+                let mut breed_index: HashMap<String, Vec<Uuid>> = HashMap::new();
+                let mut age_cache = Vec::with_capacity(records.len());
+                let mut position_index = HashMap::with_capacity(records.len());
+                for (position, record) in records.iter().enumerate() {
+                    breed_index
+                        .entry(record.breed.clone())
+                        .or_default()
+                        .push(record.id);
+                    age_cache.push(record.age);
+                    position_index.insert(record.id, position);
+                }
+                let records: HashMap<Uuid, DogRecord> =
+                    records.into_iter().map(|r| (r.id, r)).collect();
 
-        let mut adjacency_index: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
-        for (a, b) in edges {
-            adjacency_index.entry(a).or_default().push(b);
-            adjacency_index.entry(b).or_default().push(a);
-        }
+                // The spawned closure above only ever does infallible,
+                // side-effect-free HashMap/Vec insertion — nothing that can
+                // fail in normal operation. `resume_unwind` (not
+                // unwrap/expect) re-raises the original panic exactly as it
+                // occurred if that ever changes, rather than fabricating a
+                // new one or silently discarding the failure.
+                let adjacency_index = match adjacency_handle.join() {
+                    Ok(adjacency_index) => adjacency_index,
+                    Err(panic_payload) => std::panic::resume_unwind(panic_payload),
+                };
 
-        let records = records.into_iter().map(|r| (r.id, r)).collect();
+                (
+                    adjacency_index,
+                    (records, breed_index, age_cache, position_index),
+                )
+            });
 
         Self {
             records,

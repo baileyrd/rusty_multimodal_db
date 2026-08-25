@@ -58,22 +58,45 @@ struct Indexes {
     position_index: HashMap<Uuid, usize>,
 }
 
+/// See `CanonicalCachedState::new`'s doc comment (`src/durability/mod.rs`)
+/// for why this splits into a spawned thread building the adjacency index
+/// (only touches `edges`) running alongside the breed/position index and
+/// records-map construction (only touches `records`) — same disjoint-input,
+/// no-merge shape, same `std::thread::scope` fix, duplicated here rather
+/// than shared per this crate's existing convention of small explicit
+/// duplication across structurally similar backends (see `wal_buffered.rs`'s
+/// own module docs).
 fn build_indexes(records: &[DogRecord], edges: Vec<(Uuid, Uuid)>) -> Indexes {
-    let mut breed_index: HashMap<String, Vec<Uuid>> = HashMap::new();
-    let mut position_index = HashMap::with_capacity(records.len());
-    for (position, record) in records.iter().enumerate() {
-        breed_index
-            .entry(record.breed.clone())
-            .or_default()
-            .push(record.id);
-        position_index.insert(record.id, position);
-    }
-    let mut adjacency_index: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
-    for (a, b) in edges {
-        adjacency_index.entry(a).or_default().push(b);
-        adjacency_index.entry(b).or_default().push(a);
-    }
-    let records_map = records.iter().cloned().map(|r| (r.id, r)).collect();
+    let (adjacency_index, (breed_index, position_index, records_map)) =
+        std::thread::scope(|scope| {
+            let adjacency_handle = scope.spawn(move || {
+                let mut adjacency_index: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
+                for (a, b) in edges {
+                    adjacency_index.entry(a).or_default().push(b);
+                    adjacency_index.entry(b).or_default().push(a);
+                }
+                adjacency_index
+            });
+
+            let mut breed_index: HashMap<String, Vec<Uuid>> = HashMap::new();
+            let mut position_index = HashMap::with_capacity(records.len());
+            for (position, record) in records.iter().enumerate() {
+                breed_index
+                    .entry(record.breed.clone())
+                    .or_default()
+                    .push(record.id);
+                position_index.insert(record.id, position);
+            }
+            let records_map = records.iter().cloned().map(|r| (r.id, r)).collect();
+
+            let adjacency_index = match adjacency_handle.join() {
+                Ok(adjacency_index) => adjacency_index,
+                Err(panic_payload) => std::panic::resume_unwind(panic_payload),
+            };
+
+            (adjacency_index, (breed_index, position_index, records_map))
+        });
+
     Indexes {
         records: records_map,
         breed_index,
