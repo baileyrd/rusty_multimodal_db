@@ -30,7 +30,9 @@ use criterion::measurement::WallTime;
 use criterion::{
     black_box, criterion_group, criterion_main, BatchSize, BenchmarkGroup, BenchmarkId, Criterion,
 };
-use rusty_multimodal_db::bench_support::{build_dataset, fresh_temp_dir, Dataset, RoundRobin, SIZES};
+use rusty_multimodal_db::bench_support::{
+    build_dataset, fresh_temp_dir, Dataset, RoundRobin, SIZES,
+};
 use rusty_multimodal_db::durability::{
     DurabilityError, HybridStore, LsmStore, MmapAgeStore, RedbStore, SnapshotFullStore,
     SnapshotRebuildStore, WalBufferedStore, WalFsyncStore,
@@ -264,8 +266,7 @@ fn run_per_write<S: DurableVariant>(
         return;
     };
     let path = dir.join("store");
-    let Ok(mut store) = S::create_at(dataset.records.clone(), dataset.edges.clone(), &path)
-    else {
+    let Ok(mut store) = S::create_at(dataset.records.clone(), dataset.edges.clone(), &path) else {
         let _ = std::fs::remove_dir_all(&dir);
         return;
     };
@@ -295,8 +296,7 @@ fn run_checkpoint<S: Checkpointable>(
         return;
     };
     let path = dir.join("store");
-    let Ok(mut store) = S::create_at(dataset.records.clone(), dataset.edges.clone(), &path)
-    else {
+    let Ok(mut store) = S::create_at(dataset.records.clone(), dataset.edges.clone(), &path) else {
         let _ = std::fs::remove_dir_all(&dir);
         return;
     };
