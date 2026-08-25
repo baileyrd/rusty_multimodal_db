@@ -56,6 +56,20 @@ struct HybridSnapshot {
     state: CanonicalCachedState,
 }
 
+/// Borrowed mirror of [`HybridSnapshot`], field-for-field identical, used
+/// only by [`HybridStore::checkpoint`] to serialize directly from the live
+/// `&CanonicalCachedState` instead of cloning it first — `&T`'s `Serialize`
+/// impl delegates to `T`'s, so this produces byte-identical output to
+/// serializing an owned `HybridSnapshot`, and [`HybridStore::open`] keeps
+/// deserializing into the owned type unchanged (it needs an owned
+/// `CanonicalCachedState` to move into `Self` either way, so there's
+/// nothing to borrow on that side).
+#[derive(Serialize)]
+struct HybridSnapshotRef<'a> {
+    seq_at_snapshot: Option<u64>,
+    state: &'a CanonicalCachedState,
+}
+
 /// Hybrid snapshot-plus-WAL durable store. See module docs for the
 /// durability model.
 pub struct HybridStore {
@@ -169,9 +183,9 @@ impl HybridStore {
         } else {
             Some(self.next_seq - 1)
         };
-        let snapshot = HybridSnapshot {
+        let snapshot = HybridSnapshotRef {
             seq_at_snapshot,
-            state: self.state.clone(),
+            state: &self.state,
         };
         let bytes = bincode::serialize(&snapshot)?;
         std::fs::write(&self.snapshot_path, bytes)?;
