@@ -26,13 +26,41 @@ name = "scan_ages_crossover"
 harness = false
 required-features = ["perf-events"]
 
+[[bench]]
+name = "durability"
+harness = false
+
 [dependencies]
 # UUID type + deterministic construction from seeded random bytes (Builder::from_random_bytes
 # needs no extra feature — Uuid::new_v4()'s OS-randomness feature is deliberately not enabled,
-# since dataset generation must be reproducible from a seed, not OS-random).
-uuid = { version = "1", default-features = false, features = ["std"] }
-# Error type for the one fallible DogStore operation (update_age on an unknown UUID).
+# since dataset generation must be reproducible from a seed, not OS-random). The "serde" feature
+# is new as of the durability work (STORAGE-008/009): WAL entries and snapshots need Uuid to
+# (de)serialize.
+uuid = { version = "1", default-features = false, features = ["std", "serde"] }
+# Error type for the one fallible DogStore operation (update_age on an unknown UUID), and for
+# DurabilityError (src/durability/mod.rs).
 thiserror = "1"
+# New as of the durability work (STORAGE-008/009): (De)serialize trait for DogRecord and the
+# shared CanonicalCachedState snapshot/WAL-entry shape. The "derive" feature is needed for the
+# #[derive(Serialize, Deserialize)] on those types.
+serde = { version = "1", features = ["derive"] }
+# New as of the durability work: binary (de)serialization for WAL entries and snapshots. Chosen
+# over serde_json for the whole durability module (not just the WAL's hot path) — this is a
+# benchmark harness, not a tool whose on-disk files need to stay human-readable/debuggable, and
+# a single serialization format is one fewer thing to keep consistent across 8 variants.
+bincode = "1"
+# New as of the durability work, Tier 2 variant 6 only (src/durability/mmap_store.rs): safe(r)
+# wrapper over memory-mapped files. The de facto standard crate for this in the Rust ecosystem
+# (successor to the unmaintained `memmap`).
+memmap2 = "0.9"
+# New as of the durability work, Tier 2 variant 8 only (src/durability/embedded_store.rs): a
+# pure-Rust, ACID-transactional embedded key-value store (its own on-disk B-tree with MVCC).
+# Chosen over `sled` specifically: sled has been in a long-standing "still beta" state with a
+# documented history of crash-safety caveats depending on version — a real concern for a
+# durability benchmark whose whole point is measuring genuine crash-recoverability. redb is
+# younger but built around explicit ACID transactions from the start, with no equivalent
+# caveat, and is pure Rust with no C dependency to build/vendor.
+redb = "2"
 
 [dependencies.rand]
 # Seeded, reproducible RNG for dataset generation (StdRng::seed_from_u64) and for benchmark

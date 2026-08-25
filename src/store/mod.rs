@@ -25,12 +25,31 @@ use crate::record::DogRecord;
 use thiserror::Error;
 use uuid::Uuid;
 
-/// The one fallible operation across all four backends.
-#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
+/// The one fallible operation across all four backends — extended, as of
+/// the durability work (`STORAGE-008`/`STORAGE-009`), with a second
+/// variant so the durability variants in `src/durability/` (each of which
+/// implements this same trait, so they're usable and testable the same
+/// way as the other four backends) can report a real I/O/serialization
+/// failure through `update_age` rather than conflating it with
+/// `NotFound` or panicking. This is an additive change to the shared
+/// trait/error definitions (not a change to any of the four existing
+/// backend implementations, which don't construct `Durability` and are
+/// unaffected) — no exhaustive `match` on `StoreError` exists anywhere in
+/// this crate (verified before adding the variant), so nothing else needed
+/// updating. Dropped `Copy` from the derive since `Durability`'s `String`
+/// payload isn't `Copy`; nothing relied on `StoreError` being `Copy`.
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum StoreError {
     /// `update_age` was called with a UUID no record has.
     #[error("no record found for id {0}")]
     NotFound(Uuid),
+    /// A durability variant's `update_age` failed for a reason other than
+    /// an unknown UUID — e.g. a WAL append, fsync, or snapshot write
+    /// failed. Carries the underlying `DurabilityError`'s message rather
+    /// than the error itself, so this trait/error module doesn't need to
+    /// depend on `src/durability`.
+    #[error("durability failure: {0}")]
+    Durability(String),
 }
 
 /// Shared storage interface implemented by [`AosStore`] (row-oriented),
