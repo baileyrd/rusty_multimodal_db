@@ -6,6 +6,7 @@
 //! the three backends are compared this way.
 
 pub mod bench_support;
+pub mod durability;
 pub mod generator;
 pub mod record;
 pub mod store;
