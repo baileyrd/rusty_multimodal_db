@@ -10,7 +10,8 @@ use criterion::{
     black_box, criterion_group, criterion_main, BenchmarkGroup, BenchmarkId, Criterion,
 };
 use rusty_multimodal_db::bench_support::{
-    build_dataset, two_hop_neighbors, Dataset, RoundRobin, SIZES,
+    build_dataset, two_hop_neighbors, Dataset, MixedWorkloadConfig, MixedWorkloadDriver,
+    RoundRobin, MIXED_WRITE_RATIOS, SEED, SIZES,
 };
 use rusty_multimodal_db::store::{AosStore, CanonicalCachedStore, CanonicalStore, SoaStore};
 use rusty_multimodal_db::{DogRecord, DogStore};
@@ -201,6 +202,58 @@ fn run_neighbors_two_hop<S>(
     });
 }
 
+/// Blended `get`/`update_age`/`scan_ages` sequence — see
+/// `MixedWorkloadDriver`'s docs. One group per write ratio (so the group
+/// name carries the swept dimension `BenchmarkId` doesn't have room for
+/// alongside backend/size), each covering all four backends at all three
+/// sizes, matching every other workload's structure.
+fn bench_mixed_workload(c: &mut Criterion) {
+    for &write_ratio in &MIXED_WRITE_RATIOS {
+        let Ok(config) = MixedWorkloadConfig::new(write_ratio) else {
+            // MIXED_WRITE_RATIOS is a fixed [0.0, 1.0] constant array
+            // (bench_support.rs) — this branch is unreachable.
+            continue;
+        };
+        let group_name = format!(
+            "mixed_workload_write{}",
+            (write_ratio * 100.0).round() as u32
+        );
+        let mut group = c.benchmark_group(group_name);
+        for &n in &SIZES {
+            let dataset = build_dataset(n);
+            run_mixed_workload::<AosStore>(&mut group, "aos", n, &dataset, config);
+            run_mixed_workload::<SoaStore>(&mut group, "soa", n, &dataset, config);
+            run_mixed_workload::<CanonicalStore>(&mut group, "canonical", n, &dataset, config);
+            run_mixed_workload::<CanonicalCachedStore>(
+                &mut group,
+                "canonical_cached",
+                n,
+                &dataset,
+                config,
+            );
+        }
+        group.finish();
+    }
+}
+
+fn run_mixed_workload<S>(
+    group: &mut BenchmarkGroup<'_, WallTime>,
+    name: &str,
+    n: usize,
+    dataset: &Dataset,
+    config: MixedWorkloadConfig,
+) where
+    S: DogStore + From<Vec<DogRecord>>,
+{
+    let mut store = S::from(dataset.records.clone());
+    let mut driver = MixedWorkloadDriver::new(config, SEED, dataset.sample_ids.len());
+    group.bench_with_input(BenchmarkId::new(name, n), &n, |b, _| {
+        b.iter(|| {
+            let _ = black_box(driver.run_one(&mut store, &dataset.sample_ids));
+        });
+    });
+}
+
 criterion_group!(
     benches,
     bench_get,
@@ -208,6 +261,7 @@ criterion_group!(
     bench_update_age,
     bench_same_breed,
     bench_neighbors_one_hop,
-    bench_neighbors_two_hop
+    bench_neighbors_two_hop,
+    bench_mixed_workload
 );
 criterion_main!(benches);
