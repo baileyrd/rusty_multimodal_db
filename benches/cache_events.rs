@@ -16,12 +16,17 @@
 //! counter access (e.g. `baileyai`). See
 //! `docs/decisions/ADR-0002-cache-miss-instrumentation-platform.md`.
 //!
-//! Covers `get` and `same_breed` — the two workloads whose cost is most
-//! directly a function of memory-access pattern rather than allocation
-//! or hashing overhead (`scan_ages` is dominated by the size of the
-//! output `Vec` itself for all four backends, `update_age` by the
-//! lookup-then-write pattern already exercised by `get`) — across all
-//! four backends and three dataset sizes.
+//! Covers all four workloads (`get`, `scan_ages`, `update_age`,
+//! `same_breed`) across all four backends and three dataset sizes, to
+//! match `benches/workloads.rs`. An earlier draft of this file limited
+//! coverage to `get`/`same_breed` on the theory that `scan_ages` is
+//! dominated by the output `Vec` allocation and `update_age` by the
+//! lookup-then-write pattern already exercised by `get` — but that was
+//! a guess made without real hardware-counter access to check it
+//! against, and the whole point of running on `baileyai` is to test
+//! hypotheses like that one directly rather than reason about them from
+//! wall-clock noise. See `RESULTS.md`'s cache-miss section for the
+//! `scan_ages` finding this coverage was specifically added to check.
 
 #![cfg(target_os = "linux")]
 
@@ -63,6 +68,37 @@ where
     });
 }
 
+fn run_scan_ages<S>(group: &mut BenchmarkGroup<'_, Perf>, name: &str, n: usize, dataset: &Dataset)
+where
+    S: DogStore + From<Vec<DogRecord>>,
+{
+    let store = S::from(dataset.records.clone());
+    group.bench_with_input(BenchmarkId::new(name, n), &n, |b, _| {
+        b.iter(|| black_box(store.scan_ages()));
+    });
+}
+
+/// Mirrors `benches/workloads.rs::run_update_age` — store built once and
+/// reused across iterations (rotating target IDs) rather than rebuilt per
+/// iteration, which would make this impractically slow at 1M records.
+fn run_update_age<S>(group: &mut BenchmarkGroup<'_, Perf>, name: &str, n: usize, dataset: &Dataset)
+where
+    S: DogStore + From<Vec<DogRecord>>,
+{
+    let mut store = S::from(dataset.records.clone());
+    let mut cursor = RoundRobin::new(dataset.sample_ids.len());
+    let mut next_age: u32 = 0;
+    group.bench_with_input(BenchmarkId::new(name, n), &n, |b, _| {
+        b.iter(|| {
+            let id = dataset.sample_ids[cursor.advance()];
+            next_age = next_age.wrapping_add(1) % 21;
+            store
+                .update_age(black_box(id), black_box(next_age))
+                .expect("target id is always present");
+        });
+    });
+}
+
 fn cache_misses(c: &mut Criterion<Perf>) {
     let mut get_group = c.benchmark_group("get_cache_misses");
     for &n in &SIZES {
@@ -73,6 +109,31 @@ fn cache_misses(c: &mut Criterion<Perf>) {
         run_get::<CanonicalCachedStore>(&mut get_group, "canonical_cached", n, &dataset);
     }
     get_group.finish();
+
+    let mut scan_ages_group = c.benchmark_group("scan_ages_cache_misses");
+    for &n in &SIZES {
+        let dataset = build_dataset(n);
+        run_scan_ages::<AosStore>(&mut scan_ages_group, "aos", n, &dataset);
+        run_scan_ages::<SoaStore>(&mut scan_ages_group, "soa", n, &dataset);
+        run_scan_ages::<CanonicalStore>(&mut scan_ages_group, "canonical", n, &dataset);
+        run_scan_ages::<CanonicalCachedStore>(&mut scan_ages_group, "canonical_cached", n, &dataset);
+    }
+    scan_ages_group.finish();
+
+    let mut update_age_group = c.benchmark_group("update_age_cache_misses");
+    for &n in &SIZES {
+        let dataset = build_dataset(n);
+        run_update_age::<AosStore>(&mut update_age_group, "aos", n, &dataset);
+        run_update_age::<SoaStore>(&mut update_age_group, "soa", n, &dataset);
+        run_update_age::<CanonicalStore>(&mut update_age_group, "canonical", n, &dataset);
+        run_update_age::<CanonicalCachedStore>(
+            &mut update_age_group,
+            "canonical_cached",
+            n,
+            &dataset,
+        );
+    }
+    update_age_group.finish();
 
     let mut same_breed_group = c.benchmark_group("same_breed_cache_misses");
     for &n in &SIZES {
@@ -100,6 +161,31 @@ fn cache_references(c: &mut Criterion<Perf>) {
         run_get::<CanonicalCachedStore>(&mut get_group, "canonical_cached", n, &dataset);
     }
     get_group.finish();
+
+    let mut scan_ages_group = c.benchmark_group("scan_ages_cache_references");
+    for &n in &SIZES {
+        let dataset = build_dataset(n);
+        run_scan_ages::<AosStore>(&mut scan_ages_group, "aos", n, &dataset);
+        run_scan_ages::<SoaStore>(&mut scan_ages_group, "soa", n, &dataset);
+        run_scan_ages::<CanonicalStore>(&mut scan_ages_group, "canonical", n, &dataset);
+        run_scan_ages::<CanonicalCachedStore>(&mut scan_ages_group, "canonical_cached", n, &dataset);
+    }
+    scan_ages_group.finish();
+
+    let mut update_age_group = c.benchmark_group("update_age_cache_references");
+    for &n in &SIZES {
+        let dataset = build_dataset(n);
+        run_update_age::<AosStore>(&mut update_age_group, "aos", n, &dataset);
+        run_update_age::<SoaStore>(&mut update_age_group, "soa", n, &dataset);
+        run_update_age::<CanonicalStore>(&mut update_age_group, "canonical", n, &dataset);
+        run_update_age::<CanonicalCachedStore>(
+            &mut update_age_group,
+            "canonical_cached",
+            n,
+            &dataset,
+        );
+    }
+    update_age_group.finish();
 
     let mut same_breed_group = c.benchmark_group("same_breed_cache_references");
     for &n in &SIZES {
