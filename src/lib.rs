@@ -15,6 +15,25 @@
 //! round justified each of the three layers, and `RESULTS.md`'s
 //! `## Production recommendation` section for the numbers.
 //!
+//! # A second, generalized story: [`generic::production::GenericProductionStore`]
+//!
+//! Everything above is `Dog`-specific, by design — the charter's whole
+//! point was measuring one fixed record shape across storage layouts. A
+//! separate, later arc asked whether that same storage/durability/
+//! concurrency recipe generalizes to *any* record type, validated it
+//! against a second, structurally different domain (`Order`/`Customer` —
+//! a directed relation, a currency-like field, an enum categorical field),
+//! and promoted the result into [`generic`], a real generic library:
+//! `Record`/`IndexedField`/`ScannableField`/`SymmetricRelation`/`ChildOf`
+//! traits, composable store wrapper layers, and
+//! [`generic::production::GenericProductionStore`] — the generic
+//! equivalent of [`production::ProductionStore`], wired to the same mmap
+//! durability and global `RwLock` concurrency. See [`generic`]'s own
+//! module docs for the four-spike validation history and
+//! `docs/decisions/ADR-0009-generic-schema-design-proposal.md` (Accepted)
+//! for the acceptance record. This is new, parallel capability — nothing
+//! above changed to build it.
+//!
 //! # Everything else: benchmarked alternatives, not the recommended path
 //!
 //! `store`, `durability`, and `concurrency` hold the other three storage
@@ -36,10 +55,21 @@ pub mod bench_support;
 pub mod concurrency;
 pub mod durability;
 pub mod generator;
-/// Implementation spike measuring generic-schema overhead on `Dog` — see
-/// its own module docs. Not part of the recommended API surface above;
-/// exists to answer a measurement question raised by
-/// `docs/design/GENERIC-SCHEMA-DESIGN.md`, not to be used directly.
+/// A generic record/schema/query library: any domain implementing
+/// [`generic::traits::Record`] and friends gets equality-indexed lookup,
+/// scannable-field access, symmetric/directed relationship traversal, and
+/// — via [`generic::production::GenericProductionStore`] — real mmap
+/// durability and `RwLock` concurrency, generalized from `ProductionStore`
+/// above rather than hardcoded to `Dog`. Validated against `Dog` and a
+/// second, structurally different domain (`Order`/`Customer`, this
+/// module's real reference implementation) across four spikes before
+/// promotion — see this module's own doc comment for the full history,
+/// and ADR-0009 (Accepted) for the acceptance record. New, parallel
+/// capability: nothing above changed to build this.
+pub mod generic;
+/// Historical validation spikes that led to `generic` above — kept as the
+/// measurement record, not part of the recommended API surface. See its
+/// own module docs.
 pub mod generic_spike;
 pub mod production;
 pub mod record;

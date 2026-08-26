@@ -1,15 +1,24 @@
-//! The composable capability-wrapper layers from
-//! `docs/design/GENERIC-SCHEMA-DESIGN.md` §2/§4, implemented for real (not
-//! stubs) — this is where the design doc's §4.5 forwarding-boilerplate tax
-//! either shows up again under a real build, or doesn't. It does: see the
-//! forwarding `impl` blocks below, each one required for `Symmetric<..>`
-//! (the outermost layer in `DogGenericStore`) to still expose `GetById`/
-//! `FilterEq`/`ScanField`/`UpdateField` from the layers underneath it.
-//! Compare against the design doc's own count in its module docs' report.
+//! The composable capability-wrapper layers — promoted from
+//! `docs/design/GENERIC-SCHEMA-DESIGN.md` §2/§4. Each layer adds exactly
+//! one capability on top of an inner store that already provides
+//! `GetById`, and — since Rust has no trait delegation — must manually
+//! forward every other capability trait its inner store already provides,
+//! or that capability silently disappears once wrapped. That forwarding
+//! tax is real (§4.5 of the design doc) and is paid explicitly below, not
+//! hidden.
+//!
+//! `Flush` (added during promotion, not part of the original design doc)
+//! is the one new capability this round adds: a store composed with
+//! [`crate::generic::mmap_store::GenericMmapStore`] somewhere inside it
+//! needs a way to force its durable field to disk through however many
+//! wrapper layers sit on top — [`GenericProductionStore`](super::production::GenericProductionStore)
+//! is generic over the whole composed stack and has no other way to reach
+//! in. Every wrapper below forwards it, same as every other capability.
 
 use super::query::{Children, FilterEq, GetById, Neighbors, Parent, ScanField, UpdateField};
 use super::traits::{ChildOf, IndexedField, Record, ScannableField, SymmetricRelation};
 use super::NotFound;
+use crate::durability::DurabilityError;
 use std::collections::HashMap;
 use std::marker::PhantomData;
 
@@ -31,6 +40,23 @@ impl<R: Record + Clone> GetById<R> for BaseStore<R> {
     fn get(&self, id: R::Id) -> Option<R> {
         self.records.get(&id).cloned()
     }
+}
+
+/// A store with no durable field forwards `flush` as a no-op — `BaseStore`
+/// is always purely in-memory (durability, when present, is added by
+/// [`crate::generic::mmap_store::GenericMmapStore`] sitting somewhere
+/// inside the composed stack, not by `BaseStore` itself).
+impl<R: Record + Clone> Flush for BaseStore<R> {
+    fn flush(&self) -> Result<(), DurabilityError> {
+        Ok(())
+    }
+}
+
+/// Forces a store's durable field(s) to physical disk — see this module's
+/// docs for why this exists. A no-op for any layer/stack with nothing
+/// durable inside it.
+pub trait Flush {
+    fn flush(&self) -> Result<(), DurabilityError>;
 }
 
 /// Adds one `FilterEq` capability over an inner store — the generic
@@ -73,7 +99,7 @@ where
     }
 }
 
-// Forwarding impl #1: without this, `Indexed<S, ..>` doesn't expose
+// Forwarding impl: without this, `Indexed<S, ..>` doesn't expose
 // `GetById` even though its inner store already does.
 impl<S, R, Marker> GetById<R> for Indexed<S, R, Marker>
 where
@@ -85,10 +111,21 @@ where
     }
 }
 
+impl<S, R, Marker> Flush for Indexed<S, R, Marker>
+where
+    R: IndexedField<Marker>,
+    S: Flush,
+{
+    fn flush(&self) -> Result<(), DurabilityError> {
+        self.inner.flush()
+    }
+}
+
 /// Adds one `ScanField`/`UpdateField` capability over an inner store — the
 /// generic analogue of `CanonicalCachedStore`'s `age_cache` +
-/// `position_index`. This is the layer this spike's numbers are actually
-/// about.
+/// `position_index`, entirely in-memory (see
+/// [`crate::generic::mmap_store::GenericMmapStore`] for the durable
+/// analogue of this same shape).
 pub struct Scanned<S, R, Marker>
 where
     R: ScannableField<Marker>,
@@ -104,12 +141,11 @@ where
     R: ScannableField<Marker>,
 {
     /// Access to the inner store — needed by domain-specific, concrete
-    /// (non-generic) forwarding impls like `order_impl.rs`'s
-    /// `ScanField<Order, Amount> for Scanned<S, Order, CreatedAt>` (see
-    /// this file's module docs on why that can't be one generic impl
-    /// here). `inner`/`inner_mut` rather than a public field: keeps the
-    /// rest of `Scanned`'s representation (`position_index`, `cache`)
-    /// private.
+    /// (non-generic) forwarding impls like `forward_scannable_pairs!`'s
+    /// generated pairs (see this file's module docs on why that can't be
+    /// one generic impl). `inner`/`inner_mut` rather than a public field:
+    /// keeps the rest of `Scanned`'s representation (`position_index`,
+    /// `cache`) private.
     pub fn inner(&self) -> &S {
         &self.inner
     }
@@ -154,8 +190,8 @@ where
     }
 }
 
-// Forwarding impl #2: `Scanned<S, ..>` re-exposing `GetById` from its
-// inner store.
+// Forwarding impl: `Scanned<S, ..>` re-exposing `GetById` from its inner
+// store.
 impl<S, R, Marker> GetById<R> for Scanned<S, R, Marker>
 where
     R: ScannableField<Marker>,
@@ -166,70 +202,68 @@ where
     }
 }
 
-// Forwarding impl #3: `Scanned<S, ..>` re-exposing `FilterEq` from its
-// inner store (e.g. `Scanned<Indexed<BaseStore<R>, R, Breed>, R, Age>`
-// still needs to answer `filter_eq` on `Breed`) — note the two distinct
-// marker type parameters (`IndexMarker` for the field `FilterEq` is being
-// forwarded for, `Marker` for the field `Scanned` itself owns), exactly
-// the shape the design doc's own module docs called out as the source of
-// the tax.
+impl<S, R, Marker> Flush for Scanned<S, R, Marker>
+where
+    R: ScannableField<Marker>,
+    S: Flush,
+{
+    fn flush(&self) -> Result<(), DurabilityError> {
+        self.inner.flush()
+    }
+}
+
+// Forwarding impl: `Scanned<S, ..>` re-exposing `FilterEq` from its inner
+// store (e.g. `Scanned<Indexed<BaseStore<R>, R, Breed>, R, Age>` still
+// needs to answer `filter_eq` on `Breed`) — note the two distinct marker
+// type parameters (`IndexMarker` for the field `FilterEq` is being
+// forwarded for, `Marker` for the field `Scanned` itself owns).
 impl<S, R, Marker, IndexMarker> FilterEq<R, IndexMarker> for Scanned<S, R, Marker>
 where
     R: ScannableField<Marker> + IndexedField<IndexMarker>,
     S: FilterEq<R, IndexMarker>,
 {
     // Bare `R::IndexValue` is unambiguous here even though `R` is bound
-    // by both `ScannableField<Marker>` and `IndexedField<IndexMarker>`:
-    // this is the fixed state, after the associated-type rename
-    // (traits.rs) — before the rename, this was `R::Value`, ambiguous
-    // between the two traits' identically-named assoc types, the exact
-    // "ambiguous-associated-type" failure mode the design doc's own
-    // scratch crate hit once already (§4.3) and this forwarding impl hit
-    // again independently.
+    // by both `ScannableField<Marker>` and `IndexedField<IndexMarker>` —
+    // see `traits.rs`'s module docs for the associated-type rename this
+    // relies on.
     fn filter_eq(&self, value: &R::IndexValue) -> Vec<R::Id> {
         self.inner.filter_eq(value)
     }
 }
 
-// Forwarding impl #3b, new for Order/Customer (`Dog` only ever had one
-// `ScannableField`, so this case never came up before): `Scanned<S, ..>`
-// needs to re-expose `ScanField`/`UpdateField` for a field *other* than
-// its own once a record has more than one scannable field (`Order` has
-// `Amount` and `CreatedAt`) and the layers stack (`Scanned<Scanned<..,
-// Amount>, .., CreatedAt>`).
+// Forwarding impl, generated for every ordered pair of `ScannableField`
+// markers a record declares: `Scanned<S, ..>` needs to re-expose
+// `ScanField`/`UpdateField` for a field *other* than its own once a
+// record has more than one scannable field (`Order` has `Amount`,
+// `CreatedAt`, `DiscountCents`) and the layers stack.
 //
 // **This is NOT expressible as one generic impl over "any other marker,"
 // unlike every other forwarding impl in this file** — a first attempt,
 // `impl<S, R, Marker, OtherMarker> ScanField<R, OtherMarker> for
-// Scanned<S, R, Marker>`, doesn't even reach the associated-type
-// ambiguity this file's other forwarding impls hit: it fails to compile
-// at all, with `E0119: conflicting implementations of trait ScanField<_,
-// _> for type Scanned<_, _, _>`. Rust's coherence checker has no way to
-// know `OtherMarker != Marker`, so that impl and `Scanned`'s own direct
-// `ScanField<R, Marker>` impl above are seen as *potentially* the same
-// impl (the case `OtherMarker = Marker`) — a real orphan/overlap
-// violation, not a naming or inference problem, and not fixable by
-// disambiguating `R::Value` (fully-qualified syntax doesn't touch impl
-// coherence at all). Stable Rust has no negative bound expressing "these
-// two type parameters are unequal," so there is no way to write this as
-// one generic impl.
+// Scanned<S, R, Marker>`, doesn't even reach an associated-type ambiguity:
+// it fails to compile at all, with `E0119: conflicting implementations of
+// trait ScanField<_, _> for type Scanned<_, _, _>`. Rust's coherence
+// checker has no way to know `OtherMarker != Marker`, so that impl and
+// `Scanned`'s own direct `ScanField<R, Marker>` impl above are seen as
+// *potentially* the same impl (the case `OtherMarker = Marker`) — a real
+// orphan/overlap violation, not a naming or inference problem, and not
+// fixable by disambiguating `R::ScanValue` (fully-qualified syntax
+// doesn't touch impl coherence at all). Stable Rust has no negative bound
+// expressing "these two type parameters are unequal," so there is no way
+// to write this as one generic impl.
 //
 // The only way to make this compile: one concrete, non-generic impl per
-// *ordered pair* of markers. That's a real, unavoidable cost in what the
-// compiler has to check — the tax for N scannable fields on one record
-// isn't O(N) forwarding impls (the design doc's §4.5 accounting, which
-// only ever validated a single-scannable-field domain, had no visibility
-// into this), it's O(N²): one concrete impl per ordered pair, not one
-// generic impl per field. What's NOT unavoidable is a human hand-writing
-// and maintaining each pair — [`forward_scannable_pairs`] below generates
-// them from a field list, so a new scannable field costs one macro-
-// invocation entry, not new hand-written impls. See `order_impl.rs`'s
-// invocation and its module docs for the before/after.
+// *ordered pair* of markers — the tax for N scannable fields on one
+// record is O(N²), not O(N). What's not unavoidable is a human hand-
+// writing and maintaining each pair — the macro below generates them from
+// a field list, so a new scannable field costs one macro-invocation
+// entry, not new hand-written impls. See `order_customer.rs`'s
+// invocation.
 #[macro_export]
 macro_rules! forward_scannable_pairs {
     // Entry point: a record type and its `ScannableField` markers, each
     // with its concrete `ScanValue` type (needed because macro_rules!
-    // can't look up an associated type — see this macro's module docs).
+    // can't look up an associated type).
     // `$record; Marker1: Value1, Marker2: Value2, ...`
     ($record:ty; $($marker:ident : $value:ty),+ $(,)?) => {
         $crate::forward_scannable_pairs!(@rotate $record; []; [$($marker : $value),+]);
@@ -239,9 +273,9 @@ macro_rules! forward_scannable_pairs {
     // its pairs against everything else (`$prefix` — already-processed
     // owners, still needed as forwarding targets — plus `$rest`, the
     // still-to-be-processed owners), then recurses with `$owner` moved
-    // into `$prefix`. This is the standard "rotating accumulator" trick
-    // for generating all off-diagonal pairs from a list in `macro_rules!`
-    // — chosen specifically because `macro_rules!` cannot compare two
+    // into `$prefix`. The standard "rotating accumulator" trick for
+    // generating all off-diagonal pairs from a list in `macro_rules!` —
+    // chosen specifically because `macro_rules!` cannot compare two
     // matched fragments for equality (there is no `$a == $b` for
     // `:ident`/`:ty` matchers), so the diagonal (`owner == owner`) has to
     // be excluded *structurally*, by construction, rather than by a
@@ -269,33 +303,32 @@ macro_rules! forward_scannable_pairs {
         )*
     };
 
-    // The actual payload: one concrete `ScanField`/`UpdateField` pair,
-    // the same shape `order_impl.rs` originally hand-wrote once.
+    // The actual payload: one concrete `ScanField`/`UpdateField` pair.
     (@impl_pair $record:ty; $owner:ident : $owner_value:ty; $forwarded:ident : $forwarded_value:ty) => {
-        impl<S> $crate::generic_spike::query::ScanField<$record, $forwarded>
-            for $crate::generic_spike::store::Scanned<S, $record, $owner>
+        impl<S> $crate::generic::query::ScanField<$record, $forwarded>
+            for $crate::generic::store::Scanned<S, $record, $owner>
         where
-            S: $crate::generic_spike::query::ScanField<$record, $forwarded>,
+            S: $crate::generic::query::ScanField<$record, $forwarded>,
         {
             fn scan(&self) -> Vec<$forwarded_value> {
-                $crate::generic_spike::store::Scanned::inner(self).scan()
+                $crate::generic::store::Scanned::inner(self).scan()
             }
         }
 
-        impl<S> $crate::generic_spike::query::UpdateField<$record, $forwarded>
-            for $crate::generic_spike::store::Scanned<S, $record, $owner>
+        impl<S> $crate::generic::query::UpdateField<$record, $forwarded>
+            for $crate::generic::store::Scanned<S, $record, $owner>
         where
-            S: $crate::generic_spike::query::UpdateField<$record, $forwarded>,
+            S: $crate::generic::query::UpdateField<$record, $forwarded>,
         {
             fn update(
                 &mut self,
-                id: <$record as $crate::generic_spike::traits::Record>::Id,
+                id: <$record as $crate::generic::traits::Record>::Id,
                 value: $forwarded_value,
             ) -> Result<
                 (),
-                $crate::generic_spike::NotFound<<$record as $crate::generic_spike::traits::Record>::Id>,
+                $crate::generic::NotFound<<$record as $crate::generic::traits::Record>::Id>,
             > {
-                $crate::generic_spike::store::Scanned::inner_mut(self).update(id, value)
+                $crate::generic::store::Scanned::inner_mut(self).update(id, value)
             }
         }
     };
@@ -339,7 +372,7 @@ where
     }
 }
 
-// Forwarding impl #4: `Symmetric<S, ..>` re-exposing `GetById`.
+// Forwarding impl: `Symmetric<S, ..>` re-exposing `GetById`.
 impl<S, R, Marker> GetById<R> for Symmetric<S, R, Marker>
 where
     R: SymmetricRelation<Marker>,
@@ -350,7 +383,17 @@ where
     }
 }
 
-// Forwarding impl #5: `Symmetric<S, ..>` re-exposing `FilterEq`.
+impl<S, R, Marker> Flush for Symmetric<S, R, Marker>
+where
+    R: SymmetricRelation<Marker>,
+    S: Flush,
+{
+    fn flush(&self) -> Result<(), DurabilityError> {
+        self.inner.flush()
+    }
+}
+
+// Forwarding impl: `Symmetric<S, ..>` re-exposing `FilterEq`.
 impl<S, R, Marker, IndexMarker> FilterEq<R, IndexMarker> for Symmetric<S, R, Marker>
 where
     R: SymmetricRelation<Marker> + IndexedField<IndexMarker>,
@@ -361,9 +404,7 @@ where
     }
 }
 
-// Forwarding impl #6: `Symmetric<S, ..>` re-exposing `ScanField` — this is
-// the one this spike's own benchmark actually calls (`DogGenericStore` is
-// a `Symmetric<..>` at the top).
+// Forwarding impl: `Symmetric<S, ..>` re-exposing `ScanField`.
 impl<S, R, Marker, ScanMarker> ScanField<R, ScanMarker> for Symmetric<S, R, Marker>
 where
     R: SymmetricRelation<Marker> + ScannableField<ScanMarker>,
@@ -374,7 +415,7 @@ where
     }
 }
 
-// Forwarding impl #7: `Symmetric<S, ..>` re-exposing `UpdateField`.
+// Forwarding impl: `Symmetric<S, ..>` re-exposing `UpdateField`.
 impl<S, R, Marker, ScanMarker> UpdateField<R, ScanMarker> for Symmetric<S, R, Marker>
 where
     R: SymmetricRelation<Marker> + ScannableField<ScanMarker>,
@@ -445,11 +486,11 @@ where
     }
 }
 
-// Forwarding impl #8: `Reversed<S, ..>` re-exposing `GetById` (for the
-// child record type `C` — see the design doc §4.3's own account of the
-// real mistake it caught here: an earlier draft tried to forward
-// `GetById<P>`, the *parent* type, which a `C`-only inner store can never
-// actually provide).
+// Forwarding impl: `Reversed<S, ..>` re-exposing `GetById` (for the child
+// record type `C` — a store built entirely from `&[C]` can never actually
+// provide `GetById<P>`, the parent type; see the design doc §4.3's own
+// account of the real mistake caught here during the original design
+// pass).
 impl<S, P, C, Marker> GetById<C> for Reversed<S, P, C, Marker>
 where
     P: Record,
@@ -461,7 +502,18 @@ where
     }
 }
 
-// Forwarding impl #9: `Reversed<S, ..>` re-exposing `FilterEq` on `C`.
+impl<S, P, C, Marker> Flush for Reversed<S, P, C, Marker>
+where
+    P: Record,
+    C: ChildOf<Marker, ParentId = P::Id>,
+    S: Flush,
+{
+    fn flush(&self) -> Result<(), DurabilityError> {
+        self.inner.flush()
+    }
+}
+
+// Forwarding impl: `Reversed<S, ..>` re-exposing `FilterEq` on `C`.
 impl<S, P, C, Marker, IndexMarker> FilterEq<C, IndexMarker> for Reversed<S, P, C, Marker>
 where
     P: Record,
@@ -473,7 +525,7 @@ where
     }
 }
 
-// Forwarding impl #10: `Reversed<S, ..>` re-exposing `ScanField` on `C`.
+// Forwarding impl: `Reversed<S, ..>` re-exposing `ScanField` on `C`.
 impl<S, P, C, Marker, ScanMarker> ScanField<C, ScanMarker> for Reversed<S, P, C, Marker>
 where
     P: Record,
@@ -485,7 +537,7 @@ where
     }
 }
 
-// Forwarding impl #11: `Reversed<S, ..>` re-exposing `UpdateField` on `C`.
+// Forwarding impl: `Reversed<S, ..>` re-exposing `UpdateField` on `C`.
 impl<S, P, C, Marker, ScanMarker> UpdateField<C, ScanMarker> for Reversed<S, P, C, Marker>
 where
     P: Record,

@@ -1,10 +1,24 @@
-# ADR-0009: Generalize the record/store abstraction beyond `Dog` — design proposal, not yet accepted
+# ADR-0009: Generalize the record/store abstraction beyond `Dog`
 
-- Status: **Proposed** (not Accepted — no implementation authorized by this ADR)
-- Date: 2026-08-25
-- Deciders: baileyrd (pending review)
-- Related: `docs/design/GENERIC-SCHEMA-DESIGN.md` (the full design document this ADR summarizes), `ADR-0001-three-backend-empirical-comparison.md`, `ADR-0004-one-hop-neighbors-trait-method.md`, `ADR-0006-tier-2-durability-architectures.md`, `ADR-0008-production-default.md`
+- Status: **Accepted** (promoted from Proposed — see "Acceptance and implementation" below)
+- Date: 2026-08-25 (proposed); 2026-08-26 (accepted, implemented)
+- Deciders: baileyrd
+- Related: `docs/design/GENERIC-SCHEMA-DESIGN.md` (the full design document this ADR summarizes), `docs/specifications/storage/STORAGE-012-generic-schema-library.md` (the implementation spec), `ADR-0001-three-backend-empirical-comparison.md`, `ADR-0004-one-hop-neighbors-trait-method.md`, `ADR-0006-tier-2-durability-architectures.md`, `ADR-0008-production-default.md`
 - Supersedes/Superseded by: none
+
+## Acceptance and implementation
+
+Between proposal and acceptance, four validation spikes (kept as historical record in `src/generic_spike/`) tested this design against real code and real benchmarks: Dog-overhead measurement (negligible), an associated-type-ambiguity diagnosis (worse than this document originally assumed — a real Rust coherence limit, `E0119`, not just a naming collision; fixed by renaming `IndexedField`/`ScannableField`'s associated types to `IndexValue`/`ScanValue`), macro-generated per-marker-pair forwarding (`forward_scannable_pairs!`, keeping the O(pairs) compiler cost while making the human-maintained surface one macro invocation), and directed-relation-generalization measurement (`Order belongs_to Customer`'s adjacency-index pattern generalizes with the same order-of-magnitude speedup `littermate_of` established, with a measured, explained reason for the smaller multiple). Every risk this ADR's own Consequences section named below has since been individually resolved with real data — see `RESULTS.md`'s `## Generic schema library` section for the full account.
+
+This ADR is now **Accepted**, and the design (with the `IndexValue`/`ScanValue` rename and `forward_scannable_pairs!` macro folded in, neither of which existed at proposal time) is implemented in `src/generic/` — a real, public library, not scratch/spike code. New beyond the original design and beyond all four spikes: `GenericMmapStore` (the generic equivalent of `MmapAgeStore` — one durable, mmap-backed scannable field, generically) and `GenericProductionStore<S>` (the generic equivalent of `ProductionStore` — an `RwLock`-guarded composed generic store), verified together by a flagship durability-plus-concurrency integration test on `Order`/`Customer`, the same bar `PRODUCTION-DEFAULT` set for `Dog`. See `STORAGE-012` for the full requirements this implementation satisfies.
+
+**One new finding from the implementation itself, beyond what any spike anticipated** (see RESULTS.md and `src/generic/mod.rs`'s own doc comment for the full account): building `GenericMmapStore::get` required adding a new trait method, `ScannableField::set_scannable_value`, to keep `get` write-through consistent with `update` — and doing so surfaced that the purely in-memory `Scanned`/`BaseStore` composition (unchanged since the spikes) has never had this consistency property; none of the four spikes' tests happened to check `get` immediately after an `update` call. Not fixed for the in-memory path in this pass — flagged as real, unscoped follow-up work (would need the same O(N²) marker-pair treatment `forward_scannable_pairs!` already gives `ScanField`/`UpdateField`, applied to a new, record-mutating capability) — reported here rather than silently worked around.
+
+**`Dog`/`ProductionStore` remain untouched**, exactly as this ADR's original Decision drivers required: nothing in `src/production.rs`, `src/store/**`, `src/durability/**`, or `src/concurrency/**` changed to build `src/generic/`. `crate::generic` is new, parallel capability.
+
+---
+
+## Original proposal (below), recorded as it stood before acceptance
 
 ## Context
 
@@ -69,7 +83,12 @@ This project's own rule — "no abstraction before two real call sites" — gove
 
 ## Validation and revisit triggers
 
-- Validated by: a standalone scratch crate (not part of this repository), compiled and run successfully with both `DogRecord` and `Order`/`Customer` exercising every trait in the design against the same generic wrapper-layer store code. Not validated by: any change to this repository's actual source, which remains untouched.
-- Revisit when: the owner has reviewed `docs/design/GENERIC-SCHEMA-DESIGN.md` and either accepts it (moving this ADR to Accepted and authorizing the staged migration in the design doc's §5), asks for a revised design, or declines to pursue genericity at all.
-- Revisit if: a real third domain (or `Dog` itself, per the staged migration plan) surfaces a schema shape this design doesn't handle — e.g. a many-to-many relation (neither `SymmetricRelation` nor `ChildOf` models this), a field needing both equality-indexing and scanning simultaneously, or a genuinely dynamic/late-bound schema requirement this crate has never needed before.
-- Revisit if: the forwarding-boilerplate tax proves unacceptable at realistic schema complexity once actually implemented — the fallback considered-and-rejected option (a macro/codegen layer generating wrapper boilerplate) would need re-evaluating at that point, not before.
+- **Original validation** (design-only pass): a standalone scratch crate (not part of this repository), compiled and run successfully with both `DogRecord` and `Order`/`Customer` exercising every trait in the design against the same generic wrapper-layer store code.
+- **Real validation, post-acceptance**: four spikes against this repository's actual source (`src/generic_spike/`, kept as historical record) and, finally, this repository's real, promoted implementation (`src/generic/`), including a flagship durability-plus-concurrency integration test and a benchmark suite confirming no regression from spike to real code — see `RESULTS.md`'s `## Generic schema library` section and `STORAGE-012`.
+- Every negative/tradeoff and revisit trigger originally listed above is now resolved with real data, not still open:
+  - The forwarding-boilerplate tax is real, exactly as predicted, and is now handled by `forward_scannable_pairs!` (the O(pairs) compiler cost stays; the human-maintained surface is one macro invocation) rather than "unresolved."
+  - mmap durability's generalization to more than one mutable field remains **not** designed or built — `GenericMmapStore` deliberately keeps `MmapAgeStore`'s exact one-durable-field scope. Still a real, unscoped follow-up if a domain ever needs it.
+  - The packed-cache trick's magnitude at wider `ScanValue` types (`i64`, not `u32`) is now measured, not hypothetical — see `RESULTS.md`.
+  - Dataset-generator/benchmark-infrastructure genericity remains unattempted (`crate::generic_spike::order_bench_support` is `Order`-specific, hand-written) — still a real, unscoped follow-up.
+- **New revisit trigger, found during implementation, not anticipated by the original design**: the in-memory `Scanned`/`BaseStore` composition's `GetById::get`/`UpdateField::update` write-through gap (see "Acceptance and implementation" above and `RESULTS.md`) — revisit if a real user of `DogGenericStore`/`OrderGenericStore` (as opposed to the durable `GenericMmapStore` path, which doesn't have this gap) needs `get` to reflect `update`'s writes.
+- Revisit if: a real third domain surfaces a schema shape this design doesn't handle — e.g. a many-to-many relation (neither `SymmetricRelation` nor `ChildOf` models this), a field needing both equality-indexing and scanning simultaneously, or a genuinely dynamic/late-bound schema requirement this crate has never needed before.

@@ -17,10 +17,12 @@ use criterion::{
     black_box, criterion_group, criterion_main, BenchmarkGroup, BenchmarkId, Criterion,
 };
 use rusty_multimodal_db::bench_support::SIZES;
+use rusty_multimodal_db::generic::order_customer::{
+    build_order_generic_store, BelongsToCustomer, Customer, Order,
+};
+use rusty_multimodal_db::generic::query::{Children, Parent};
 use rusty_multimodal_db::generic_spike::order_bench_support::{build_order_dataset, RoundRobin};
-use rusty_multimodal_db::generic_spike::order_impl::{BelongsToCustomer, Customer, Order};
-use rusty_multimodal_db::generic_spike::query::{Children, Parent};
-use rusty_multimodal_db::generic_spike::{build_order_generic_store, NaiveOrderStore};
+use rusty_multimodal_db::generic_spike::NaiveOrderStore;
 
 fn bench_order_parent(c: &mut Criterion) {
     let mut group = c.benchmark_group("order_parent");

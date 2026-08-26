@@ -1,9 +1,24 @@
 # Generalizing beyond `Dog`: a generic record/schema/query design
 
-- Status: **Proposed — design only, not implemented, not accepted**
-- Date: 2026-08-25
-- Author: baileyrd (this pass)
-- Related: `docs/decisions/ADR-0001-three-backend-empirical-comparison.md` (why `Dog` was compared this way in the first place), `ADR-0004-one-hop-neighbors-trait-method.md` (the one-hop-in-the-trait / N-hop-composed-generically precedent this design carries forward), `ADR-0006-tier-2-durability-architectures.md` (mmap's ages-only scope-down, directly relevant to §4), `ADR-0008-production-default.md` (the consolidated recommendation this design would eventually need to survive), `docs/charter/CHARTER.md`
+- Status: **Accepted and implemented** (promoted from Proposed — see "Implementation status" below)
+- Date: 2026-08-25 (proposed); 2026-08-26 (accepted, implemented)
+- Author: baileyrd
+- Related: `docs/decisions/ADR-0001-three-backend-empirical-comparison.md` (why `Dog` was compared this way in the first place), `ADR-0004-one-hop-neighbors-trait-method.md` (the one-hop-in-the-trait / N-hop-composed-generically precedent this design carries forward), `ADR-0006-tier-2-durability-architectures.md` (mmap's ages-only scope-down, directly relevant to §4), `ADR-0008-production-default.md` (the consolidated recommendation this design would eventually need to survive), `docs/decisions/ADR-0009-generic-schema-design-proposal.md` (the acceptance record), `docs/specifications/storage/STORAGE-012-generic-schema-library.md` (the implementation spec), `docs/charter/CHARTER.md`
+
+## Implementation status
+
+**The document below is the original design, kept as written for historical accuracy — it is no longer a preview of code to come, it's what `src/generic/` actually is, with the changes noted here.** Four validation spikes tested this design against real code before promotion; see `RESULTS.md`'s `## Generic schema library` section and ADR-0009's "Acceptance and implementation" section for the full account. The changes between this document and the real implementation:
+
+- **`IndexedField`/`ScannableField`'s associated types are `IndexValue`/`ScanValue`, not both `Value`** (§1 below still shows the original `Value` naming) — a bare `Value` is ambiguous the moment a record implements both traits, a real compile error the first spike hit. `IndexedField::IndexValue` / `ScannableField::ScanValue` in the real code.
+- **`forward_scannable_pairs!`** (a `macro_rules!` in `src/generic/store.rs`) generates the O(pairs) concrete forwarding impls §4.5's boilerplate tax predicted, from a field list — not present in this document's own code, since the multi-scannable-field coherence problem it solves (`E0119`, not just the associated-type ambiguity §1 already named) wasn't discovered until the second spike.
+- **`GenericMmapStore`/`GenericProductionStore`** (`src/generic/mmap_store.rs`/`production.rs`) are new, built beyond this document and beyond every spike: the generic equivalents of `MmapAgeStore`/`ProductionStore`, keeping this document's §4.2 one-durable-field scope-down exactly, generically.
+- **`ScannableField::set_scannable_value`** was added during implementation, not designed here — needed to keep `GenericMmapStore::get` write-through consistent with `update`; see ADR-0009 for the finding this surfaced about the in-memory composition below.
+
+Everything else — the four schema traits, the seven query traits, the four composable wrapper layers, the `Order`/`Customer` walkthrough, and every finding in §4 — is implemented as designed. §4's own findings (the packed-`Vec` cache trick generalizing with a real width caveat, mmap durability hitting its one-mutable-field wall, the adjacency-index pattern not generalizing to directed relations, the forwarding-boilerplate tax) are no longer predictions — every one has since been measured and confirmed. The recommendation this document closed with (below) has been carried out in full.
+
+---
+
+**Original document, as proposed (kept for historical accuracy):**
 
 **This document is a deliverable in itself, not a preview of code to come.** It does not implement anything, does not touch `src/store/`, `src/durability/`, `src/concurrency/`, or `src/production.rs`, and adds no new dependency to the crate. Every code block below was written and compiled in a standalone scratch crate outside this repository, specifically to prove the trait shapes are real, compiling Rust — not pseudocode — before being transcribed here. Nothing in this document is wired into the crate. Per the task that motivated it, this is the single most hard-to-reverse decision the project has faced (the schema/query abstraction would become the crate's public API surface), and it stops here for review.
 
@@ -387,7 +402,7 @@ Sketched, not built. The intended shape keeps every existing benchmark and test 
 
 ---
 
-## Recommendation
+## Recommendation (original, as proposed)
 
 **Do not implement yet.** This document surfaces at least three findings that materially change the shape of "just genericize it":
 
@@ -396,3 +411,7 @@ Sketched, not built. The intended shape keeps every existing benchmark and test 
 3. The directed-relation case needed genuinely new code (`Reversed`) and caught a real design mistake mid-build (§4.3) — evidence this is exactly the kind of decision that benefits from review before code, not after.
 
 If this design is accepted, the recommended next step is the staged migration in §5 (generic core → port `Dog` as a third validation domain → only then consider touching `ProductionStore`), not a direct jump to genericizing the production path.
+
+## What actually happened (post-acceptance)
+
+All three findings above were resolved with real data across four spikes before any of this was implemented for real, exactly matching this document's own "review before code" recommendation: (1) the forwarding-boilerplate tax is handled by `forward_scannable_pairs!`, keeping the O(pairs) cost on the compiler rather than a human; (2) mmap durability generalization was confirmed to need a real redesign, and — rather than attempting that redesign — `GenericMmapStore` deliberately keeps the *original*, one-field mmap scope, generically, sidestepping the redesign rather than solving it; (3) the directed-relation case's `Reversed` design held up unchanged through implementation and a full benchmark comparison. The staged migration this section recommended was **not** followed literally — `Dog` was not ported onto the generic core as a "third validation domain" (per `crate::generic`'s own module docs, `Dog` is a benchmark fixture, not a target domain, and stays on its own hand-written path); instead, `Order`/`Customer` became the real reference implementation directly, and `GenericProductionStore` was built without first re-deriving `Dog` through the generic core. This was a deliberate scope choice made across the implementing session's rounds, not an oversight — see `docs/PROJECT-STATUS.md` for the round-by-round record.

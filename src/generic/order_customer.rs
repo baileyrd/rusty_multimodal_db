@@ -1,32 +1,24 @@
-//! `Order`/`Customer` implementing the generic schema traits, per the
-//! design doc's §3 walkthrough — the domain this crate's generalization
-//! work now targets (`Dog`, `dog_impl.rs`, is done being built on: a
-//! benchmark fixture, not a target domain).
+//! `Order`/`Customer`: the generic library's real reference implementation,
+//! not disposable prototype code. Promoted from `generic_spike/order_impl.rs`
+//! once every risk the design doc's §4 flagged had been individually
+//! spiked and resolved with real data — the associated-type ambiguity fix,
+//! the macro-generated per-marker-pair forwarding, and the directed-
+//! relation adjacency-index generalization. `Dog` (`crate::record::DogRecord`,
+//! its generic trait impls still live in `crate::generic_spike::dog_impl`)
+//! stays a historical benchmark fixture, not promoted further — see that
+//! module's docs.
 //!
-//! `Order` is deliberately the harder case `Dog` never was: **three**
-//! `ScannableField`s (`Amount`, `CreatedAt`, `DiscountCents` — `Dog` only
-//! had `Age`) and a directed `ChildOf` relation to `Customer` (`Dog` only
-//! had `SymmetricRelation`). Both compositions turn out to matter for the
-//! associated-type-ambiguity bug class two prior rounds diagnosed — see
-//! `store.rs`'s module docs.
-//!
-//! # The macro round: was two hand-written impls, now one invocation
-//!
-//! An earlier round hand-wrote the one marker-pair forwarding impl `Order`
-//! needed (`Amount` reachable through `Scanned<.., CreatedAt>`) directly
-//! in this file, and reported the real cost: O(pairs) concrete impls, not
-//! O(fields). This round replaces that hand-written pair with one
-//! invocation of [`crate::forward_scannable_pairs`] (`store.rs`), and adds
-//! a **third** scannable field, `DiscountCents`, to validate the actual
-//! claim: does adding a field cost one macro-invocation entry, or does it
-//! still touch existing code? It costs one entry — see the single line
-//! added to the invocation below and `tests::adding_a_third_scannable_field_only_touches_the_macro_invocation`.
-//! The macro generates all 6 ordered pairs among the 3 fields (`3×2`),
-//! not just the 2 this file's actual stack traverses — more than strictly
-//! needed for *this* stack's fixed layer order, but the point is that the
-//! human no longer has to know or reason about which pairs are needed;
-//! the field list is the only thing maintained by hand.
+//! `Order` is the harder case `Dog` never was: **three** `ScannableField`s
+//! (`Amount`, `CreatedAt`, `DiscountCents`) and a directed `ChildOf`
+//! relation to `Customer`. [`OrderProductionStack`] below wires `Amount`
+//! specifically as the one durable, mmap-backed field (mirroring `Dog`'s
+//! `age` — see `mmap_store.rs`'s module docs on why exactly one durable
+//! field, not three); `CreatedAt`/`DiscountCents` stay in-memory-only
+//! `Scanned` layers on top, reusing the very forwarding impls
+//! `forward_scannable_pairs!` already generates below, unmodified, since
+//! those impls are generic over whatever inner store type they wrap.
 
+use super::mmap_store::GenericMmapStore;
 use super::store::{BaseStore, Indexed, Reversed, Scanned};
 use super::traits::{ChildOf, IndexedField, Record, ScannableField};
 use uuid::Uuid;
@@ -47,7 +39,6 @@ pub struct Order {
     pub amount_cents: i64,
     pub status: OrderStatus,
     pub created_at_unix_ms: i64,
-    /// Third scannable field, added this round — see `DiscountCents`.
     pub discount_cents: i64,
 }
 
@@ -85,6 +76,9 @@ impl ScannableField<Amount> for Order {
     fn scannable_value(&self) -> i64 {
         self.amount_cents
     }
+    fn set_scannable_value(&mut self, value: i64) {
+        self.amount_cents = value;
+    }
 }
 
 /// A *second* scannable field — the case `Dog` never exercised (it only
@@ -95,18 +89,21 @@ impl ScannableField<CreatedAt> for Order {
     fn scannable_value(&self) -> i64 {
         self.created_at_unix_ms
     }
+    fn set_scannable_value(&mut self, value: i64) {
+        self.created_at_unix_ms = value;
+    }
 }
 
-/// A *third* scannable field, added this round specifically to validate
-/// the macro: adding it below costs exactly one entry in the
-/// `forward_scannable_pairs!` invocation and one new marker/impl pair
-/// here — nothing about `Amount` or `CreatedAt`'s own code changes. See
-/// `tests::adding_a_third_scannable_field_only_touches_the_macro_invocation`.
+/// A *third* scannable field — validates that adding one costs exactly one
+/// entry in the `forward_scannable_pairs!` invocation below, nothing else.
 pub struct DiscountCents;
 impl ScannableField<DiscountCents> for Order {
     type ScanValue = i64;
     fn scannable_value(&self) -> i64 {
         self.discount_cents
+    }
+    fn set_scannable_value(&mut self, value: i64) {
+        self.discount_cents = value;
     }
 }
 
@@ -118,20 +115,16 @@ impl ChildOf<BelongsToCustomer> for Order {
     }
 }
 
-// Was two hand-written impls (one marker pair) in the prior round; now
-// one invocation covering all three scannable fields' pairs. Adding
-// `DiscountCents` to this list is the *entire* diff a third scannable
-// field costs at this layer — see `store.rs`'s `forward_scannable_pairs!`
-// module docs for why this can't instead be one generic impl.
+// One invocation covering all three scannable fields' pairs — see
+// `store.rs`'s `forward_scannable_pairs!` module docs for why this can't
+// instead be one generic impl.
 crate::forward_scannable_pairs!(Order; Amount: i64, CreatedAt: i64, DiscountCents: i64);
 
-/// The full composed stack for `Order`/`Customer`: `BaseStore` (owns
-/// `Order` records) -> `Indexed<.., Status>` -> `Scanned<.., Amount>` ->
-/// `Scanned<.., CreatedAt>` -> `Scanned<.., DiscountCents>` (three stacked
-/// scannable fields) -> `Reversed<.., Customer, Order, BelongsToCustomer>`
-/// (the directed relation's expensive direction). No `Symmetric` layer:
-/// `Order`/`Customer` has no symmetric relation, the mirror image of
-/// `Dog`'s stack having no `Reversed` layer.
+/// The full in-memory composed stack for `Order`/`Customer`: `BaseStore`
+/// (owns `Order` records) -> `Indexed<.., Status>` -> `Scanned<.., Amount>`
+/// -> `Scanned<.., CreatedAt>` -> `Scanned<.., DiscountCents>` ->
+/// `Reversed<.., Customer, Order, BelongsToCustomer>`. Purely in-memory —
+/// see [`OrderProductionStack`] for the durable analogue.
 pub type OrderGenericStore = Reversed<
     Scanned<
         Scanned<Scanned<Indexed<BaseStore<Order>, Order, Status>, Order, Amount>, Order, CreatedAt>,
@@ -150,6 +143,51 @@ pub fn build_order_generic_store(orders: &[Order]) -> OrderGenericStore {
     let scanned_created_at = Scanned::<_, Order, CreatedAt>::new(scanned_amount, orders);
     let scanned_discount = Scanned::<_, Order, DiscountCents>::new(scanned_created_at, orders);
     Reversed::<_, Customer, Order, BelongsToCustomer>::new(scanned_discount, orders)
+}
+
+/// The durable production stack: [`GenericMmapStore`] (owns records, the
+/// `Status` index, and `Amount` — the one mmap-backed durable field) ->
+/// `Reversed<.., Customer, Order, BelongsToCustomer>` (the directed-
+/// relation reverse index, entirely in-memory — relations are rebuilt
+/// from the externally-supplied `records` at every `open`, same convention
+/// every durability variant in this crate already follows). `CreatedAt`/
+/// `DiscountCents` are deliberately not part of this stack — see module
+/// docs for why exactly one scannable field is durable.
+pub type OrderProductionStack =
+    Reversed<GenericMmapStore<Order, Status, Amount>, Customer, Order, BelongsToCustomer>;
+
+/// Build a fresh, durable production store for `Order`/`Customer` at
+/// `path` — the generic analogue of `ProductionStore::create`.
+///
+/// # Errors
+///
+/// Returns [`crate::durability::DurabilityError::Io`] under the same
+/// conditions [`GenericMmapStore::create`] does.
+pub fn create_order_production_stack(
+    orders: Vec<Order>,
+    path: &std::path::Path,
+) -> Result<OrderProductionStack, crate::durability::DurabilityError> {
+    let core = GenericMmapStore::<Order, Status, Amount>::create(orders.clone(), path)?;
+    Ok(Reversed::<_, Customer, Order, BelongsToCustomer>::new(
+        core, &orders,
+    ))
+}
+
+/// Reopen an existing durable production store for `Order`/`Customer` at
+/// `path` — the generic analogue of `ProductionStore::open`.
+///
+/// # Errors
+///
+/// Returns [`crate::durability::DurabilityError::Io`] under the same
+/// conditions [`GenericMmapStore::open`] does.
+pub fn open_order_production_stack(
+    orders: Vec<Order>,
+    path: &std::path::Path,
+) -> Result<OrderProductionStack, crate::durability::DurabilityError> {
+    let core = GenericMmapStore::<Order, Status, Amount>::open(orders.clone(), path)?;
+    Ok(Reversed::<_, Customer, Order, BelongsToCustomer>::new(
+        core, &orders,
+    ))
 }
 
 #[cfg(test)]
@@ -186,11 +224,6 @@ mod tests {
         ]
     }
 
-    /// Exercises every capability the full stack claims to forward:
-    /// `get`, `filter_eq` (on `Status`), `scan` on *all three* scannable
-    /// fields through the same outermost `Reversed` layer, `parent`
-    /// (the blanket-impl cheap direction), and `children` (the real
-    /// reverse-index expensive direction).
     #[test]
     fn full_stack_get_filter_scan_all_fields_parent_and_children_all_work() {
         let store = build_order_generic_store(&sample());
@@ -217,9 +250,6 @@ mod tests {
         created_ats.sort_unstable();
         assert_eq!(created_ats, vec![1_000, 2_000, 3_000]);
 
-        // The field added this round, to validate the macro — reached
-        // through the same macro-generated forwarding path as `Amount`,
-        // two layers down from the outermost `Scanned<.., DiscountCents>`.
         let mut discounts = ScanField::<Order, DiscountCents>::scan(&store);
         discounts.sort_unstable();
         assert_eq!(discounts, vec![0, 50, 100]);
@@ -237,13 +267,6 @@ mod tests {
         assert_eq!(customer_100_orders, expected_children);
     }
 
-    /// The macro generates `UpdateField` pairs too, not just `ScanField` —
-    /// exercises the write side of a macro-generated forwarding impl
-    /// (`Amount`, forwarded through the two outer layers,
-    /// `Scanned<.., CreatedAt>`/`Scanned<.., DiscountCents>`), matching
-    /// `Scanned`'s own `scan_ages_reflects_update_age_immediately` pattern
-    /// (`canonical_cached.rs`): a write through the forwarded path must be
-    /// visible on the next `scan` through that same path.
     #[test]
     fn update_field_forwards_through_two_layers_and_is_immediately_visible() {
         let mut store = build_order_generic_store(&sample());
@@ -256,16 +279,6 @@ mod tests {
         assert_eq!(err.0, Uuid::from_u128(99));
     }
 
-    /// Validates the actual claim this round makes: adding a third
-    /// scannable field costs one macro-invocation entry
-    /// (`forward_scannable_pairs!(Order; Amount: i64, CreatedAt: i64,
-    /// DiscountCents: i64)`), not new hand-written impls, and the field it
-    /// adds is reachable through the *same* generic path (`Reversed`'s
-    /// forwarding, unmodified since `Dog`) every other field already was.
-    /// This isn't a compile check (the crate not compiling would already
-    /// prove that); it's a behavioral one: `DiscountCents` round-trips
-    /// through `update`+`scan` exactly like the two fields present before
-    /// this round.
     #[test]
     fn adding_a_third_scannable_field_only_touches_the_macro_invocation() {
         let mut store = build_order_generic_store(&sample());
@@ -276,17 +289,6 @@ mod tests {
         assert_eq!(discounts, vec![50, 100, 250]);
     }
 
-    /// A compile-time proof, not a runtime one: the real `OrderGenericStore`
-    /// stack only ever exercises 2 of the 6 ordered pairs 3 fields produce
-    /// (`Amount` forwarded through `CreatedAt`/`DiscountCents`'s outer
-    /// layers) — this checks all 6 actually exist, including pairs no
-    /// stack in this file happens to need, to prove the macro generates
-    /// the full off-diagonal set `forward_scannable_pairs!`'s docs claim,
-    /// not just the ones that happen to get used. Each `_pair_exists`
-    /// instantiation is a where-bound the compiler must prove, not a
-    /// value that runs — if the macro ever generated fewer than N×(N-1)
-    /// pairs (a regression in `@rotate`'s exclusion logic, say), this
-    /// function stops compiling.
     #[allow(dead_code)]
     fn _pair_exists<S, Owner, Forwarded>()
     where
@@ -312,5 +314,56 @@ mod tests {
     fn _all_six_ordered_pairs_exist_3<S: ScanField<Order, DiscountCents>>() {
         _pair_exists::<S, Amount, DiscountCents>();
         _pair_exists::<S, CreatedAt, DiscountCents>();
+    }
+
+    #[test]
+    fn create_then_read_and_write_as_production_stack() {
+        let dir = crate::bench_support::fresh_temp_dir("order_production_basic").unwrap();
+        let path = dir.join("amount.mmap");
+        let mut stack = create_order_production_stack(sample(), &path).unwrap();
+
+        assert_eq!(
+            GetById::<Order>::get(&stack, Uuid::from_u128(1))
+                .unwrap()
+                .amount_cents,
+            2_500
+        );
+        UpdateField::<Order, Amount>::update(&mut stack, Uuid::from_u128(1), 8_000).unwrap();
+        assert_eq!(
+            GetById::<Order>::get(&stack, Uuid::from_u128(1))
+                .unwrap()
+                .amount_cents,
+            8_000
+        );
+        assert_eq!(
+            Children::<Customer, Order, BelongsToCustomer>::children(&stack, Uuid::from_u128(100))
+                .len(),
+            2
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn flush_then_reopen_production_stack_sees_the_written_value() {
+        let dir = crate::bench_support::fresh_temp_dir("order_production_roundtrip").unwrap();
+        let path = dir.join("amount.mmap");
+
+        {
+            use super::super::store::Flush;
+            let mut stack = create_order_production_stack(sample(), &path).unwrap();
+            UpdateField::<Order, Amount>::update(&mut stack, Uuid::from_u128(3), 55_555).unwrap();
+            Flush::flush(&stack).unwrap();
+        }
+
+        let reopened = open_order_production_stack(sample(), &path).unwrap();
+        assert_eq!(
+            GetById::<Order>::get(&reopened, Uuid::from_u128(3))
+                .unwrap()
+                .amount_cents,
+            55_555
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
