@@ -24,6 +24,19 @@
 //!   (see `crate::generic`'s docs and `RESULTS.md`'s `## Generic schema
 //!   library` section); the naive baseline itself has no reason to become
 //!   real API, so it stays here.
+//! - [`rule_trace`]/[`rule_bench_support`] — a fifth spike round, testing
+//!   `crate::generic` against a real, external requirements-traceability
+//!   domain (`Rule`/`RuleRelation`) rather than another synthetic
+//!   two-domain-validation exercise: recursive parent-chain traversal
+//!   (composes cleanly via a plain loop over `Parent`, no new trait
+//!   needed — see [`rule_trace`]'s own module docs for the one real
+//!   schema wrinkle this surfaced) and multiple relation kinds between
+//!   the same record type (hits the identical `E0119` coherence conflict
+//!   multiple `ScannableField`s did, fixed by the identical
+//!   `forward_scannable_pairs!`-style macro pattern, prototyped
+//!   spike-locally as `forward_related_to_pairs!` rather than added to
+//!   `crate::generic` itself — a promotion decision for a later round, not
+//!   this one).
 //!
 //! # Isolation (unchanged from every prior round)
 //!
@@ -35,6 +48,8 @@
 pub mod dog_impl;
 pub mod order_bench_support;
 pub mod order_naive;
+pub mod rule_bench_support;
+pub mod rule_trace;
 
 pub use dog_impl::{build_dog_generic_store, DogGenericStore};
 pub use order_naive::NaiveOrderStore;
