@@ -269,6 +269,24 @@ and *why each one*, not to re-argue any of them.
   `ProductionStore`'s numbers in `benches/workloads.rs`'s existing suite
   and `benches/concurrency.rs`'s existing sweep, reported in `RESULTS.md`'s
   `## Production recommendation` section.
+- **Addendum, from a follow-up diagnosis pass**: benchmarking
+  `ProductionStore` (this ADR's whole point) surfaced a large,
+  thread-count-invariant concurrency-throughput tax at 100K records that
+  none of the three composed pieces' own prior benchmarks had exposed —
+  exactly the kind of gap this ADR's own Negative/tradeoffs section
+  anticipated ("this round doesn't re-verify any of the three picks
+  themselves — it inherits whatever open questions each round's own
+  numbers didn't cover"). Diagnosed to a specific, avoidable inefficiency
+  in `MmapAgeStore::scan_ages` (a previously-closed durability-round
+  module, outside this round's own `src/production.rs`) — checked in on
+  before fixing, per this ADR's own working-style constraint about
+  touching code outside `ProductionStore`'s own files — and fixed via a
+  safe bulk read, 12–17× faster. `RESULTS.md`'s `## Production
+  recommendation` section now reports the corrected numbers: the tax is
+  gone, not just smaller. This ADR's Decision and Considered options above
+  are otherwise unchanged — the fix is a read-path correction to an
+  already-composed stack, not a change to which three pieces were chosen
+  or how they're wired together.
 - Revisit if: a future round pairs a *different* concurrency strategy
   (e.g. sharded locking) with mmap durability specifically for the small,
   write-heavy, high-thread-count shape ADR-0007 already identified as

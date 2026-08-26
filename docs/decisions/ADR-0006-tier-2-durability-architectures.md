@@ -207,3 +207,17 @@ scope question:
   bottleneck at a write volume this pass didn't test — batching multiple
   `update_age` calls into one `redb` transaction is the natural next step,
   not a redesign.
+- **Addendum, from a later pass (`PRODUCTION-DEFAULT`'s diagnosis round)**:
+  this ADR's own benchmark (`benches/durability.rs`) only ever measured
+  `MmapAgeStore`'s per-write/checkpoint/load costs, never `get`/
+  `scan_ages`/`same_breed`/`neighbors`. Once `ProductionStore`
+  (`src/production.rs`) benchmarked those for the first time,
+  `scan_ages`'s per-position indexed-read loop (`read_age` called once per
+  position, four individually-bounds-checked byte reads each) turned out
+  to be 25–32× slower than `CanonicalCachedStore`'s packed-`Vec` clone —
+  a real, avoidable inefficiency, not an inherent durability cost, fixed
+  via a safe `chunks_exact(4)` bulk read (12–17× faster, no `unsafe`, no
+  new dependency). This ADR's own `update_age` finding (mmap cheaper than
+  the non-durable baseline) is unaffected and reconfirmed directly in that
+  same diagnosis. See `RESULTS.md`'s `## Production recommendation`
+  section for the full investigation and corrected numbers.

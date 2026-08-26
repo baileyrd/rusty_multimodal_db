@@ -140,14 +140,16 @@ fn build_indexes_sequential(records: &[DogRecord], edges: Vec<(Uuid, Uuid)>) -> 
 }
 
 impl MmapAgeStore {
+    /// One bounds check on a 4-byte slice, not four separate bounds checks
+    /// on individual byte indices — see `scan_ages`'s own doc comment for
+    /// why this matters far more there than it does for this single-position
+    /// lookup (used by `get`, one call at a time).
     fn read_age(&self, position: usize) -> u32 {
         let start = position * 4;
-        u32::from_le_bytes([
-            self.mmap[start],
-            self.mmap[start + 1],
-            self.mmap[start + 2],
-            self.mmap[start + 3],
-        ])
+        let bytes: [u8; 4] = self.mmap[start..start + 4]
+            .try_into()
+            .expect("slice taken as start..start + 4 is always exactly 4 bytes");
+        u32::from_le_bytes(bytes)
     }
 
     fn write_age(&mut self, position: usize, age: u32) {
@@ -258,8 +260,31 @@ impl DogStore for MmapAgeStore {
         ))
     }
 
+    /// Reads via `chunks_exact(4)` directly over the mapped region, not via
+    /// `read_age` in a `0..len/4` loop. The original per-position loop paid
+    /// four individually-bounds-checked byte indices per element (plus a
+    /// per-element function-call frame); `chunks_exact` pays one bounds
+    /// check per 4-byte chunk and lets the compiler reason about the whole
+    /// scan as one pass, not `n` independent lookups. Diagnosed via a
+    /// same-machine, same-process isolated benchmark (not assumed): the
+    /// original loop was 25-32x slower than a `chunks_exact` read of the
+    /// identical bytes, and was the entire measured cause of
+    /// `ProductionStore`'s large, thread-count-invariant concurrency
+    /// throughput tax at 100K records (see `RESULTS.md`'s `## Durability`
+    /// and `## Production recommendation` sections). This change doesn't
+    /// touch `update_age`/`flush`/the durability guarantee at all — it's a
+    /// read-path-only fix.
     fn scan_ages(&self) -> Vec<u32> {
-        (0..self.mmap.len() / 4).map(|p| self.read_age(p)).collect()
+        self.mmap
+            .chunks_exact(4)
+            .map(|chunk| {
+                u32::from_le_bytes(
+                    chunk
+                        .try_into()
+                        .expect("chunks_exact(4) always yields exactly 4-byte chunks"),
+                )
+            })
+            .collect()
     }
 
     /// Writes straight into mapped memory — no explicit syscall on this
