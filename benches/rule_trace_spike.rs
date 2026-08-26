@@ -78,5 +78,9 @@ fn bench_rule_relation_lookup(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_rule_chain_traversal, bench_rule_relation_lookup);
+criterion_group!(
+    benches,
+    bench_rule_chain_traversal,
+    bench_rule_relation_lookup
+);
 criterion_main!(benches);
