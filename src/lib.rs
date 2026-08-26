@@ -36,6 +36,11 @@ pub mod bench_support;
 pub mod concurrency;
 pub mod durability;
 pub mod generator;
+/// Implementation spike measuring generic-schema overhead on `Dog` — see
+/// its own module docs. Not part of the recommended API surface above;
+/// exists to answer a measurement question raised by
+/// `docs/design/GENERIC-SCHEMA-DESIGN.md`, not to be used directly.
+pub mod generic_spike;
 pub mod production;
 pub mod record;
 pub mod store;
