@@ -27,26 +27,39 @@
 //! plain generic loop, **no new trait needed**. This is a genuine "it just
 //! works" outcome for the composition question.
 //!
-//! The real wrinkle is in the schema, not the query side: `Rule`'s parent
+//! The real wrinkle was in the schema, not the query side: `Rule`'s parent
 //! is *optional* (a root rule has none) — `Order`'s `customer_id` never
-//! had this shape (every order has exactly one customer). Representing
-//! that honestly means `ChildOf::ParentId = Option<Uuid>`, not `Uuid`.
-//! `Parent<C, Marker>` itself has no trouble with this — it just returns
-//! `Option<C::ParentId>` (i.e. `Option<Option<Uuid>>`, structurally fine).
-//! But [`crate::generic::query::Children`]'s own bound,
-//! `C: ChildOf<Marker, ParentId = P::Id>`, requires the child's
-//! `ParentId` type to be *exactly* the parent record type's `Id` — which
-//! `Option<Uuid>` is not, since `Rule::Id = Uuid`. **This means `Children`
-//! cannot be implemented for `Rule` at all with an honest optional
-//! `ParentId`, a genuine, concrete trait-bound conflict, not a style
-//! preference.** Not fixed or worked around here (this round only needs
-//! `Parent`, for chain-to-root traversal, not the reverse "list direct
-//! children" direction) — flagged as a real, narrow gap for the report.
-//! The two ways out, if a future round needed `Children` too: a sentinel
-//! `ParentId = Uuid` (e.g. a root self-referencing its own id, or
-//! `Uuid::nil()`) trading honesty for trait-fit, or relaxing `Children`'s
-//! bound to something like `Into<P::Id>`/a projection instead of type
-//! equality — a real design change, not attempted here.
+//! had this shape (every order has exactly one customer). The first
+//! version of this file represented that honestly via `ChildOf::ParentId
+//! = Option<Uuid>`, which broke [`crate::generic::query::Children`]'s own
+//! bound (`C: ChildOf<Marker, ParentId = P::Id>`, requiring the child's
+//! `ParentId` type to *exactly* equal the parent record's `Id` type —
+//! `Option<Uuid>` never equals `Uuid`) — a genuine, concrete trait-bound
+//! conflict, not a style preference, confirmed directly against `main`
+//! before being fixed.
+//!
+//! **Fixed in a follow-up round, in `crate::generic::traits::ChildOf`
+//! itself, not worked around locally here** — the winning redesign kept
+//! `ParentId` as the *bare* id type (so it can still equal `P::Id`) and
+//! moved optionality onto the method instead: `fn parent_id(&self) ->
+//! Option<Self::ParentId>`. `Rule::ChildOf::ParentId` is `Uuid` here now,
+//! matching `Rule::Id` exactly, and `parent_id()` returns
+//! `self.parent_rule_id` (already `Option<Uuid>`) unchanged. `Order`'s
+//! own impl just wraps its always-present `customer_id` in `Some(..)` —
+//! "the method never returns `None`," exactly as the redesign intended,
+//! not a separate code path. [`crate::generic::store::Reversed::new`]
+//! (the `Children` index builder) now skips entries with no parent via a
+//! plain `if let Some(parent_id) = ..`, a no-op for `Order`. Real,
+//! confirmed-not-assumed cost: `Parent::parent` collapsed to a
+//! single-level `Option`, so it can no longer distinguish "child not
+//! found" from "child found, no parent" — see [`chain_to_root`]'s own doc
+//! comment for how a caller that needs that distinction gets it back.
+//! `RuleTreeStore`/[`build_rule_tree_store`] below is `Children` actually
+//! implemented for `Rule`, benchmarked against a naive baseline the same
+//! way as every other capability in this file — see
+//! `benches/rule_trace_spike.rs`'s `rule_children_lookup` group. No
+//! trait-set redesign was needed beyond this one fix — no new
+//! `OptionalChildOf` trait, no sentinel id.
 //!
 //! Also unlike `two_hop_neighbors` (fixed at exactly 2 hops, so cycles are
 //! structurally irrelevant), unbounded recursion needs its own cycle
@@ -92,7 +105,8 @@
 //! clean, positive "targeted fix, same shape as before" outcome, not a
 //! new problem needing new design work.
 
-use crate::generic::query::{GetById, Parent};
+use crate::generic::query::{Children, GetById, Parent};
+use crate::generic::store::Reversed;
 use crate::generic::traits::{ChildOf, Record};
 use std::collections::{HashMap, HashSet};
 use std::marker::PhantomData;
@@ -124,7 +138,16 @@ impl Record for Rule {
 
 pub struct ParentOf;
 impl ChildOf<ParentOf> for Rule {
-    type ParentId = Option<Uuid>;
+    // `ParentId` is the bare `Uuid` — matching `Rule::Id` exactly, which
+    // is what `Children`'s bound (`ParentId = P::Id`) needs. Optionality
+    // now lives on `parent_id`'s return type instead (`crate::generic`'s
+    // own follow-up fix, motivated directly by this domain) — this impl
+    // predates that fix and originally had to work around it by making
+    // `ParentId` itself `Option<Uuid>`, which was exactly what made
+    // `Children` impossible to implement for `Rule` at all. Now
+    // `self.parent_rule_id` (already `Option<Uuid>`) is returned as-is,
+    // no wrapping needed.
+    type ParentId = Uuid;
     fn parent_id(&self) -> Option<Uuid> {
         self.parent_rule_id
     }
@@ -172,12 +195,54 @@ impl GetById<Rule> for NaiveRuleStore {
     }
 }
 
+impl Children<Rule, Rule, ParentOf> for NaiveRuleStore {
+    fn children(&self, parent_id: Uuid) -> Vec<Uuid> {
+        self.rules
+            .iter()
+            .filter(|r| r.parent_id() == Some(parent_id))
+            .map(|r| r.id)
+            .collect()
+    }
+}
+
+/// The indexed stack for the "list direct children" direction —
+/// [`crate::generic::store::Reversed`], self-referential (`Rule` is both
+/// the parent record type `P` and the child record type `C`). This is
+/// the concrete deliverable the optional-parent `ChildOf` fix (this
+/// round's own follow-on) exists to make possible at all: with the
+/// pre-fix `ChildOf` (`ParentId = Option<Uuid>`), `Reversed<_, Rule, Rule,
+/// ParentOf>` couldn't even name its own type — `ParentId` could never
+/// equal `Rule::Id` (`Uuid`). See `crate::generic::traits::ChildOf`'s own
+/// doc comment for the fix.
+pub type RuleTreeStore = Reversed<IndexedRuleStore, Rule, Rule, ParentOf>;
+
+pub fn build_rule_tree_store(rules: Vec<Rule>) -> RuleTreeStore {
+    let base = IndexedRuleStore::new(rules.clone());
+    Reversed::<_, Rule, Rule, ParentOf>::new(base, &rules)
+}
+
 /// Composes repeated [`Parent`] calls into full-depth traversal — the
 /// directed, unbounded-depth analogue of `two_hop_neighbors`'s "compose
 /// the same primitive twice" (ADR-0004's precedent), generalized to "as
 /// many times as the chain is deep." Returns the full chain, starting
 /// with `id` itself and ending at the root (the last id whose own parent
 /// is `None`).
+///
+/// # Why this checks `GetById` up front, not just `Parent`
+///
+/// `crate::generic`'s optional-parent fix (see `ChildOf`'s own doc
+/// comment) made `Parent::parent` return a single-level `Option<Id>`,
+/// which can no longer distinguish "this id isn't a real record" from
+/// "this id is a real record with no parent" — both now read as `None`.
+/// For most `Parent` callers that distinction doesn't matter (either way,
+/// there's nowhere further to go), but this function's own test suite
+/// draws a real, useful line between them (an unknown id should yield an
+/// *empty* chain, not a chain containing an id that was never a real
+/// `Rule`) — so it takes the extra `GetById<Rule>` bound needed to check
+/// existence directly, rather than degrade that behavior along with the
+/// rest of the trait set. This is the honest cost of the fix showing up
+/// at a call site, not hidden: a caller that needs the old distinction
+/// back has to ask for it explicitly.
 ///
 /// # Cycle guard
 ///
@@ -191,25 +256,20 @@ impl GetById<Rule> for NaiveRuleStore {
 /// single fixed hop count never had to think about.
 pub fn chain_to_root<S>(store: &S, id: Uuid) -> Vec<Uuid>
 where
-    S: Parent<Rule, ParentOf>,
+    S: GetById<Rule> + Parent<Rule, ParentOf>,
 {
+    if store.get(id).is_none() {
+        return Vec::new();
+    }
     let mut chain = Vec::new();
     let mut seen = HashSet::new();
     let mut current = id;
-    // `store.parent(current)` is `Option<Option<Uuid>>` — the outer
-    // `Option` is `Parent`'s own "does this id even exist" (`None` if
-    // not, matching `GetById::get`'s "unknown id" convention, and the
-    // loop's own exit for an unknown id); the inner `Option` is
-    // `Rule::ParentId` itself, `None` at the root (handled inside the
-    // loop body below). Checked before pushing `current`, so an unknown
-    // id yields an empty chain rather than a one-element chain containing
-    // an id that was never actually a real record.
-    while let Some(parent) = store.parent(current) {
+    loop {
         if !seen.insert(current) {
             break;
         }
         chain.push(current);
-        match parent {
+        match store.parent(current) {
             Some(parent_id) => current = parent_id,
             None => break, // reached a root
         }
@@ -462,6 +522,88 @@ mod tests {
         let store = IndexedRuleStore::new(cyclic);
         let result = chain_to_root(&store, Uuid::from_u128(0));
         assert_eq!(result.len(), 2, "must terminate, not loop forever");
+    }
+
+    fn tree() -> Vec<Rule> {
+        // 0 is root; 1,2,3 are its direct children; 4 is 1's own child
+        // (so "children of the root" and "children of a non-root" are
+        // both exercised, and 4 must NOT show up as a child of 0).
+        vec![
+            Rule {
+                id: Uuid::from_u128(0),
+                shall_statement: "root".into(),
+                binding_strength: BindingStrength::Shall,
+                parent_rule_id: None,
+            },
+            Rule {
+                id: Uuid::from_u128(1),
+                shall_statement: "child 1".into(),
+                binding_strength: BindingStrength::Shall,
+                parent_rule_id: Some(Uuid::from_u128(0)),
+            },
+            Rule {
+                id: Uuid::from_u128(2),
+                shall_statement: "child 2".into(),
+                binding_strength: BindingStrength::Shall,
+                parent_rule_id: Some(Uuid::from_u128(0)),
+            },
+            Rule {
+                id: Uuid::from_u128(3),
+                shall_statement: "child 3".into(),
+                binding_strength: BindingStrength::Shall,
+                parent_rule_id: Some(Uuid::from_u128(0)),
+            },
+            Rule {
+                id: Uuid::from_u128(4),
+                shall_statement: "grandchild".into(),
+                binding_strength: BindingStrength::Shall,
+                parent_rule_id: Some(Uuid::from_u128(1)),
+            },
+        ]
+    }
+
+    #[test]
+    fn children_of_the_root_indexed_and_naive_agree() {
+        let indexed = build_rule_tree_store(tree());
+        let naive = NaiveRuleStore::new(tree());
+
+        let mut expected: Vec<Uuid> = vec![1, 2, 3].into_iter().map(Uuid::from_u128).collect();
+        expected.sort();
+
+        let mut indexed_children =
+            Children::<Rule, Rule, ParentOf>::children(&indexed, Uuid::from_u128(0));
+        indexed_children.sort();
+        assert_eq!(indexed_children, expected);
+
+        let mut naive_children =
+            Children::<Rule, Rule, ParentOf>::children(&naive, Uuid::from_u128(0));
+        naive_children.sort();
+        assert_eq!(naive_children, expected);
+    }
+
+    #[test]
+    fn children_of_a_non_root_node_excludes_siblings_and_the_parent_itself() {
+        let indexed = build_rule_tree_store(tree());
+        assert_eq!(
+            Children::<Rule, Rule, ParentOf>::children(&indexed, Uuid::from_u128(1)),
+            vec![Uuid::from_u128(4)]
+        );
+    }
+
+    #[test]
+    fn children_of_a_leaf_is_empty() {
+        let indexed = build_rule_tree_store(tree());
+        assert!(
+            Children::<Rule, Rule, ParentOf>::children(&indexed, Uuid::from_u128(4)).is_empty()
+        );
+    }
+
+    #[test]
+    fn children_of_an_unknown_id_is_empty() {
+        let indexed = build_rule_tree_store(tree());
+        assert!(
+            Children::<Rule, Rule, ParentOf>::children(&indexed, Uuid::from_u128(999)).is_empty()
+        );
     }
 
     fn sample_relation_rules() -> Vec<Rule> {

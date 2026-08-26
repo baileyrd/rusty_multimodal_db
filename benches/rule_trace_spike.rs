@@ -2,19 +2,22 @@
 //! measures the two new stresses this domain introduces that neither
 //! `Dog` nor `Order`/`Customer` exercised — recursive parent-chain
 //! traversal at a few depths, and a `RuleRelation`-kind-filtered lookup
-//! against a naive baseline. Own Criterion group names
-//! (`rule_chain_traversal`/`rule_relation_lookup`), same convention as
-//! every prior spike, so these numbers never mix into any existing
-//! benchmark's baseline history.
+//! against a naive baseline — plus, from the optional-parent `ChildOf`
+//! follow-up fix, `Children` ("list direct children") itself, now that
+//! it's implementable for `Rule` at all. Own Criterion group names
+//! (`rule_chain_traversal`/`rule_relation_lookup`/`rule_children_lookup`),
+//! same convention as every prior spike, so these numbers never mix into
+//! any existing benchmark's baseline history.
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use rusty_multimodal_db::bench_support::SIZES;
+use rusty_multimodal_db::generic::query::Children;
 use rusty_multimodal_db::generic_spike::rule_bench_support::{
-    build_rule_chain, build_rule_relation_dataset, RoundRobin,
+    build_rule_chain, build_rule_children, build_rule_relation_dataset, RoundRobin,
 };
 use rusty_multimodal_db::generic_spike::rule_trace::{
-    build_rule_relation_store, chain_to_root, IndexedRuleStore, NaiveRuleRelationStore,
-    NaiveRuleStore, RelatedTo, Requires, Rule,
+    build_rule_relation_store, build_rule_tree_store, chain_to_root, IndexedRuleStore,
+    NaiveRuleRelationStore, NaiveRuleStore, ParentOf, RelatedTo, Requires, Rule,
 };
 
 /// Shallow vs. deep — the depths this round's task explicitly asked for.
@@ -78,9 +81,41 @@ fn bench_rule_relation_lookup(c: &mut Criterion) {
     group.finish();
 }
 
+/// Same depths as [`bench_rule_chain_traversal`] ("a few sizes," per this
+/// round's own instruction), but sweeping fan-out (children of one node)
+/// instead of depth.
+fn bench_rule_children_lookup(c: &mut Criterion) {
+    let mut group = c.benchmark_group("rule_children_lookup");
+    for &n in &CHAIN_DEPTHS {
+        let (rules, root_id) = build_rule_children(n);
+
+        let indexed = build_rule_tree_store(rules.clone());
+        group.bench_with_input(BenchmarkId::new("indexed", n), &n, |b, _| {
+            b.iter(|| {
+                black_box(Children::<Rule, Rule, ParentOf>::children(
+                    &indexed,
+                    black_box(root_id),
+                ))
+            });
+        });
+
+        let naive = NaiveRuleStore::new(rules);
+        group.bench_with_input(BenchmarkId::new("naive", n), &n, |b, _| {
+            b.iter(|| {
+                black_box(Children::<Rule, Rule, ParentOf>::children(
+                    &naive,
+                    black_box(root_id),
+                ))
+            });
+        });
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_rule_chain_traversal,
-    bench_rule_relation_lookup
+    bench_rule_relation_lookup,
+    bench_rule_children_lookup
 );
 criterion_main!(benches);

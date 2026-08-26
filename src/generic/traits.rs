@@ -84,7 +84,26 @@ pub trait SymmetricRelation<Marker>: Record {}
 
 /// `R` is the *child* side of a directed, many-to-one relation, identified
 /// by `Marker` — the generalization of `Order belongs_to Customer`.
+///
+/// `parent_id` returns `Option<Self::ParentId>`, not a bare `Self::ParentId`
+/// — added by the `Rule`/`RuleRelation` round's own follow-up fix. A
+/// mandatory parent (`Order belongs_to Customer`) is the special case
+/// where this never returns `None`; an optional parent (`Rule`'s tree
+/// root has none) is the general case this trait now actually models.
+/// `ParentId` itself stays the *bare* id type (not `Option<Id>`) —
+/// putting optionality on the method, not the associated type, is what
+/// keeps `ParentId` able to equal a parent record's own `Id` type
+/// (`Children`'s bound, `C: ChildOf<Marker, ParentId = P::Id>`, needs
+/// exact equality; `Option<Uuid>` can never equal `Uuid`, which is
+/// exactly the conflict this fixes — see `store.rs`'s `Reversed`/`Parent`
+/// blanket impl for the consequence: `Reversed`'s index-building now
+/// skips entries with no parent, and `Parent`'s single-level
+/// `Option<C::ParentId>` return can no longer distinguish "child not
+/// found" from "child found, no parent" — both collapse to `None`, an
+/// honest cost of this being a genuinely optional relationship. See
+/// `crate::generic_spike::rule_trace`'s `chain_to_root` for how a caller
+/// that needs that distinction back gets it (an extra `GetById` check).
 pub trait ChildOf<Marker>: Record {
     type ParentId: Copy + Eq + Hash;
-    fn parent_id(&self) -> Self::ParentId;
+    fn parent_id(&self) -> Option<Self::ParentId>;
 }
