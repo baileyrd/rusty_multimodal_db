@@ -11,7 +11,7 @@
 //! counterparts, and `ChildOf` isn't implemented for `Dog` this round (see
 //! `traits.rs`).
 
-use super::traits::{IndexedField, Record, ScannableField, SymmetricRelation};
+use super::traits::{ChildOf, IndexedField, Record, ScannableField, SymmetricRelation};
 
 pub trait GetById<R: Record> {
     fn get(&self, id: R::Id) -> Option<R>;
@@ -22,7 +22,7 @@ pub trait FilterEq<R, Marker>
 where
     R: IndexedField<Marker>,
 {
-    fn filter_eq(&self, value: &R::Value) -> Vec<R::Id>;
+    fn filter_eq(&self, value: &R::IndexValue) -> Vec<R::Id>;
 }
 
 /// Generalizes `scan_ages` — this spike's real target.
@@ -30,7 +30,7 @@ pub trait ScanField<R, Marker>
 where
     R: ScannableField<Marker>,
 {
-    fn scan(&self) -> Vec<R::Value>;
+    fn scan(&self) -> Vec<R::ScanValue>;
 }
 
 /// Generalizes `update_age`. Not benchmarked this round (out of scope per
@@ -40,7 +40,7 @@ pub trait UpdateField<R, Marker>
 where
     R: ScannableField<Marker>,
 {
-    fn update(&mut self, id: R::Id, value: R::Value) -> Result<(), super::NotFound<R::Id>>;
+    fn update(&mut self, id: R::Id, value: R::ScanValue) -> Result<(), super::NotFound<R::Id>>;
 }
 
 /// Generalizes `neighbors` for a *symmetric* relation.
@@ -49,4 +49,26 @@ where
     R: SymmetricRelation<Marker>,
 {
     fn neighbors(&self, id: R::Id) -> Vec<R::Id>;
+}
+
+/// The "one hop up" side of a *directed* relation — added for the
+/// Order/Customer prototype (`order_impl.rs`), not exercised by the
+/// `Dog`-only spike this crate already has. Per the design doc §2, this
+/// has a blanket impl (`store.rs`) over anything providing `GetById<C>` —
+/// no new index needed, the foreign key already lives on the child.
+pub trait Parent<C, Marker>
+where
+    C: ChildOf<Marker>,
+{
+    fn parent(&self, child_id: C::Id) -> Option<C::ParentId>;
+}
+
+/// The "one hop down" side of a *directed* relation — the expensive
+/// direction, needing a real reverse index (`store::Reversed`).
+pub trait Children<P, C, Marker>
+where
+    P: Record,
+    C: ChildOf<Marker, ParentId = P::Id>,
+{
+    fn children(&self, parent_id: P::Id) -> Vec<C::Id>;
 }
