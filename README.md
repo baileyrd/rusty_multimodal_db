@@ -10,6 +10,17 @@ see `docs/decisions/ADR-0008-production-default.md` for which round
 justified each layer and `RESULTS.md`'s `## Production recommendation`
 section for the numbers.
 
+A second, separate story lives alongside it: `crate::generic`
+(`src/generic/`) is a real, public generic record/schema/query library —
+the same storage/durability/concurrency recipe, generalized to any record
+type instead of hardcoded to `Dog`, validated against a second,
+structurally different domain (`Order`/`Customer`) across four spikes
+before promotion. `crate::generic::production::GenericProductionStore` is
+its `ProductionStore` equivalent — durable via mmap, safe for concurrent
+access via `RwLock`, generic. See `docs/decisions/ADR-0009-generic-schema-design-proposal.md`
+(Accepted) and `RESULTS.md`'s `## Generic schema library` section. New,
+parallel capability — nothing above changed to build it.
+
 Everything below this point — three other storage backends, seven other
 durability variants, three other concurrency strategies — is the
 benchmarked evidence that recommendation is built on, not the recommended
@@ -53,9 +64,10 @@ the benchmark's shape was clear.
 ## Using this repo
 
 ```sh
-cargo test --all-features            # unit tests, including ProductionStore's flagship integration test
+cargo test --all-features            # unit tests, including ProductionStore's and GenericProductionStore's flagship integration tests
 cargo bench                          # wall-clock Criterion suite (cross-platform), ProductionStore listed first in every workload
 cargo bench --bench concurrency      # concurrency throughput sweep, ProductionStore included alongside every strategy
+cargo bench --bench generic_production   # GenericProductionStore (Order/Customer) get/scan/filter/parent/children sweep
 cargo bench --features perf-events --bench cache_events   # cache-miss counts, Linux bare-metal only — see ADR-0002
 ```
 

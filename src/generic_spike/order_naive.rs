@@ -24,9 +24,9 @@
 //! it's inherent to the relation shape, and both variants have to live
 //! with it.
 
-use super::order_impl::{BelongsToCustomer, Customer, Order};
-use super::query::{Children, Parent};
-use super::traits::Record;
+use crate::generic::order_customer::{BelongsToCustomer, Customer, Order};
+use crate::generic::query::{Children, Parent};
+use crate::generic::traits::Record;
 use uuid::Uuid;
 
 /// Owns `orders` with no index of any kind — every lookup is a full,
@@ -73,8 +73,8 @@ impl Children<Customer, Order, BelongsToCustomer> for NaiveOrderStore {
 
 #[cfg(test)]
 mod tests {
-    use super::super::order_impl::OrderStatus;
     use super::*;
+    use crate::generic::order_customer::OrderStatus;
 
     fn sample() -> Vec<Order> {
         vec![

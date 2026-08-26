@@ -19,7 +19,8 @@ Status vocabulary: `Proposed`, `Draft`, `Accepted`, `In Progress`,
 | `DURABILITY-TIER2` | Three alternate durability architectures for `CanonicalCachedStore` (mmap-backed ages, LSM-tree-style with no compaction, `redb`-backed embedded engine), each scoped to the mutable `age` field only; ADR-0006; `RESULTS.md`'s `## Durability` section extended to cover all eight variants | `DURABILITY-TIER1` | `STORAGE-009` | `cargo test`/`cargo bench --bench durability` green for all 3 Tier 2 variants; `RESULTS.md` reports per-configuration numbers with the same rigor as Tier 1 | Implemented | follow-on PR |
 | `CONCURRENCY-PROTOTYPES` | Four concurrent access strategies for `CanonicalCachedStore` (global `RwLock`, sharded locking, `dashmap`, actor/single-writer-thread), a new `ConcurrentStore` trait, a linearizability-style stress test, and a custom multi-threaded throughput harness; ADR-0007; `RESULTS.md`'s `## Concurrency` section | `DURABILITY-TIER2` | `STORAGE-010` | `cargo test` green for all four variants' flagship stress tests (16 threads × 2,000 iterations each, no lost updates/torn reads); `cargo bench --bench concurrency` completes the full size×ratio×thread-count×variant sweep; `RESULTS.md` reports a verdict per (size × write-ratio) configuration and an explicit recommendation | Implemented | follow-on PR |
 | `PRODUCTION-DEFAULT` | `ProductionStore` (`src/production.rs`): `CanonicalCachedStore`'s architecture + mmap durability + global `RwLock` concurrency, consolidated into one recommended type implementing both `DogStore` and `ConcurrentStore`; ADR-0008; a flagship integration test exercising mmap durability and `RwLock` concurrency together for the first time; `src/lib.rs`/`README.md`/`docs/architecture/SYSTEM-ARCHITECTURE.md` reorganized to lead with it; `RESULTS.md`'s `## Production recommendation` section | `CONCURRENCY-PROTOTYPES` | `STORAGE-011` | `cargo test` green including the new flagship integration test; `cargo bench --bench workloads -- production` and `cargo bench --bench concurrency` report `ProductionStore` numbers; `RESULTS.md` ties all six prior rounds together | Implemented | follow-on PR |
-| `GENERIC-SCHEMA-DESIGN` | **Design only, no implementation**: a generic record/schema/query abstraction (`Record`/`IndexedField`/`ScannableField`/`SymmetricRelation`/`ChildOf` traits, composable store wrapper layers) validated against `Dog` and a second, structurally different domain (`Order`/`Customer` — directed relation, currency-like field, enum categorical field, timestamp field); ADR-0009 (Proposed, not Accepted); `docs/design/GENERIC-SCHEMA-DESIGN.md` | `PRODUCTION-DEFAULT` | — (no spec written; design not yet accepted) | Owner reviews `docs/design/GENERIC-SCHEMA-DESIGN.md` and either accepts it (promoting to a real spec and authorizing implementation per the doc's §5 staged migration), asks for revision, or declines | Proposed | this PR |
+| `GENERIC-SCHEMA-DESIGN` | A generic record/schema/query abstraction (`Record`/`IndexedField`/`ScannableField`/`SymmetricRelation`/`ChildOf` traits, composable store wrapper layers) validated against `Dog` and a second, structurally different domain (`Order`/`Customer` — directed relation, currency-like field, enum categorical field, timestamp field); ADR-0009 (**Accepted** — see `GENERIC-SCHEMA-LIBRARY` below); `docs/design/GENERIC-SCHEMA-DESIGN.md` | `PRODUCTION-DEFAULT` | — (no spec written for the design itself; implementation tracked by `STORAGE-012`) | Four validation spikes (`src/generic_spike/`) resolved every risk this design's §4 named, then `GENERIC-SCHEMA-LIBRARY` promoted it into a real library | Accepted/Implemented | this PR |
+| `GENERIC-SCHEMA-LIBRARY` | Promotes `GENERIC-SCHEMA-DESIGN` into `crate::generic`: promoted traits/query/store (unchanged from four validation spikes), `Order`/`Customer` as the real reference implementation, `GenericMmapStore`/`GenericProductionStore` (generic mmap durability + `RwLock` concurrency — new beyond every spike), a flagship durability+concurrency integration test, a benchmark suite confirming no regression from spike to real code; ADR-0009 moved to Accepted; `STORAGE-012` | `GENERIC-SCHEMA-DESIGN` | `STORAGE-012` | `cargo test` green including the new flagship integration test (run 5× to rule out flakiness); `cargo bench --bench generic_production` completes and is reported in `RESULTS.md` alongside the spike rounds' numbers; no `src/production.rs`/`src/store/**`/`src/durability/**`/`src/concurrency/**` changes | Implemented | this PR |
 
 ## Sequencing notes
 
@@ -104,6 +105,25 @@ convention of checking in before large or hard-to-reverse changes. Its
 to exist and be settled before it was worth asking whether it should
 generalize, not that the design touches `ProductionStore` itself (it
 doesn't — see ADR-0009 and the design doc's own Context).
+
+`GENERIC-SCHEMA-LIBRARY` follows once every risk `GENERIC-SCHEMA-DESIGN`'s
+own §4 named had been individually resolved: four validation spikes (kept
+as historical record in `src/generic_spike/`, not deleted) tested the
+design against real code and real benchmarks — Dog-overhead measurement,
+an associated-type-ambiguity diagnosis and fix, macro-generated per-marker-
+pair forwarding, and directed-relation-generalization measurement — before
+any of it was treated as accepted. This unit promotes that validated
+design into `crate::generic`, a real public library, and builds the piece
+none of the four spikes attempted: a generic equivalent of `ProductionStore`
+(`GenericMmapStore`/`GenericProductionStore`), verified by a flagship
+durability-plus-concurrency integration test on `Order`/`Customer` — the
+same bar `PRODUCTION-DEFAULT` set for `Dog`. Deliberately does *not*
+follow the original design doc's §5 staged migration literally (port `Dog`
+onto the generic core as a third validation domain, only then build a
+production store) — `Dog` stays a benchmark fixture, not a target domain,
+so `Order`/`Customer` became the real reference implementation directly;
+see ADR-0009's "Acceptance and implementation" section for why this
+deviation was made rather than followed as originally written.
 
 ## Out of scope for this roadmap (see architecture doc "where this can go
 next")

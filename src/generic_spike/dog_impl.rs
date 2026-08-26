@@ -4,8 +4,8 @@
 //! for a type from elsewhere in this crate, not changes to that type),
 //! gaining only the trait impls below.
 
-use super::store::{BaseStore, Indexed, Scanned, Symmetric};
-use super::traits::{IndexedField, Record, ScannableField, SymmetricRelation};
+use crate::generic::store::{BaseStore, Indexed, Scanned, Symmetric};
+use crate::generic::traits::{IndexedField, Record, ScannableField, SymmetricRelation};
 use crate::record::DogRecord;
 use uuid::Uuid;
 
@@ -31,6 +31,9 @@ impl ScannableField<Age> for DogRecord {
     type ScanValue = u32;
     fn scannable_value(&self) -> u32 {
         self.age
+    }
+    fn set_scannable_value(&mut self, value: u32) {
+        self.age = value;
     }
 }
 
@@ -59,8 +62,8 @@ pub fn build_dog_generic_store(records: &[DogRecord], edges: &[(Uuid, Uuid)]) ->
 
 #[cfg(test)]
 mod tests {
-    use super::super::query::{FilterEq, GetById, Neighbors, ScanField};
     use super::*;
+    use crate::generic::query::{FilterEq, GetById, Neighbors, ScanField};
 
     fn sample() -> Vec<DogRecord> {
         vec![
@@ -104,7 +107,7 @@ mod tests {
 
     #[test]
     fn update_field_writes_through_the_scan_cache() {
-        use super::super::query::UpdateField;
+        use crate::generic::query::UpdateField;
 
         let mut store = build_dog_generic_store(&sample(), &sample_edges());
         store.update(Uuid::from_u128(1), 99).unwrap();

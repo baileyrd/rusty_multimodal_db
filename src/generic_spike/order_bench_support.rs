@@ -6,7 +6,7 @@
 //! `generator.rs` or `bench_support.rs`, per this round's isolation
 //! constraint.
 
-use super::order_impl::{Order, OrderStatus};
+use crate::generic::order_customer::{Order, OrderStatus};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use uuid::{Builder, Uuid};
