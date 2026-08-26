@@ -1,44 +1,56 @@
-//! Implementation spike measuring what genericizing `Dog`'s schema/query
-//! surface costs, per `docs/design/GENERIC-SCHEMA-DESIGN.md`'s §4 —
-//! specifically whether the packed-`Vec` column cache behind
-//! `CanonicalCachedStore::scan_ages`'s speed survives once the field is
-//! reached through the generic traits instead of hardcoded as `age: u32`.
-//! That was a projection in the design doc, not a measurement; this
-//! module (plus `benches/generic_spike.rs`) is what turns it into one.
+//! Implementation spike for `docs/design/GENERIC-SCHEMA-DESIGN.md`.
+//!
+//! # History (two rounds so far)
+//!
+//! **Round 1** ([`dog_impl`]) measured what genericizing `Dog`'s
+//! schema/query surface costs (§4's central question: does the packed-
+//! `Vec` column cache behind `CanonicalCachedStore::scan_ages`'s speed
+//! survive genericity). It did — negligible overhead — but also
+//! surfaced a real ambiguous-associated-type compile error in a
+//! forwarding impl (`R::Value` ambiguous between `ScannableField`'s and
+//! `IndexedField`'s own `Value`), the same failure class the design
+//! doc's own scratch crate reported catching once already (§4.3).
+//!
+//! **Round 2** ([`order_impl`]) diagnoses that ambiguity pattern's real
+//! scope on `Order`/`Customer` — a genuinely harder composition (two
+//! `ScannableField`s, a directed `ChildOf` relation) that Dog's single-
+//! scannable-field, symmetric-only shape never exercised. **Dog is done
+//! being built on**: it was a benchmark fixture for storage-engine
+//! mechanics, never a target domain, and every generalization round from
+//! here forward targets `Order`/`Customer` (or whatever comes after it).
+//! [`dog_impl`] stays as historical reference (round 1's numbers still
+//! stand), not extended further.
 //!
 //! # Isolation (deliberate)
 //!
-//! This module implements the design doc's traits for `Dog` only (not
-//! `Order`/`Customer` — the design doc already validated genericity
-//! structurally against both domains; this spike measures cost on the one
-//! domain with real benchmark numbers to compare against). It does not
-//! touch [`crate::production::ProductionStore`], [`crate::store::DogStore`],
-//! or any benchmarked backend (`AosStore`/`SoaStore`/`CanonicalStore`/
-//! `CanonicalCachedStore`) — [`dog_impl::DogRecord`] impls below are
-//! additive `impl` blocks on the existing [`crate::record::DogRecord`]
-//! type, per the design doc's §5 migration shape ("`DogRecord` itself
-//! changes by *addition*, not by rewrite"). Throwaway-quality is
-//! acceptable here per the task that motivated this spike — the question
-//! this module exists to answer is whether it's worth hardening into
-//! something real, not whether it already is.
+//! Neither round touches [`crate::production::ProductionStore`],
+//! [`crate::store::DogStore`], or any benchmarked backend
+//! (`AosStore`/`SoaStore`/`CanonicalStore`/`CanonicalCachedStore`) —
+//! [`dog_impl::DogRecord`] impls are additive `impl` blocks on the
+//! existing [`crate::record::DogRecord`] type, per the design doc's §5
+//! migration shape. Throwaway-quality is acceptable here — the question
+//! this module exists to answer is whether the design is worth hardening
+//! into something real, not whether it already is.
 //!
-//! # What's implemented, and what's deliberately not
+//! # What's implemented
 //!
 //! [`traits`]/[`query`] transcribe the design doc's §1/§2 schema and query
-//! traits. [`store`] implements the composable wrapper layers (`BaseStore`/
-//! `Indexed`/`Scanned`/`Symmetric`) for real, which is what makes the
-//! forwarding-boilerplate tax (design doc §4.5) show up here too, not just
-//! in the design doc's own scratch crate — see `store.rs`'s module docs.
-//! `ChildOf`/`Parent`/`Children` (the directed-relation side, relevant to
-//! `Order`/`Customer`, not `Dog`) are out of scope this round per the
-//! task's own instruction.
+//! traits, now including `ChildOf`/`Parent`/`Children` (added for round 2 —
+//! round 1 left them undefined/unimplemented since `Dog` has no directed
+//! relation). [`store`] implements the composable wrapper layers
+//! (`BaseStore`/`Indexed`/`Scanned`/`Symmetric`/`Reversed`) for real, which
+//! is what makes the forwarding-boilerplate tax (design doc §4.5) show up
+//! here too, not just in the design doc's own scratch crate — see
+//! `store.rs`'s module docs.
 
 pub mod dog_impl;
+pub mod order_impl;
 pub mod query;
 pub mod store;
 pub mod traits;
 
 pub use dog_impl::{build_dog_generic_store, DogGenericStore};
+pub use order_impl::{build_order_generic_store, OrderGenericStore};
 
 use std::fmt;
 

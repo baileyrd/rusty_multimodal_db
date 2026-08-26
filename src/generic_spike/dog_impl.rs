@@ -21,14 +21,14 @@ impl Record for DogRecord {
 }
 
 impl IndexedField<Breed> for DogRecord {
-    type Value = String;
+    type IndexValue = String;
     fn indexed_value(&self) -> &String {
         &self.breed
     }
 }
 
 impl ScannableField<Age> for DogRecord {
-    type Value = u32;
+    type ScanValue = u32;
     fn scannable_value(&self) -> u32 {
         self.age
     }
