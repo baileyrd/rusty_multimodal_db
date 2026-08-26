@@ -110,8 +110,12 @@ impl ScannableField<DiscountCents> for Order {
 pub struct BelongsToCustomer;
 impl ChildOf<BelongsToCustomer> for Order {
     type ParentId = Uuid;
-    fn parent_id(&self) -> Uuid {
-        self.customer_id
+    // Every order has exactly one customer — the mandatory-parent case
+    // `ChildOf::parent_id` (now `Option<Self::ParentId>`, see that trait's
+    // own doc comment) is allowed to model but doesn't require: this impl
+    // simply never returns `None`.
+    fn parent_id(&self) -> Option<Uuid> {
+        Some(self.customer_id)
     }
 }
 

@@ -452,13 +452,24 @@ where
 /// `Parent` (the cheap direction of a directed relation) needs no new
 /// store state at all — a blanket impl over anything that already
 /// provides `GetById<C>`, per the design doc §2.
+///
+/// `self.get(child_id)?` short-circuits to `None` if `child_id` isn't a
+/// real record; `.parent_id()` (now itself `Option<C::ParentId>` — see
+/// `ChildOf`'s own doc comment) supplies the rest directly, no
+/// `.flatten()` needed. The one honest consequence: this can no longer
+/// tell "child not found" apart from "child found, has no parent" — both
+/// now read as `None` to a caller of `Parent::parent` alone. For a
+/// mandatory-parent domain (`Order`) this changes nothing (its own
+/// `parent_id` never returns `None`); for an optional-parent one
+/// (`Rule`) a caller that needs the distinction back checks `GetById`
+/// directly — see `chain_to_root`'s own doc comment.
 impl<S, C, Marker> Parent<C, Marker> for S
 where
     C: ChildOf<Marker>,
     S: GetById<C>,
 {
     fn parent(&self, child_id: C::Id) -> Option<C::ParentId> {
-        self.get(child_id).map(|c| c.parent_id())
+        self.get(child_id)?.parent_id()
     }
 }
 
@@ -480,13 +491,20 @@ where
     P: Record,
     C: ChildOf<Marker, ParentId = P::Id>,
 {
+    /// Entries with no parent (`child.parent_id()` returns `None`) are
+    /// skipped naturally — not an error, not a special case, just nothing
+    /// to index for a record that isn't anyone's child. Before the
+    /// optional-parent fix, `ChildOf::parent_id` returned a bare
+    /// `Self::ParentId`, so every record necessarily had exactly one
+    /// parent entry to insert; this `if let` is the one behavioral change
+    /// that fix required here, and it's a no-op for a domain like `Order`
+    /// whose `parent_id` never returns `None`.
     pub fn new(inner: S, children: &[C]) -> Self {
         let mut children_of: HashMap<P::Id, Vec<C::Id>> = HashMap::new();
         for child in children {
-            children_of
-                .entry(child.parent_id())
-                .or_default()
-                .push(child.id());
+            if let Some(parent_id) = child.parent_id() {
+                children_of.entry(parent_id).or_default().push(child.id());
+            }
         }
         Self {
             inner,

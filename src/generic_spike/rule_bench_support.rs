@@ -43,6 +43,28 @@ pub fn build_rule_chain(depth: usize) -> Vec<Rule> {
         .collect()
 }
 
+/// Build one root (id `0`, no parent of its own) with `n` direct
+/// children (ids `1..=n`) — purpose-built for the children-of-a-node
+/// benchmark, the mirror image of [`build_rule_chain`]'s depth-focused
+/// linear generator: this holds depth fixed at 1 and sweeps fan-out
+/// instead. Returns `(rules, root_id)`.
+pub fn build_rule_children(n: usize) -> (Vec<Rule>, Uuid) {
+    let root_id = Uuid::from_u128(0);
+    let mut rules = vec![Rule {
+        id: root_id,
+        shall_statement: "the system shall satisfy the root rule".into(),
+        binding_strength: BindingStrength::Shall,
+        parent_rule_id: None,
+    }];
+    rules.extend((1..=n).map(|i| Rule {
+        id: Uuid::from_u128(i as u128),
+        shall_statement: format!("the system shall satisfy rule {i}"),
+        binding_strength: BindingStrength::Shall,
+        parent_rule_id: Some(root_id),
+    }));
+    (rules, root_id)
+}
+
 /// A generated `RuleRelation` dataset: `n` rules (no parent-chain
 /// structure — irrelevant to this benchmark, so every rule is a root),
 /// plus a `requires` and an `implements` edge list, each with
@@ -138,6 +160,17 @@ mod tests {
         assert_eq!(chain[0].parent_rule_id, None);
         for (i, rule) in chain.iter().enumerate().skip(1) {
             assert_eq!(rule.parent_rule_id, Some(Uuid::from_u128((i - 1) as u128)));
+        }
+    }
+
+    #[test]
+    fn build_rule_children_produces_one_root_and_n_direct_children() {
+        let (rules, root_id) = build_rule_children(10);
+        assert_eq!(rules.len(), 11);
+        assert_eq!(rules[0].id, root_id);
+        assert_eq!(rules[0].parent_rule_id, None);
+        for rule in &rules[1..] {
+            assert_eq!(rule.parent_rule_id, Some(root_id));
         }
     }
 
