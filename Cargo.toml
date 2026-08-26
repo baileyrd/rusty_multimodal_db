@@ -29,6 +29,10 @@ name = "generic_production"
 harness = false
 
 [[bench]]
+name = "rule_trace_spike"
+harness = false
+
+[[bench]]
 name = "cache_events"
 harness = false
 required-features = ["perf-events"]
