@@ -18,6 +18,7 @@ Status vocabulary: `Proposed`, `Draft`, `Accepted`, `In Progress`,
 | `DURABILITY-TIER1` | `CanonicalCachedStore`-only durability, five variants (WAL fsync, WAL buffered, snapshot rebuild, snapshot save-as-is, hybrid snapshot+WAL), built around a new shared `CanonicalCachedState` core; ADR-0005; `benches/durability.rs`'s per-write/checkpoint/load suite; `RESULTS.md`'s `## Durability` section | `MIXED-WORKLOAD` | `STORAGE-008` | `cargo test`/`cargo bench --bench durability` green for all 5 Tier 1 variants; `RESULTS.md` reports per-configuration numbers, the 1,000-write recoverability comparison, and an explicit recommendation | Implemented | follow-on PR |
 | `DURABILITY-TIER2` | Three alternate durability architectures for `CanonicalCachedStore` (mmap-backed ages, LSM-tree-style with no compaction, `redb`-backed embedded engine), each scoped to the mutable `age` field only; ADR-0006; `RESULTS.md`'s `## Durability` section extended to cover all eight variants | `DURABILITY-TIER1` | `STORAGE-009` | `cargo test`/`cargo bench --bench durability` green for all 3 Tier 2 variants; `RESULTS.md` reports per-configuration numbers with the same rigor as Tier 1 | Implemented | follow-on PR |
 | `CONCURRENCY-PROTOTYPES` | Four concurrent access strategies for `CanonicalCachedStore` (global `RwLock`, sharded locking, `dashmap`, actor/single-writer-thread), a new `ConcurrentStore` trait, a linearizability-style stress test, and a custom multi-threaded throughput harness; ADR-0007; `RESULTS.md`'s `## Concurrency` section | `DURABILITY-TIER2` | `STORAGE-010` | `cargo test` green for all four variants' flagship stress tests (16 threads × 2,000 iterations each, no lost updates/torn reads); `cargo bench --bench concurrency` completes the full size×ratio×thread-count×variant sweep; `RESULTS.md` reports a verdict per (size × write-ratio) configuration and an explicit recommendation | Implemented | follow-on PR |
+| `PRODUCTION-DEFAULT` | `ProductionStore` (`src/production.rs`): `CanonicalCachedStore`'s architecture + mmap durability + global `RwLock` concurrency, consolidated into one recommended type implementing both `DogStore` and `ConcurrentStore`; ADR-0008; a flagship integration test exercising mmap durability and `RwLock` concurrency together for the first time; `src/lib.rs`/`README.md`/`docs/architecture/SYSTEM-ARCHITECTURE.md` reorganized to lead with it; `RESULTS.md`'s `## Production recommendation` section | `CONCURRENCY-PROTOTYPES` | `STORAGE-011` | `cargo test` green including the new flagship integration test; `cargo bench --bench workloads -- production` and `cargo bench --bench concurrency` report `ProductionStore` numbers; `RESULTS.md` ties all six prior rounds together | Implemented | follow-on PR |
 
 ## Sequencing notes
 
@@ -77,6 +78,18 @@ a single roadmap entry without needing a second one — and deliberately
 combination as a distinct, later follow-up round rather than part of this
 one (see ADR-0007's Context).
 
+`PRODUCTION-DEFAULT` is that distinct follow-up round, once it actually
+arrived: six rounds of empirical work — row/column/graph,
+`DURABILITY-TIER1`/`TIER2`, and `CONCURRENCY-PROTOTYPES` (measured three
+times, across a container, a Windows desktop, and `baileyai`) — had all
+converged on the same combination (`CanonicalCachedStore` architecture +
+mmap + global `RwLock`), so this unit's job was to wire that one
+already-justified combination together, verify it as a composed stack for
+the first time, and make it the crate's documented default — not to
+re-derive or re-benchmark any of the three picks, and not to build a
+general "any concurrency strategy × any durability variant" combinatorial
+matrix (see ADR-0008's Context and Non-goals in `STORAGE-011`).
+
 ## Out of scope for this roadmap (see architecture doc "where this can go
 next")
 
@@ -111,7 +124,11 @@ next")
 - A concurrency strategy paired with a specific durability variant (e.g.
   a sharded store where each shard also owns its own WAL) — named
   explicitly by the motivating task as a distinct future round, not part
-  of `CONCURRENCY-PROTOTYPES`; see ADR-0007's Context.
+  of `CONCURRENCY-PROTOTYPES`; see ADR-0007's Context. **One specific
+  instance of this — global `RwLock` + mmap — is now implemented as
+  `PRODUCTION-DEFAULT`'s `ProductionStore`**; every *other* pairing (e.g.
+  sharded + a WAL variant) remains out of scope, per `STORAGE-011`'s own
+  Non-goals.
 - `ShardedStore`'s shard count swept against alternatives to its fixed
   `SHARD_COUNT = 64` — see `RESULTS.md`'s concurrency open questions.
 - Scaling `ActorStore` beyond one owning thread (e.g. sharding the actors

@@ -68,6 +68,7 @@ use rusty_multimodal_db::bench_support::{
 use rusty_multimodal_db::concurrency::{
     ActorStore, ConcurrentStore, DashMapStore, GlobalRwLockStore, ShardedStore,
 };
+use rusty_multimodal_db::ProductionStore;
 use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -166,6 +167,13 @@ fn main() {
 
     for &size in &SIZES {
         let dataset = build_dataset(size);
+        // `production` first: the crate's recommended entry point (see
+        // src/production.rs) — RwLock<MmapAgeStore>, i.e. this same
+        // GlobalRwLockStore locking scheme layered over mmap durability
+        // instead of a plain in-memory CanonicalCachedStore. Included here
+        // so its throughput is directly comparable, in the same sweep, to
+        // the four in-memory-only variants that motivated this recommendation.
+        bench_variant::<ProductionStore>("production", size, &dataset);
         bench_variant::<GlobalRwLockStore>("global_rwlock", size, &dataset);
         bench_variant::<ShardedStore>("sharded", size, &dataset);
         bench_variant::<DashMapStore>("dashmap", size, &dataset);
