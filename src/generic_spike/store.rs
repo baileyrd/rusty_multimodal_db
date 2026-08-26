@@ -193,8 +193,8 @@ where
 
 // Forwarding impl #3b, new for Order/Customer (`Dog` only ever had one
 // `ScannableField`, so this case never came up before): `Scanned<S, ..>`
-// re-exposing `ScanField`/`UpdateField` for a field *other* than its own —
-// needed once a record has more than one scannable field (`Order` has
+// needs to re-expose `ScanField`/`UpdateField` for a field *other* than
+// its own once a record has more than one scannable field (`Order` has
 // `Amount` and `CreatedAt`) and the layers stack (`Scanned<Scanned<..,
 // Amount>, .., CreatedAt>`).
 //
@@ -215,19 +215,91 @@ where
 // one generic impl.
 //
 // The only way to make this compile: one concrete, non-generic impl per
-// *pair* of markers actually needed (below, `CreatedAt` forwarding
-// `Amount`'s capability — the one pair this file's stack — `Order`'s
-// `Scanned<Scanned<.., Amount>, .., CreatedAt>` — actually needs; the
-// reverse pairing, or a third scannable field, would each need their own
-// impl too). This is a real, structural cost the design doc's §4.5
-// forwarding-boilerplate accounting didn't have visibility into (it only
-// ever validated a single-scannable-field domain): the tax for N
-// scannable fields on one record isn't O(N) forwarding impls, it's
-// O(N²) — one concrete impl per ordered pair, not one generic impl per
-// field. Deliberately domain-specific, so it lives in `order_impl.rs`
-// (next to `Order`/`Amount`/`CreatedAt`) rather than here — this file
-// stays domain-agnostic; only the concrete-pair forwarding this one
-// scannable-field pair needs is not.
+// *ordered pair* of markers. That's a real, unavoidable cost in what the
+// compiler has to check — the tax for N scannable fields on one record
+// isn't O(N) forwarding impls (the design doc's §4.5 accounting, which
+// only ever validated a single-scannable-field domain, had no visibility
+// into this), it's O(N²): one concrete impl per ordered pair, not one
+// generic impl per field. What's NOT unavoidable is a human hand-writing
+// and maintaining each pair — [`forward_scannable_pairs`] below generates
+// them from a field list, so a new scannable field costs one macro-
+// invocation entry, not new hand-written impls. See `order_impl.rs`'s
+// invocation and its module docs for the before/after.
+#[macro_export]
+macro_rules! forward_scannable_pairs {
+    // Entry point: a record type and its `ScannableField` markers, each
+    // with its concrete `ScanValue` type (needed because macro_rules!
+    // can't look up an associated type — see this macro's module docs).
+    // `$record; Marker1: Value1, Marker2: Value2, ...`
+    ($record:ty; $($marker:ident : $value:ty),+ $(,)?) => {
+        $crate::forward_scannable_pairs!(@rotate $record; []; [$($marker : $value),+]);
+    };
+
+    // Peels `$owner` off the front of the not-yet-processed list, emits
+    // its pairs against everything else (`$prefix` — already-processed
+    // owners, still needed as forwarding targets — plus `$rest`, the
+    // still-to-be-processed owners), then recurses with `$owner` moved
+    // into `$prefix`. This is the standard "rotating accumulator" trick
+    // for generating all off-diagonal pairs from a list in `macro_rules!`
+    // — chosen specifically because `macro_rules!` cannot compare two
+    // matched fragments for equality (there is no `$a == $b` for
+    // `:ident`/`:ty` matchers), so the diagonal (`owner == owner`) has to
+    // be excluded *structurally*, by construction, rather than by a
+    // runtime-style check. `$owner` never appears in the "everything
+    // else" list at the point it's used, by construction — it's been
+    // removed from `$rest` and not yet added to `$prefix`.
+    (@rotate $record:ty; [$($prefix:ident : $prefix_value:ty),*]; [$owner:ident : $owner_value:ty $(, $rest:ident : $rest_value:ty)*]) => {
+        $crate::forward_scannable_pairs!(
+            @pairs $record; $owner : $owner_value;
+            [$($prefix : $prefix_value,)* $($rest : $rest_value),*]
+        );
+        $crate::forward_scannable_pairs!(
+            @rotate $record; [$($prefix : $prefix_value,)* $owner : $owner_value]; [$($rest : $rest_value),*]
+        );
+    };
+    // Base case: nothing left to peel off — every owner has had its
+    // pairs generated.
+    (@rotate $record:ty; [$($prefix:ident : $prefix_value:ty),*]; []) => {};
+
+    // Emits one `@impl_pair` per marker in the "everything else" list,
+    // for the fixed `$owner`.
+    (@pairs $record:ty; $owner:ident : $owner_value:ty; [$($forwarded:ident : $forwarded_value:ty),* $(,)?]) => {
+        $(
+            $crate::forward_scannable_pairs!(@impl_pair $record; $owner : $owner_value; $forwarded : $forwarded_value);
+        )*
+    };
+
+    // The actual payload: one concrete `ScanField`/`UpdateField` pair,
+    // the same shape `order_impl.rs` originally hand-wrote once.
+    (@impl_pair $record:ty; $owner:ident : $owner_value:ty; $forwarded:ident : $forwarded_value:ty) => {
+        impl<S> $crate::generic_spike::query::ScanField<$record, $forwarded>
+            for $crate::generic_spike::store::Scanned<S, $record, $owner>
+        where
+            S: $crate::generic_spike::query::ScanField<$record, $forwarded>,
+        {
+            fn scan(&self) -> Vec<$forwarded_value> {
+                $crate::generic_spike::store::Scanned::inner(self).scan()
+            }
+        }
+
+        impl<S> $crate::generic_spike::query::UpdateField<$record, $forwarded>
+            for $crate::generic_spike::store::Scanned<S, $record, $owner>
+        where
+            S: $crate::generic_spike::query::UpdateField<$record, $forwarded>,
+        {
+            fn update(
+                &mut self,
+                id: <$record as $crate::generic_spike::traits::Record>::Id,
+                value: $forwarded_value,
+            ) -> Result<
+                (),
+                $crate::generic_spike::NotFound<<$record as $crate::generic_spike::traits::Record>::Id>,
+            > {
+                $crate::generic_spike::store::Scanned::inner_mut(self).update(id, value)
+            }
+        }
+    };
+}
 
 /// Adds one `Neighbors` capability over an inner store — the generic
 /// analogue of `CanonicalCachedStore`'s `adjacency_index`.
