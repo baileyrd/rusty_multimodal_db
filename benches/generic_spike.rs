@@ -12,7 +12,9 @@
 //! benchmarked here — out of scope per the task that motivated this spike.
 
 use criterion::measurement::WallTime;
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkGroup, BenchmarkId, Criterion};
+use criterion::{
+    black_box, criterion_group, criterion_main, BenchmarkGroup, BenchmarkId, Criterion,
+};
 use rusty_multimodal_db::bench_support::{build_dataset, RoundRobin, SIZES};
 use rusty_multimodal_db::generic_spike::query::{GetById, ScanField};
 use rusty_multimodal_db::generic_spike::{build_dog_generic_store, dog_impl::Age};
