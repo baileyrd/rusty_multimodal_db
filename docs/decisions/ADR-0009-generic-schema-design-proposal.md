@@ -1,0 +1,75 @@
+# ADR-0009: Generalize the record/store abstraction beyond `Dog` — design proposal, not yet accepted
+
+- Status: **Proposed** (not Accepted — no implementation authorized by this ADR)
+- Date: 2026-08-25
+- Deciders: baileyrd (pending review)
+- Related: `docs/design/GENERIC-SCHEMA-DESIGN.md` (the full design document this ADR summarizes), `ADR-0001-three-backend-empirical-comparison.md`, `ADR-0004-one-hop-neighbors-trait-method.md`, `ADR-0006-tier-2-durability-architectures.md`, `ADR-0008-production-default.md`
+- Supersedes/Superseded by: none
+
+## Context
+
+Every backend, durability variant, and concurrency strategy in this crate is hardcoded to one record type, `DogRecord`, and one trait, `DogStore`. The motivating task named this "the biggest architectural decision in the project's history" — a generic schema/query abstraction would become the crate's public API surface going forward, making it the most hard-to-reverse choice made yet. Per the task's explicit instruction, this ADR records a **proposed** design, not an accepted one: no implementation code has been written against it, and none is authorized by this ADR. It exists so the decision — and the alternatives considered on the way to it — is on the record before anyone reviews it, matching this project's standing practice of writing an ADR for every decision that matters, not only accepted ones.
+
+This project's own rule — "no abstraction before two real call sites" — governed how this proposal was built: `Dog` is the only domain that has ever existed here, so the design was validated against a second, deliberately structurally-different domain (`Order`/`Customer`: a directed one-to-many relation instead of `littermate_of`'s symmetric edges, a currency-like numeric field instead of a bare count, an enum categorical field instead of a string, and a timestamp field type `Dog` never had) before being written up, not derived from `Dog` alone.
+
+## Decision drivers
+
+- **Static typing is non-negotiable.** This crate's entire discipline (typed fields, `Result`+`?`, no dynamic dispatch where avoidable) rules out a dynamic `Value`-enum-based schema — the design had to find a fully statically-typed generalization or fail cleanly, not compromise on typing to get genericity.
+- **Validate against a genuinely different second domain, not a reskin.** `Order`/`Customer` was chosen specifically to stress every axis `Dog` never exercised (directed relations, a wider/signed numeric field, an enum categorical field, a new field type) — see `docs/design/GENERIC-SCHEMA-DESIGN.md`'s own rationale.
+- **Report genericity costs honestly, even where they contradict the desired outcome.** The task explicitly weighted this above the API sketch itself; findings that complicate the story (the forwarding-boilerplate tax, mmap's ages-only design hitting its own predicted wall immediately) are reported as prominently as the parts that worked.
+- **Prove signatures compile, don't just assert they would.** Every trait/struct in the design document was written and compiled in a standalone scratch crate before being transcribed — including two real mistakes the compiler caught during that process, both reported rather than quietly fixed and hidden.
+- **Don't destabilize `ProductionStore`.** Whatever this design becomes, it must not require touching the just-shipped, benchmarked, production-recommended stack (`ADR-0008`) as part of proving the design itself works.
+
+## Considered options
+
+### Schema representation: dynamic `Value` enum vs. static marker-trait-per-field
+
+1. **A dynamic schema** (`enum Value { Int(i64), Str(String), Bool(bool), .. }`, a runtime field-name-keyed record). Rejected — throws away this crate's static-typing discipline entirely; every existing backend's `Result`+typed-field design would become a runtime-checked shadow of itself, and query code would need runtime type assertions everywhere `DogStore::get` currently returns a concretely-typed `DogRecord`.
+2. **Static, marker-type-per-field traits** (`IndexedField<Marker>`, `ScannableField<Marker>`, one zero-sized marker struct per queryable field), the same pattern Diesel/SeaORM use for column type safety. Chosen — every query stays fully statically typed and dispatched, at the cost of one marker type and a few lines of trait impl per queryable field/relation (see the design doc's `DogRecord`/`Order` mappings in its §3).
+
+### Relationship modeling: one relation trait vs. two
+
+1. **One generic `Relation<Marker>` trait covering both symmetric and directed relationships.** Considered, then rejected once the `Order → Customer` stress case was worked through concretely: a directed relation's two directions have genuinely different costs (child→parent needs no index at all; parent→children needs a new reverse index with no analogue in the symmetric case — see the design doc's §4.3), which a single relation trait would either hide or force into one shape that fits neither direction well.
+2. **Two relation traits** (`SymmetricRelation<Marker>` for undirected, degree-bounded edges like `littermate_of`; `ChildOf<Marker>` for directed, foreign-key-style relations like `Order belongs_to Customer`), each with query traits shaped to match (`Neighbors` for the former; `Parent`/`Children` for the latter, with `Parent` a free blanket impl and `Children` needing a genuinely new reverse index). Chosen — matches the actual, differently-shaped cost structure of the two relationship kinds the two domains presented, rather than forcing a false symmetry.
+
+### Store composition: one monolithic generic store vs. composable wrapper layers
+
+1. **One `GenericStore<R>` type, generic only over the record type, holding whatever indexes/caches it needs internally.** Considered, then rejected: a single generic type can't statically know, ahead of time, how many `IndexedField`/`ScannableField`/relation markers a given `R` will have without either dynamic storage (`HashMap<TypeId, Box<dyn Any>>`, reintroducing dynamic dispatch this design otherwise avoids) or a macro/codegen layer generating a bespoke struct per domain (a bigger, separately-scoped tool this pass didn't attempt to justify).
+2. **Small, single-purpose wrapper layers composed by nesting** (`Indexed<S, R, Marker>`, `Scanned<S, R, Marker>`, `Symmetric<S, R, Marker>`, `Reversed<S, P, C, Marker>`, each adding exactly one capability on top of an inner store that already provides `GetById`), mirroring this crate's own existing pattern of wrapping rather than rebuilding (`GlobalRwLockStore`/`ProductionStore` both wrap an inner store type directly). Chosen — stays fully static, no macro, no dynamic dispatch, and directly reuses a pattern this codebase already trusts. **Named cost, discovered while building it, not assumed in advance**: Rust has no trait delegation, so every wrapper must manually forward every other capability trait its inner store provides, or that capability silently disappears once wrapped — proven by a real compile failure while building this design's own scratch crate (see the design doc's §4.5), not a theoretical concern.
+
+### Field-type recommendations for `Order`'s new field types
+
+1. **`amount` as `f32`/`f64`.** Rejected outright, not even prototyped — float rounding error in a currency field is a correctness bug waiting to happen, independent of anything this design is about.
+2. **`amount` as `rust_decimal::Decimal`.** Considered — `Decimal` is itself `Copy`, so it would satisfy `ScannableField::Value: Copy` unchanged. Flagged as a new dependency per this project's standing rule (propose before adding, one-line justification) — not added in this design-only pass.
+3. **`amount` as `i64` (integer cents).** Chosen for the design document's own examples — no new dependency, `Copy`, and preserves the packed-`Vec` cache trick's cache-line-packing density most closely to `age: u32`'s (see the design doc's §4.1 caveat about wider types). A real implementation is free to choose option 2 instead; the design itself is agnostic between them, since both satisfy the same bound.
+4. **`created_at` as `chrono::DateTime<Utc>` vs. a plain `i64` (unix millis).** Same reasoning as above — `chrono` is flagged as a new dependency and not added; a plain `Copy` epoch integer is used in the design document's examples instead, for the same cache-density reasoning.
+
+## Decision (proposed, not accepted)
+
+- `docs/design/GENERIC-SCHEMA-DESIGN.md` records the full proposed design: four schema traits (`Record`, `IndexedField<Marker>`, `ScannableField<Marker>`, `SymmetricRelation<Marker>`, `ChildOf<Marker>`), seven query traits (`GetById`, `FilterEq`, `ScanField`, `UpdateField`, `Neighbors`, `Parent`, `Children`), two generic composition functions (`two_hop_neighbors`, `siblings`), and four composable store wrapper layers (`BaseStore`, `Indexed`, `Scanned`, `Symmetric`, `Reversed`).
+- No new dependency is introduced by this design; two candidate dependencies (`rust_decimal`, `chrono`) are named and explicitly not added, per this project's standing rule.
+- No existing source file is modified. No implementation is authorized by this ADR.
+- If accepted, the recommended migration path (design doc §5) builds the generic core additively, ports `Dog` onto it as a *third* validation domain before touching anything `ProductionStore`-adjacent, and keeps `DogStore`/`ConcurrentStore` alive as thin facades so every existing benchmark and test keeps compiling unchanged throughout.
+
+## Consequences
+
+### Positive
+
+- A concrete, compiled (in a scratch crate, not this repository) proof that one generic core can serve two structurally different domains, including the directed-relation case `Dog` alone never would have tested.
+- Two real design mistakes were caught by the compiler during this pass and are reported directly in the design document (§4.3's `Reversed`/`GetById<P>` error; the initial ambiguous-associated-type error from `Scanned`'s `FilterEq` forwarding) rather than smoothed over — a second domain earning its keep exactly as intended.
+- `ADR-0006`'s own predicted revisit trigger (more than one mutable durable field) is confirmed to bite immediately, with a real domain and real reasoning, rather than remaining a hypothetical bullet point.
+- The forwarding-boilerplate tax (design doc §4.5) is now a named, understood cost with a concrete example of its failure mode, rather than an unknown risk that would have been discovered mid-implementation.
+
+### Negative / tradeoffs
+
+- The wrapper-composition approach's forwarding-boilerplate tax scales with schema complexity (roughly capability-layers × capability-traits) — real, and not resolved by this design; a domain with many indexed/scannable fields and several relations could accumulate a meaningful amount of forwarding code.
+- mmap-style durability's generalization to more than one mutable field is confirmed necessary (not hypothetical) but not designed in this pass — a real follow-up scope, potentially substantial (the "string-heap/fixed-layout problem" `ADR-0006` already declined to solve once).
+- The packed-`Vec` scan-cache trick's *magnitude* of advantage over AoS/SoA-equivalent approaches is expected to shrink for wider `ScannableField::Value` types, unmeasured by this design-only pass.
+- This design does not attempt dataset-generator/benchmark-infrastructure genericity (`bench_support.rs`'s `GeneratorConfig` is `Dog`-shaped throughout) — a separate, unscoped piece of follow-up work.
+
+## Validation and revisit triggers
+
+- Validated by: a standalone scratch crate (not part of this repository), compiled and run successfully with both `DogRecord` and `Order`/`Customer` exercising every trait in the design against the same generic wrapper-layer store code. Not validated by: any change to this repository's actual source, which remains untouched.
+- Revisit when: the owner has reviewed `docs/design/GENERIC-SCHEMA-DESIGN.md` and either accepts it (moving this ADR to Accepted and authorizing the staged migration in the design doc's §5), asks for a revised design, or declines to pursue genericity at all.
+- Revisit if: a real third domain (or `Dog` itself, per the staged migration plan) surfaces a schema shape this design doesn't handle — e.g. a many-to-many relation (neither `SymmetricRelation` nor `ChildOf` models this), a field needing both equality-indexing and scanning simultaneously, or a genuinely dynamic/late-bound schema requirement this crate has never needed before.
+- Revisit if: the forwarding-boilerplate tax proves unacceptable at realistic schema complexity once actually implemented — the fallback considered-and-rejected option (a macro/codegen layer generating wrapper boilerplate) would need re-evaluating at that point, not before.

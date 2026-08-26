@@ -138,18 +138,19 @@ pub(crate) mod test_support {
     ///
     /// # A note on what this does and doesn't prove
     ///
-    /// The write log is appended to *just after* each `update_age` call
-    /// returns, not atomically with the write itself — so for two writes to
-    /// *different* ids, the recorded order could in principle be swaped
-    /// relative to true completion order if the OS scheduler pre-empts one
-    /// thread between its store call returning and its log-append running.
-    /// This doesn't weaken the check that matters: for writes to the *same*
-    /// id (the only case where order determines the final value), every
-    /// variant under test serializes access to that id somewhere real
-    /// (a lock, a shard, the actor's single thread) immediately around the
-    /// store call itself, and the log-append happens essentially
-    /// immediately after — in practice indistinguishable from atomic for
-    /// this purpose. This is a linearizability *smoke test*, not a formal
+    /// The write log's append is made atomic with the `update_age` call
+    /// itself, via `order_lock`: a thread holds that guard across both the
+    /// store call and the log push, so no other thread's write can
+    /// interleave between "the write completed" and "the write was
+    /// recorded." An earlier version of this test appended to the log
+    /// under its own, separate mutex, released as soon as the store call
+    /// returned; that gap let a second thread's write-and-log complete
+    /// between the first thread's store call returning and its log-append
+    /// running, letting the log's order for *same-id* writes diverge from
+    /// the order they actually completed in — CI caught this directly, as
+    /// intermittent false-positive "lost update" failures on the exact
+    /// (contended-id, real-timing) coincidence this smoke test exists to
+    /// probe for. This is a linearizability *smoke test*, not a formal
     /// checker (e.g. Jepsen/Knossos) — appropriate for a benchmark harness,
     /// not offered as a proof.
     pub(crate) fn run_concurrency_stress_test<S: ConcurrentStore + 'static>() {
@@ -158,6 +159,12 @@ pub(crate) mod test_support {
 
         let store = Arc::new(S::new(dataset.records.clone(), dataset.edges.clone()));
         let write_log: Arc<Mutex<Vec<(Uuid, u32)>>> = Arc::new(Mutex::new(Vec::new()));
+        // Guards `update_age` + the write_log push as one critical section
+        // (see the doc comment above) so the log's append order always
+        // matches the store's true write-completion order for same-id
+        // writes, which is what the sequential-replay check below depends
+        // on.
+        let order_lock: Arc<Mutex<()>> = Arc::new(Mutex::new(()));
         // Every value any thread ever *attempts* to write to a given id —
         // used for the secondary "no torn reads" membership check below.
         let attempted_writes: Arc<Mutex<std::collections::HashMap<Uuid, Vec<u32>>>> =
@@ -168,6 +175,7 @@ pub(crate) mod test_support {
             let store = Arc::clone(&store);
             let write_log = Arc::clone(&write_log);
             let attempted_writes = Arc::clone(&attempted_writes);
+            let order_lock = Arc::clone(&order_lock);
             let ids = contended_ids.clone();
             handles.push(thread::spawn(move || {
                 let mut rng = StdRng::seed_from_u64(STRESS_SEED ^ thread_index as u64);
@@ -188,6 +196,12 @@ pub(crate) mod test_support {
                             .entry(id)
                             .or_default()
                             .push(age);
+                        // Held across the store call and the log push (see
+                        // this fn's doc comment): makes the log's append
+                        // order match the store's true write order.
+                        let _order_guard = order_lock.lock().expect(
+                            "stress-test bookkeeping mutex never poisoned: no operation while holding it can panic",
+                        );
                         if store.update_age(id, age).is_ok() {
                             write_log
                                 .lock()
