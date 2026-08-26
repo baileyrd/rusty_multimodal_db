@@ -55,19 +55,26 @@ const SEED: u64 = 0x5052_4F44_5354_4B49; // "PROD" + "STKI" in ASCII hex, arbitr
 /// `run_concurrency_stress_test`'s own shape (`src/concurrency/mod.rs`)
 /// exactly, factored into a standalone function so it can run twice against
 /// the *same* accumulating `write_log`/`attempted_writes`, with a real
-/// drop-and-reopen happening between the two calls.
+/// drop-and-reopen happening between the two calls. `order_lock` is held
+/// across each `update_age` call and its `write_log` push together, so the
+/// log's append order always matches the store's true write order for
+/// same-id writes — see `run_concurrency_stress_test`'s doc comment
+/// (`src/concurrency/mod.rs`) for why that matters and what breaks without
+/// it (this test hit exactly that break, intermittently, in CI).
 fn run_contention_phase(
     store: Arc<ProductionStore>,
     ids: &[Uuid],
     seed_xor: u64,
     write_log: &Arc<Mutex<Vec<(Uuid, u32)>>>,
     attempted_writes: &Arc<Mutex<HashMap<Uuid, Vec<u32>>>>,
+    order_lock: &Arc<Mutex<()>>,
 ) {
     let mut handles = Vec::with_capacity(THREADS);
     for thread_index in 0..THREADS {
         let store = Arc::clone(&store);
         let write_log = Arc::clone(write_log);
         let attempted_writes = Arc::clone(attempted_writes);
+        let order_lock = Arc::clone(order_lock);
         let ids = ids.to_vec();
         handles.push(thread::spawn(move || {
             let mut rng = StdRng::seed_from_u64(SEED ^ seed_xor ^ thread_index as u64);
@@ -87,6 +94,9 @@ fn run_contention_phase(
                         .entry(id)
                         .or_default()
                         .push(age);
+                    let _order_guard = order_lock
+                        .lock()
+                        .expect("bookkeeping mutex never poisoned: no panic while holding it");
                     if store.update_age(id, age).is_ok() {
                         write_log
                             .lock()
@@ -115,6 +125,9 @@ fn concurrent_writers_survive_a_drop_and_reopen_with_no_lost_updates() {
     let write_log: Arc<Mutex<Vec<(Uuid, u32)>>> = Arc::new(Mutex::new(Vec::new()));
     let attempted_writes: Arc<Mutex<HashMap<Uuid, Vec<u32>>>> =
         Arc::new(Mutex::new(HashMap::new()));
+    // Shared across both phases, same as write_log/attempted_writes — see
+    // run_contention_phase's doc comment.
+    let order_lock: Arc<Mutex<()>> = Arc::new(Mutex::new(()));
 
     // Phase 1: concurrent contention against a freshly created store.
     let store = Arc::new(
@@ -127,6 +140,7 @@ fn concurrent_writers_survive_a_drop_and_reopen_with_no_lost_updates() {
         0x1111_1111,
         &write_log,
         &attempted_writes,
+        &order_lock,
     );
     store.flush().expect("flush after phase 1");
     // Drop every handle so the mapping is genuinely torn down, not just
@@ -148,6 +162,7 @@ fn concurrent_writers_survive_a_drop_and_reopen_with_no_lost_updates() {
         0x2222_2222,
         &write_log,
         &attempted_writes,
+        &order_lock,
     );
     store.flush().expect("flush after phase 2");
     drop(store);
