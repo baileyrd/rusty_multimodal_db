@@ -48,11 +48,20 @@ where
 /// The "one hop up" side of a *directed* relation. Has a blanket impl
 /// (`store.rs`) over anything providing `GetById<C>` — no new index
 /// needed, the foreign key already lives on the child.
+///
+/// Returns `Result<Option<C::ParentId>, super::NotFound<C::Id>>`, not a
+/// bare `Option` — matching `GetById::get`'s own "not found" shape
+/// (`None`) folded into this trait's `Err`, so the two cases a caller
+/// might otherwise confuse stay distinct: `Err` means `child_id` isn't a
+/// real record at all, `Ok(None)` means it is a real record with no
+/// parent, `Ok(Some(parent))` means it is a real record with one. See
+/// `store.rs`'s blanket impl for why a single-level `Option` (this
+/// trait's shape before this fix) couldn't tell those apart.
 pub trait Parent<C, Marker>
 where
     C: ChildOf<Marker>,
 {
-    fn parent(&self, child_id: C::Id) -> Option<C::ParentId>;
+    fn parent(&self, child_id: C::Id) -> Result<Option<C::ParentId>, super::NotFound<C::Id>>;
 }
 
 /// The "one hop down" side of a *directed* relation — the expensive

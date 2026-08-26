@@ -260,7 +260,7 @@ mod tests {
 
         assert_eq!(
             Parent::<Order, BelongsToCustomer>::parent(&store, Uuid::from_u128(1)),
-            Some(Uuid::from_u128(100))
+            Ok(Some(Uuid::from_u128(100)))
         );
 
         let mut customer_100_orders =
