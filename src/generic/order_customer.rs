@@ -279,6 +279,46 @@ mod tests {
         assert_eq!(err.0, Uuid::from_u128(99));
     }
 
+    /// The regression test that should have existed from the first round:
+    /// write, then immediately read via `GetById::get`, expect the write
+    /// to be visible — against the purely in-memory composed stack
+    /// (`build_order_generic_store`), not `GenericMmapStore`. Neither
+    /// prior spike (the field-focused round or the directed-relation
+    /// round) exercised this combination, which is exactly why the gap
+    /// went unnoticed until wiring the durable path's own `get` incidentally
+    /// required the same guarantee. Covers both the innermost stacked
+    /// `Scanned` layer (`Amount`) and the outermost one (`DiscountCents`)
+    /// so a fix that only happens to work for one position in the stack
+    /// can't pass silently, and checks that untouched fields on the same
+    /// record are unaffected — the fix patches one field at a time as
+    /// `get` unwinds through each layer, not the whole record at once.
+    #[test]
+    fn get_reflects_a_prior_update_through_every_layer_of_the_in_memory_stack() {
+        let mut store = build_order_generic_store(&sample());
+
+        // Innermost Scanned layer (Amount) — the write must survive being
+        // forwarded back up through the two further Scanned layers stacked
+        // on top of it (CreatedAt, DiscountCents) and the outermost
+        // Reversed layer.
+        UpdateField::<Order, Amount>::update(&mut store, Uuid::from_u128(1), 99_999).unwrap();
+        let order = GetById::<Order>::get(&store, Uuid::from_u128(1)).unwrap();
+        assert_eq!(order.amount_cents, 99_999);
+        assert_eq!(order.created_at_unix_ms, 1_000);
+        assert_eq!(order.discount_cents, 50);
+
+        // Outermost Scanned layer (DiscountCents) — proves the fix isn't
+        // order-dependent (only catching the innermost layer's writes).
+        UpdateField::<Order, DiscountCents>::update(&mut store, Uuid::from_u128(3), 777).unwrap();
+        let order = GetById::<Order>::get(&store, Uuid::from_u128(3)).unwrap();
+        assert_eq!(order.discount_cents, 777);
+        assert_eq!(order.amount_cents, 999);
+
+        // A record nobody wrote to still reads its original values.
+        let untouched = GetById::<Order>::get(&store, Uuid::from_u128(2)).unwrap();
+        assert_eq!(untouched.amount_cents, 4_200);
+        assert_eq!(untouched.discount_cents, 0);
+    }
+
     #[test]
     fn adding_a_third_scannable_field_only_touches_the_macro_invocation() {
         let mut store = build_order_generic_store(&sample());
