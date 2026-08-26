@@ -191,14 +191,37 @@ where
 }
 
 // Forwarding impl: `Scanned<S, ..>` re-exposing `GetById` from its inner
-// store.
+// store — write-through consistent with `UpdateField::update`, unlike an
+// earlier version of this impl (see the fix note below).
 impl<S, R, Marker> GetById<R> for Scanned<S, R, Marker>
 where
     R: ScannableField<Marker>,
     S: GetById<R>,
 {
+    /// Patches the record `inner.get` returns with this layer's own live
+    /// cached value before returning it — not a blind forward. An earlier
+    /// version of this impl returned `self.inner.get(id)` unmodified,
+    /// which meant a `Scanned` layer's own `UpdateField::update` (which
+    /// only ever writes into `self.cache`, never down into `BaseStore`'s
+    /// records map several layers below) was invisible to `get`. Reusing
+    /// `set_scannable_value` (added for [`super::mmap_store::GenericMmapStore`]'s
+    /// analogous gap) fixes it here too, but the mechanism is different: a
+    /// single hand-fused struct like `GenericMmapStore` merges two views
+    /// it owns directly, while `Scanned` — a separate struct layered on
+    /// top of whatever owns the record — has no way to reach down into
+    /// that owner's storage, so it patches on the way *up* through `get`
+    /// instead. When multiple `Scanned` layers stack (e.g. `Order`'s
+    /// `Amount`/`CreatedAt`/`DiscountCents`), each one patches only its
+    /// own field as the call unwinds, so the record is fully consistent
+    /// by the time it reaches the outermost caller — no change needed in
+    /// `Indexed`/`Symmetric`/`Reversed`, none of which own any
+    /// `ScannableField` data to patch.
     fn get(&self, id: R::Id) -> Option<R> {
-        self.inner.get(id)
+        let mut record = self.inner.get(id)?;
+        if let Some(&position) = self.position_index.get(&id) {
+            record.set_scannable_value(self.cache[position]);
+        }
+        Some(record)
     }
 }
 

@@ -51,25 +51,42 @@
 //! is wired into any of them, and nothing in `src/production.rs` or
 //! `src/store/**` changed to build this module.
 //!
-//! # A known limitation, found while building this, not hidden
+//! # Write-through consistency, in both the durable and in-memory paths
 //!
-//! `GetById::get` on a store composed purely from the in-memory
-//! [`store::BaseStore`]/[`store::Indexed`]/[`store::Scanned`] layers does
-//! **not** reflect a field `UpdateField::update` just wrote — `Scanned`
-//! only updates its own cache, never writes through to `BaseStore`'s
-//! records map, unlike every hand-written backend in this crate
-//! (`CanonicalCachedStore::update_age` mutates both). [`mmap_store::GenericMmapStore`]
-//! (the durable core — what [`production::GenericProductionStore`] is
-//! actually built on) does **not** have this gap: it's a single hand-fused
-//! struct, not a composition of separately-owned layers, so its `get`
-//! merges the live mmap value directly (see that module's own docs, and
-//! [`traits::ScannableField::set_scannable_value`], the method added to
-//! make that merge possible). Closing this gap for the purely in-memory
-//! composition (`DogGenericStore`/`OrderGenericStore`, still used by the
-//! historical spikes) would need the same O(N²) marker-pair treatment
-//! `forward_scannable_pairs!` already gives `ScanField`/`UpdateField` —
-//! not attempted this round; flagged in `docs/PROJECT-STATUS.md` as
-//! unscoped follow-up work, not silently worked around.
+//! `GetById::get` reflects a field `UpdateField::update` just wrote, on
+//! both the durable core ([`mmap_store::GenericMmapStore`]) and the
+//! purely in-memory [`store::BaseStore`]/[`store::Indexed`]/[`store::Scanned`]
+//! composition — the same guarantee every hand-written backend in this
+//! crate has (`CanonicalCachedStore::update_age` mutates both its
+//! canonical record and its cache). The two paths get there by different
+//! mechanisms, since they have structurally different shapes:
+//!
+//! - [`mmap_store::GenericMmapStore`] is a single hand-fused struct that
+//!   owns both the (possibly stale) constructed-from record and the live
+//!   mmap value directly — its `get` merges the two on read, via
+//!   [`traits::ScannableField::set_scannable_value`].
+//! - [`store::Scanned`] is a separate struct layered *on top of* whatever
+//!   owns the record (typically [`store::BaseStore`], several layers
+//!   down) — it has no way to reach down and mutate that owner's storage.
+//!   Its `GetById` forwarding impl instead patches the record it gets
+//!   back from its inner store with its own cached value, using the same
+//!   `set_scannable_value`, before returning it. When multiple `Scanned`
+//!   layers stack (e.g. `Order`'s `Amount`/`CreatedAt`/`DiscountCents`),
+//!   each one patches only its own field as `get` unwinds back up through
+//!   the stack, so the record is fully consistent by the time it reaches
+//!   the caller — no change needed in `Indexed`/`Symmetric`/`Reversed`,
+//!   none of which own any `ScannableField` data to patch.
+//!
+//! **A real, measured cost, not free**: unlike the durable core (where the
+//! merge replaces work that already had to happen), the in-memory fix adds
+//! one `HashMap` lookup per `Scanned` layer on every `get` call. Measured
+//! directly (same-session, back-to-back, `benches/generic_spike.rs`'s
+//! `generic_get` on `Dog`'s single-`Scanned`-layer stack): roughly 43–88%
+//! slower across 1K/100K/1M records than before this fix. `scan`/`scan_ages`
+//! and every other capability are untouched and unaffected — see
+//! `RESULTS.md`'s `## Generic schema library` section for the full
+//! numbers. This is the accepted cost of the correctness guarantee, not
+//! an unexamined regression.
 
 pub mod mmap_field;
 pub mod mmap_store;
