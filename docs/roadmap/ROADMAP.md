@@ -19,6 +19,7 @@ Status vocabulary: `Proposed`, `Draft`, `Accepted`, `In Progress`,
 | `DURABILITY-TIER2` | Three alternate durability architectures for `CanonicalCachedStore` (mmap-backed ages, LSM-tree-style with no compaction, `redb`-backed embedded engine), each scoped to the mutable `age` field only; ADR-0006; `RESULTS.md`'s `## Durability` section extended to cover all eight variants | `DURABILITY-TIER1` | `STORAGE-009` | `cargo test`/`cargo bench --bench durability` green for all 3 Tier 2 variants; `RESULTS.md` reports per-configuration numbers with the same rigor as Tier 1 | Implemented | follow-on PR |
 | `CONCURRENCY-PROTOTYPES` | Four concurrent access strategies for `CanonicalCachedStore` (global `RwLock`, sharded locking, `dashmap`, actor/single-writer-thread), a new `ConcurrentStore` trait, a linearizability-style stress test, and a custom multi-threaded throughput harness; ADR-0007; `RESULTS.md`'s `## Concurrency` section | `DURABILITY-TIER2` | `STORAGE-010` | `cargo test` green for all four variants' flagship stress tests (16 threads × 2,000 iterations each, no lost updates/torn reads); `cargo bench --bench concurrency` completes the full size×ratio×thread-count×variant sweep; `RESULTS.md` reports a verdict per (size × write-ratio) configuration and an explicit recommendation | Implemented | follow-on PR |
 | `PRODUCTION-DEFAULT` | `ProductionStore` (`src/production.rs`): `CanonicalCachedStore`'s architecture + mmap durability + global `RwLock` concurrency, consolidated into one recommended type implementing both `DogStore` and `ConcurrentStore`; ADR-0008; a flagship integration test exercising mmap durability and `RwLock` concurrency together for the first time; `src/lib.rs`/`README.md`/`docs/architecture/SYSTEM-ARCHITECTURE.md` reorganized to lead with it; `RESULTS.md`'s `## Production recommendation` section | `CONCURRENCY-PROTOTYPES` | `STORAGE-011` | `cargo test` green including the new flagship integration test; `cargo bench --bench workloads -- production` and `cargo bench --bench concurrency` report `ProductionStore` numbers; `RESULTS.md` ties all six prior rounds together | Implemented | follow-on PR |
+| `GENERIC-SCHEMA-DESIGN` | **Design only, no implementation**: a generic record/schema/query abstraction (`Record`/`IndexedField`/`ScannableField`/`SymmetricRelation`/`ChildOf` traits, composable store wrapper layers) validated against `Dog` and a second, structurally different domain (`Order`/`Customer` — directed relation, currency-like field, enum categorical field, timestamp field); ADR-0009 (Proposed, not Accepted); `docs/design/GENERIC-SCHEMA-DESIGN.md` | `PRODUCTION-DEFAULT` | — (no spec written; design not yet accepted) | Owner reviews `docs/design/GENERIC-SCHEMA-DESIGN.md` and either accepts it (promoting to a real spec and authorizing implementation per the doc's §5 staged migration), asks for revision, or declines | Proposed | this PR |
 
 ## Sequencing notes
 
@@ -89,6 +90,20 @@ the first time, and make it the crate's documented default — not to
 re-derive or re-benchmark any of the three picks, and not to build a
 general "any concurrency strategy × any durability variant" combinatorial
 matrix (see ADR-0008's Context and Non-goals in `STORAGE-011`).
+
+`GENERIC-SCHEMA-DESIGN` follows `PRODUCTION-DEFAULT` as the natural next
+question once the recommendation was fully realized on `Dog`: should the
+crate's schema/query surface generalize beyond one domain at all, and if
+so, to what shape? Deliberately staged as design-only, not an
+implementation unit — the motivating task named this the most
+hard-to-reverse decision the project has faced (the abstraction would
+become the crate's public API surface), and required stopping for review
+before any implementation code, per this project's own working-style
+convention of checking in before large or hard-to-reverse changes. Its
+"Depends on" `PRODUCTION-DEFAULT` reflects that the recommendation needed
+to exist and be settled before it was worth asking whether it should
+generalize, not that the design touches `ProductionStore` itself (it
+doesn't — see ADR-0009 and the design doc's own Context).
 
 ## Out of scope for this roadmap (see architecture doc "where this can go
 next")
