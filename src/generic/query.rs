@@ -9,6 +9,7 @@
 
 use super::traits::{ChildOf, IndexedField, Record, ScannableField, SymmetricRelation};
 
+/// Generalizes `get` — look up a record by its id.
 pub trait GetById<R: Record> {
     fn get(&self, id: R::Id) -> Option<R>;
 }

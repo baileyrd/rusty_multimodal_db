@@ -1,67 +1,89 @@
 # rusty_multimodal_db
 
-A benchmark harness, not a database — but if you're looking for what to
-actually use, it's `ProductionStore` (`src/production.rs`):
-`CanonicalCachedStore`'s storage architecture, made durable via mmap, made
-safe for concurrent reader/writer access via one global `RwLock`. Six
-rounds of empirical work (row/column/graph, mixed-workload, durability,
-and three concurrency-throughput passes) converged on that combination —
-see `docs/decisions/ADR-0008-production-default.md` for which round
-justified each layer and `RESULTS.md`'s `## Production recommendation`
-section for the numbers.
+A durable, concurrency-safe key-value record store for Rust: mmap-backed
+persistence and a `RwLock` for safe multi-threaded access, either as a
+fixed `Dog`-shaped store (`ProductionStore`) or generically, for your own
+record type (`GenericProductionStore`). Internal use only — not published
+to crates.io.
 
-A second, separate story lives alongside it: `crate::generic`
-(`src/generic/`) is a real, public generic record/schema/query library —
-the same storage/durability/concurrency recipe, generalized to any record
-type instead of hardcoded to `Dog`, validated against a second,
-structurally different domain (`Order`/`Customer`) across four spikes
-before promotion. `crate::generic::production::GenericProductionStore` is
-its `ProductionStore` equivalent — durable via mmap, safe for concurrent
-access via `RwLock`, generic. See `docs/decisions/ADR-0009-generic-schema-design-proposal.md`
-(Accepted) and `RESULTS.md`'s `## Generic schema library` section. New,
-parallel capability — nothing above changed to build it.
+## Getting started
 
-Everything below this point — three other storage backends, seven other
-durability variants, three other concurrency strategies — is the
-benchmarked evidence that recommendation is built on, not the recommended
-path. It exists to empirically test one storage-design hypothesis before
-anyone commits engineering time to building around it:
+This repo isn't on crates.io, so depend on it by git (or by local path if
+you already have it checked out):
 
-> A canonical store, keyed by UUID, can serve as the single source of
-> truth for row-oriented, column-oriented, and graph-oriented access —
-> with row/column/graph implemented as **views** over that one canonical
-> store rather than as separate physical copies of the data.
+```toml
+[dependencies]
+rusty_multimodal_db = { git = "https://github.com/baileyrd/rusty_multimodal_db" }
+# or, from a local checkout:
+# rusty_multimodal_db = { path = "../rusty_multimodal_db" }
+```
 
-It's tested against two conventional baselines, all three behind the same
-`DogStore` trait so results are directly comparable:
+A complete, minimal example — create a store, read a record, update it:
 
-- **AoS** (array of structs) — `Vec<DogRecord>`, row-oriented.
-- **SoA** (struct of arrays) — parallel `Vec<Uuid>`/`Vec<String>`/`Vec<u32>`,
-  column-oriented.
-- **Canonical** — `HashMap<Uuid, DogRecord>` as the only physical copy,
-  with column-scan and one-hop-lookup access (both a shared-attribute
-  grouping, `same_breed`, and real edge traversal over a generated
-  `littermate_of` relationship, `neighbors`) implemented as derived views
-  over it.
+```rust
+use rusty_multimodal_db::{DogRecord, DogStore, ProductionStore};
+use uuid::Uuid;
 
-See `docs/charter/CHARTER.md` for the full framing, `docs/decisions/` for
-why the comparison is structured this way, and (once benchmarks have run)
-`RESULTS.md` for the numbers and the verdict per workload.
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let path = std::path::Path::new("/tmp/dogs.mmap");
+    let rex = Uuid::from_u128(1);
+    let records = vec![DogRecord::new(rex, "Corgi", 3)];
 
-## Status
+    let mut store = ProductionStore::create(records, Vec::new(), path)?;
+    assert_eq!(store.get(rex).unwrap().age, 3);
 
-Bootstrap in progress. See `docs/PROJECT-STATUS.md` for the current
-checkpoint and `docs/roadmap/ROADMAP.md` for what's next.
+    store.update_age(rex, 4)?;
+    assert_eq!(store.get(rex).unwrap().age, 4);
 
-## Repo name
+    Ok(())
+}
+```
 
-This repo is named `rusty_multimodal_db` on GitHub. `docs/charter/CHARTER.md`
-records a naming discrepancy worth knowing about: the task that seeded
-this repo suggested `rusty_multimodel_bench` (multi-**model** access —
-row/column/graph — not multimodal *data*) as a less ambiguous name once
-the benchmark's shape was clear.
+`ProductionStore::open` reopens an existing file the same way; both
+implement `DogStore` (single-owner, `&mut self`) and `ConcurrentStore`
+(`&self`, share across threads via `Arc`). See
+[`ProductionStore`'s own rustdoc](#rustdoc) for the runnable version of
+this example and every method's contract.
 
-## Using this repo
+### Your own record type: `GenericProductionStore`
+
+`ProductionStore` is fixed to one record shape (`DogRecord`).
+`GenericProductionStore<S>` is the same recipe — mmap durability, `RwLock`
+concurrency — generalized to any type implementing this crate's `Record`
+trait (plus `IndexedField`/`ScannableField` for whichever fields need
+equality lookup or scan/update access). See
+[`GenericProductionStore`'s own rustdoc](#rustdoc) for a complete, minimal
+worked example implementing a custom domain from scratch, and
+`src/generic/order_customer.rs` (behind the `research` feature, see below)
+for a larger real reference domain with a directed relation
+(`Order belongs_to Customer`).
+
+### The `research` feature: seeing the alternatives this recommendation is built on
+
+`ProductionStore`/`GenericProductionStore` are the *recommended* defaults,
+not the only backends in this repo — they're the winners of a long
+empirical comparison against other storage layouts, durability
+strategies, and concurrency strategies. That comparison code is real and
+kept, but off by default so a normal build doesn't compile it in. Enable
+it with the `research` Cargo feature:
+
+```sh
+cargo build --features research
+cargo test --all-features
+cargo bench --features research          # or just `cargo bench` — see below
+```
+
+This unlocks: the other three `Dog` storage backends (row-oriented,
+column-oriented, and the plain non-durable canonical store), the other
+seven durability variants (WAL/snapshot combinations, an embedded
+transactional store, `redb`), the other three concurrency strategies
+(sharded, `dashmap`, an actor-style channel), the `Order`/`Customer`
+reference domain (`generic::order_customer`), and every historical
+spike/comparison module. See `src/lib.rs`'s own top-level doc comment for
+the full front-door/research split, and `RESULTS.md` for the numbers that
+justified each pick.
+
+## Running the suite
 
 ```sh
 cargo test --all-features            # unit tests, including ProductionStore's and GenericProductionStore's flagship integration tests
@@ -72,6 +94,58 @@ cargo bench --features perf-events --bench cache_events   # cache-miss counts, L
 ```
 
 See `AGENTS.md` for the full canonical command set and change rules.
+
+## Where to go deeper
+
+This repo accumulated its design and evidence across many rounds of
+empirical work — this README won't re-explain any of it, just point you
+at the right file:
+
+- **`docs/charter/CHARTER.md`** — the original hypothesis under test (can
+  one canonical, UUID-keyed store serve row/column/graph access as
+  derived views?) and the repo's naming history.
+- **`docs/architecture/SYSTEM-ARCHITECTURE.md`** — how the pieces fit
+  together today, starting from `ProductionStore`.
+- **`docs/design/GENERIC-SCHEMA-DESIGN.md`** — the original design
+  proposal for the generic record/schema/query library (`crate::generic`),
+  now Accepted and implemented.
+- **`docs/decisions/`** — one ADR per accepted architectural decision, in
+  order:
+  - `ADR-0001` — the three-backend (AoS/SoA/canonical) empirical comparison
+  - `ADR-0002` — cache-miss instrumentation platform
+  - `ADR-0003` — eager write-through cache invalidation
+  - `ADR-0004` — one-hop `neighbors` as a trait method
+  - `ADR-0005` — WAL/snapshot hybrid durability
+  - `ADR-0006` — the Tier 2 durability architectures (mmap, `redb`, etc.)
+  - `ADR-0007` — the concurrency strategies compared
+  - `ADR-0008` — `ProductionStore` as the production default
+  - `ADR-0009` — the generic schema design proposal (now Accepted)
+- **`docs/specifications/SPEC-REGISTRY.md`** + **`docs/specifications/storage/`**
+  — the `STORAGE-0xx` requirement/spec tree each round implemented against.
+- **`docs/roadmap/ROADMAP.md`** — status vocabulary and what's next.
+- **`docs/traceability/TRACEABILITY.md`** — the requirement → decision →
+  implementation → verification mapping tying the above together.
+- **`docs/PROJECT-STATUS.md`** — the current checkpoint (last verified
+  commit, what's merged).
+- **`RESULTS.md`** — the actual benchmark numbers and verdict behind every
+  pick above.
+- **`AGENTS.md`** / **`WORKFLOW.md`** — contributor/agent conventions:
+  canonical commands, branch/PR rules, and what needs an ADR.
+
+## Rustdoc
+
+`cargo doc --all-features --open` builds and opens full API documentation,
+including the `research`-gated modules. Start at `ProductionStore` and
+`GenericProductionStore` — both have a complete, runnable example in
+their own doc comment.
+
+## Repo name
+
+This repo is named `rusty_multimodal_db` on GitHub. `docs/charter/CHARTER.md`
+records a naming discrepancy worth knowing about: the task that seeded
+this repo suggested `rusty_multimodel_bench` (multi-**model** access —
+row/column/graph — not multimodal *data*) as a less ambiguous name once
+the benchmark's shape was clear.
 
 ## License
 

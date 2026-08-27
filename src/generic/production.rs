@@ -49,6 +49,88 @@ const LOCK_POISONED: &str =
 /// across threads via `Arc` — the generic analogue of
 /// `crate::production::ProductionStore`. See module docs for why its
 /// methods are inherent rather than trait impls.
+///
+/// # Examples
+///
+/// Building your own domain means implementing [`super::traits::Record`]
+/// (an id), plus [`super::traits::IndexedField`] and/or
+/// [`super::traits::ScannableField`] for whichever fields need
+/// equality-lookup or scan/update access — one zero-sized marker type per
+/// field. See `crate::generic::order_customer` (behind the `research`
+/// feature) for a larger, real reference domain (`Order`/`Customer`, a
+/// directed relation, three scannable fields); this example is the
+/// minimal shape, unconditionally available:
+///
+/// ```
+/// use rusty_multimodal_db::generic::mmap_store::GenericMmapStore;
+/// use rusty_multimodal_db::generic::production::GenericProductionStore;
+/// use rusty_multimodal_db::generic::traits::{IndexedField, Record, ScannableField};
+/// use uuid::Uuid;
+///
+/// #[derive(Clone)]
+/// struct Widget {
+///     id: Uuid,
+///     category: u32,
+///     price_cents: i64,
+/// }
+///
+/// // One zero-sized marker per field this domain wants indexed/scannable
+/// // access to — see `IndexedField`/`ScannableField`'s own doc comments
+/// // for why a marker, not just the field's type, identifies each one.
+/// struct Category;
+/// struct Price;
+///
+/// impl Record for Widget {
+///     type Id = Uuid;
+///     fn id(&self) -> Uuid {
+///         self.id
+///     }
+/// }
+///
+/// impl IndexedField<Category> for Widget {
+///     type IndexValue = u32;
+///     fn indexed_value(&self) -> &u32 {
+///         &self.category
+///     }
+/// }
+///
+/// impl ScannableField<Price> for Widget {
+///     type ScanValue = i64;
+///     fn scannable_value(&self) -> i64 {
+///         self.price_cents
+///     }
+///     fn set_scannable_value(&mut self, value: i64) {
+///         self.price_cents = value;
+///     }
+/// }
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let dir = std::env::temp_dir().join(format!("generic_production_store_doctest_{}", std::process::id()));
+/// std::fs::create_dir_all(&dir)?;
+/// let path = dir.join("widgets.mmap");
+///
+/// let a = Uuid::from_u128(1);
+/// let b = Uuid::from_u128(2);
+/// let widgets = vec![
+///     Widget { id: a, category: 10, price_cents: 500 },
+///     Widget { id: b, category: 10, price_cents: 900 },
+/// ];
+///
+/// // GenericMmapStore is the durable core; GenericProductionStore adds the
+/// // RwLock that makes it safe to share across threads via Arc.
+/// let core = GenericMmapStore::<Widget, Category, Price>::create(widgets, &path)?;
+/// let store = GenericProductionStore::new(core);
+///
+/// assert_eq!(store.get::<Widget>(a).unwrap().price_cents, 500);
+/// assert_eq!(store.filter_eq::<Widget, Category>(&10).len(), 2);
+///
+/// store.update::<Widget, Price>(a, 750)?;
+/// assert_eq!(store.get::<Widget>(a).unwrap().price_cents, 750);
+///
+/// # std::fs::remove_dir_all(&dir).ok();
+/// # Ok(())
+/// # }
+/// ```
 pub struct GenericProductionStore<S> {
     inner: RwLock<S>,
 }

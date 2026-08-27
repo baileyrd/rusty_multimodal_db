@@ -90,6 +90,33 @@ use uuid::Uuid;
 /// architecture, durable via mmap, safe for concurrent access via one
 /// global `RwLock`. See module docs for the composition and why it isn't
 /// three literally nested types.
+///
+/// # Examples
+///
+/// ```
+/// use rusty_multimodal_db::{DogRecord, DogStore, ProductionStore};
+/// use uuid::Uuid;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let dir = std::env::temp_dir().join(format!("production_store_doctest_{}", std::process::id()));
+/// std::fs::create_dir_all(&dir)?;
+/// let path = dir.join("dogs.mmap");
+///
+/// let rex = Uuid::from_u128(1);
+/// let records = vec![DogRecord::new(rex, "Corgi", 3)];
+///
+/// // No littermate edges needed for this example — see `ProductionStore::create`
+/// // for what the second argument is for.
+/// let mut store = ProductionStore::create(records, Vec::new(), &path)?;
+/// assert_eq!(store.get(rex).unwrap().age, 3);
+///
+/// store.update_age(rex, 4)?;
+/// assert_eq!(store.get(rex).unwrap().age, 4);
+///
+/// # std::fs::remove_dir_all(&dir).ok();
+/// # Ok(())
+/// # }
+/// ```
 pub struct ProductionStore {
     inner: RwLock<MmapAgeStore>,
 }
