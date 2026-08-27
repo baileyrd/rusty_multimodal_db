@@ -27,6 +27,7 @@
 use crate::generic::order_customer::{BelongsToCustomer, Customer, Order};
 use crate::generic::query::{Children, Parent};
 use crate::generic::traits::Record;
+use crate::generic::NotFound;
 use uuid::Uuid;
 
 /// Owns `orders` with no index of any kind — every lookup is a full,
@@ -49,11 +50,13 @@ impl NaiveOrderStore {
 /// record at all — `BaseStore`'s `HashMap` avoids that; `NaiveOrderStore`
 /// doesn't.
 impl Parent<Order, BelongsToCustomer> for NaiveOrderStore {
-    fn parent(&self, child_id: Uuid) -> Option<Uuid> {
-        self.orders
+    fn parent(&self, child_id: Uuid) -> Result<Option<Uuid>, NotFound<Uuid>> {
+        let order = self
+            .orders
             .iter()
             .find(|order| order.id() == child_id)
-            .map(|order| order.customer_id)
+            .ok_or(NotFound(child_id))?;
+        Ok(Some(order.customer_id))
     }
 }
 
@@ -108,14 +111,23 @@ mod tests {
     #[test]
     fn parent_finds_the_owning_customer() {
         let store = NaiveOrderStore::new(sample());
-        assert_eq!(store.parent(Uuid::from_u128(1)), Some(Uuid::from_u128(100)));
-        assert_eq!(store.parent(Uuid::from_u128(3)), Some(Uuid::from_u128(200)));
+        assert_eq!(
+            store.parent(Uuid::from_u128(1)),
+            Ok(Some(Uuid::from_u128(100)))
+        );
+        assert_eq!(
+            store.parent(Uuid::from_u128(3)),
+            Ok(Some(Uuid::from_u128(200)))
+        );
     }
 
     #[test]
-    fn parent_unknown_id_is_none() {
+    fn parent_unknown_id_is_not_found() {
         let store = NaiveOrderStore::new(sample());
-        assert_eq!(store.parent(Uuid::from_u128(99)), None);
+        assert_eq!(
+            store.parent(Uuid::from_u128(99)),
+            Err(NotFound(Uuid::from_u128(99)))
+        );
     }
 
     #[test]

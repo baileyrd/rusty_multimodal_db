@@ -117,10 +117,14 @@ impl<S> GenericProductionStore<S> {
         self.inner.write().expect(LOCK_POISONED).update(id, value)
     }
 
+    /// # Errors
+    ///
+    /// Returns [`NotFound`] if `child_id` has no record.
+    ///
     /// # Panics
     ///
     /// Panics if the lock is poisoned — see `LOCK_POISONED`.
-    pub fn parent<C, Marker>(&self, child_id: C::Id) -> Option<C::ParentId>
+    pub fn parent<C, Marker>(&self, child_id: C::Id) -> Result<Option<C::ParentId>, NotFound<C::Id>>
     where
         C: ChildOf<Marker>,
         S: Parent<C, Marker>,
@@ -224,7 +228,7 @@ mod tests {
 
         assert_eq!(
             store.parent::<Order, BelongsToCustomer>(uuid::Uuid::from_u128(1)),
-            Some(uuid::Uuid::from_u128(100))
+            Ok(Some(uuid::Uuid::from_u128(100)))
         );
         let mut children =
             store.children::<Customer, Order, BelongsToCustomer>(uuid::Uuid::from_u128(100));

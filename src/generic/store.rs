@@ -453,23 +453,22 @@ where
 /// store state at all — a blanket impl over anything that already
 /// provides `GetById<C>`, per the design doc §2.
 ///
-/// `self.get(child_id)?` short-circuits to `None` if `child_id` isn't a
-/// real record; `.parent_id()` (now itself `Option<C::ParentId>` — see
-/// `ChildOf`'s own doc comment) supplies the rest directly, no
-/// `.flatten()` needed. The one honest consequence: this can no longer
-/// tell "child not found" apart from "child found, has no parent" — both
-/// now read as `None` to a caller of `Parent::parent` alone. For a
-/// mandatory-parent domain (`Order`) this changes nothing (its own
-/// `parent_id` never returns `None`); for an optional-parent one
-/// (`Rule`) a caller that needs the distinction back checks `GetById`
-/// directly — see `chain_to_root`'s own doc comment.
+/// `self.get(child_id)` supplies `GetById`'s own "not found" shape
+/// directly, turned into this trait's `Err(NotFound(child_id))` via
+/// `.ok_or(...)?`; `.parent_id()` (itself `Option<C::ParentId>` — see
+/// `ChildOf`'s own doc comment) becomes the `Ok(...)` payload unchanged.
+/// "Child not found" and "child found, has no parent" — which a bare
+/// single-level `Option` return once collapsed to the same `None` (a
+/// gap `Rule`'s `chain_to_root` had to work around directly) — are
+/// distinct outcomes again: `Err` vs. `Ok(None)`.
 impl<S, C, Marker> Parent<C, Marker> for S
 where
     C: ChildOf<Marker>,
     S: GetById<C>,
 {
-    fn parent(&self, child_id: C::Id) -> Option<C::ParentId> {
-        self.get(child_id)?.parent_id()
+    fn parent(&self, child_id: C::Id) -> Result<Option<C::ParentId>, NotFound<C::Id>> {
+        let child = self.get(child_id).ok_or(NotFound(child_id))?;
+        Ok(child.parent_id())
     }
 }
 

@@ -97,12 +97,13 @@ pub trait SymmetricRelation<Marker>: Record {}
 /// exact equality; `Option<Uuid>` can never equal `Uuid`, which is
 /// exactly the conflict this fixes — see `store.rs`'s `Reversed`/`Parent`
 /// blanket impl for the consequence: `Reversed`'s index-building now
-/// skips entries with no parent, and `Parent`'s single-level
-/// `Option<C::ParentId>` return can no longer distinguish "child not
-/// found" from "child found, no parent" — both collapse to `None`, an
-/// honest cost of this being a genuinely optional relationship. See
-/// `crate::generic_spike::rule_trace`'s `chain_to_root` for how a caller
-/// that needs that distinction back gets it (an extra `GetById` check).
+/// skips entries with no parent. `Parent::parent` itself briefly
+/// collapsed "child not found" and "child found, no parent" to the same
+/// `None`, an optional-relationship cost of this fix; a follow-up round
+/// restored the distinction in `Parent::parent`'s own signature — see
+/// `query.rs`'s doc comment on that trait for the fix, and
+/// `crate::generic_spike::rule_trace`'s `chain_to_root` for a caller that
+/// depends on it.
 pub trait ChildOf<Marker>: Record {
     type ParentId: Copy + Eq + Hash;
     fn parent_id(&self) -> Option<Self::ParentId>;

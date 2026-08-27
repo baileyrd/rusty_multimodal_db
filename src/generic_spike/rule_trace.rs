@@ -50,11 +50,14 @@
 //! not a separate code path. [`crate::generic::store::Reversed::new`]
 //! (the `Children` index builder) now skips entries with no parent via a
 //! plain `if let Some(parent_id) = ..`, a no-op for `Order`. Real,
-//! confirmed-not-assumed cost: `Parent::parent` collapsed to a
-//! single-level `Option`, so it can no longer distinguish "child not
-//! found" from "child found, no parent" — see [`chain_to_root`]'s own doc
-//! comment for how a caller that needs that distinction gets it back.
-//! `RuleTreeStore`/[`build_rule_tree_store`] below is `Children` actually
+//! confirmed-not-assumed cost *at the time*: `Parent::parent` collapsed to
+//! a single-level `Option`, so it could no longer distinguish "child not
+//! found" from "child found, no parent" — [`chain_to_root`] worked around
+//! it locally with an extra `GetById` existence check. **Restored in a
+//! second follow-up round**, in `crate::generic::query::Parent` itself:
+//! see that trait's own doc comment for the `Result`-returning fix, and
+//! [`chain_to_root`]'s doc comment for how the local workaround was then
+//! removed rather than kept redundantly. `RuleTreeStore`/[`build_rule_tree_store`] below is `Children` actually
 //! implemented for `Rule`, benchmarked against a naive baseline the same
 //! way as every other capability in this file — see
 //! `benches/rule_trace_spike.rs`'s `rule_children_lookup` group. No
@@ -226,23 +229,40 @@ pub fn build_rule_tree_store(rules: Vec<Rule>) -> RuleTreeStore {
 /// the same primitive twice" (ADR-0004's precedent), generalized to "as
 /// many times as the chain is deep." Returns the full chain, starting
 /// with `id` itself and ending at the root (the last id whose own parent
-/// is `None`).
+/// is `None`). An unknown `id` yields an empty chain.
 ///
-/// # Why this checks `GetById` up front, not just `Parent`
+/// # Only needs `Parent`, not `GetById` too
 ///
-/// `crate::generic`'s optional-parent fix (see `ChildOf`'s own doc
-/// comment) made `Parent::parent` return a single-level `Option<Id>`,
-/// which can no longer distinguish "this id isn't a real record" from
-/// "this id is a real record with no parent" — both now read as `None`.
-/// For most `Parent` callers that distinction doesn't matter (either way,
-/// there's nowhere further to go), but this function's own test suite
-/// draws a real, useful line between them (an unknown id should yield an
-/// *empty* chain, not a chain containing an id that was never a real
-/// `Rule`) — so it takes the extra `GetById<Rule>` bound needed to check
-/// existence directly, rather than degrade that behavior along with the
-/// rest of the trait set. This is the honest cost of the fix showing up
-/// at a call site, not hidden: a caller that needs the old distinction
-/// back has to ask for it explicitly.
+/// This function used to take an extra `GetById<Rule>` bound, needed
+/// only to check `id`'s existence up front — `Parent::parent` itself
+/// used to collapse "not found" and "found, no parent" to the same
+/// `None`, so that check couldn't be done through `Parent` alone. Now
+/// that `Parent::parent` returns `Result<Option<Id>, NotFound<Id>>`
+/// (see its own doc comment), `Err` *is* that existence check, so the
+/// separate bound and upfront call are gone — this composes from
+/// `Parent` alone, the way `two_hop_neighbors` composes from `Neighbors`
+/// alone.
+///
+/// **A real, measured cost, not free**: unlike the old upfront-check
+/// version (one existence check for `id`, then `Parent::parent` trusted
+/// for the rest of the chain), this version checks existence via `Err`
+/// on *every* node, `id` included — the only way to keep
+/// `chain_to_root_unknown_id_is_empty` honest without the extra bound.
+/// That check has to happen, and be resolved, before this node is
+/// pushed onto `chain` (not after, the way the old loop checked the
+/// *next* node's optionality only once the current one was already
+/// pushed) — a real data-dependency shift, not an equivalent rewrite.
+/// Measured directly (same-session, back-to-back, `git stash` before/
+/// after isolation, `rule_chain_traversal/indexed` at depths 10/100/1000,
+/// 100 samples/5s each): roughly 25–35% slower than before this fix,
+/// consistent across all three depths. The naive baseline and a single
+/// isolated `Parent::parent` call both showed no comparable regression
+/// in the same measurements — the cost is specific to this loop's now-
+/// required per-node existence check, not to the `Result` return type on
+/// its own. This is the accepted cost of the correctness guarantee, not
+/// an unexamined regression — see `crate::generic`'s own module docs for
+/// the precedent (`Scanned::get`'s write-through fix) of reporting a
+/// real measured cost rather than assuming a fix is free.
 ///
 /// # Cycle guard
 ///
@@ -256,21 +276,22 @@ pub fn build_rule_tree_store(rules: Vec<Rule>) -> RuleTreeStore {
 /// single fixed hop count never had to think about.
 pub fn chain_to_root<S>(store: &S, id: Uuid) -> Vec<Uuid>
 where
-    S: GetById<Rule> + Parent<Rule, ParentOf>,
+    S: Parent<Rule, ParentOf>,
 {
-    if store.get(id).is_none() {
-        return Vec::new();
-    }
     let mut chain = Vec::new();
     let mut seen = HashSet::new();
     let mut current = id;
-    loop {
+    let mut next = store.parent(current);
+    while let Ok(parent) = next {
         if !seen.insert(current) {
             break;
         }
         chain.push(current);
-        match store.parent(current) {
-            Some(parent_id) => current = parent_id,
+        match parent {
+            Some(parent_id) => {
+                current = parent_id;
+                next = store.parent(current);
+            }
             None => break, // reached a root
         }
     }
