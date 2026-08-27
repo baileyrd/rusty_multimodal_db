@@ -123,6 +123,9 @@ at the right file:
 - **`docs/specifications/SPEC-REGISTRY.md`** + **`docs/specifications/storage/`**
   — the `STORAGE-0xx` requirement/spec tree each round implemented against.
 - **`docs/roadmap/ROADMAP.md`** — status vocabulary and what's next.
+- **`docs/FUTURE-GROWTH.md`** — unplanned, unscheduled directions this
+  project could grow in (a server/query layer, SQLite/DuckDB-style
+  parity) and what each would actually require.
 - **`docs/traceability/TRACEABILITY.md`** — the requirement → decision →
   implementation → verification mapping tying the above together.
 - **`docs/PROJECT-STATUS.md`** — the current checkpoint (last verified
