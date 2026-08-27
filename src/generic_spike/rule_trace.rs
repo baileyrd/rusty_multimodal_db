@@ -9,6 +9,19 @@
 //! `crate::generic`, `GENERIC-SCHEMA-DESIGN.md`, or ADR-0009, and none of
 //! them are touched by this round.
 //!
+//! # Sixth round: the remaining three entities
+//!
+//! `Source` ([`super::source`]) and `RuleDerivation`
+//! ([`super::rule_derivation`]) get their own files, self-contained the
+//! same way `rule_trace`/`source`/`rule_derivation` are self-contained
+//! from each other. `SelectionGroup` stays *here*, alongside `Rule`,
+//! since its membership relation is (per this round's own task) modeled
+//! as `Rule` being a `ChildOf` a `SelectionGroup` — see the
+//! `SelectionGroup` section below for why that required adding one field
+//! directly to `Rule` despite this round's own "don't touch existing
+//! `Rule` code" constraint, a real tension the task's wording didn't
+//! leave another way to resolve.
+//!
 //! `Order`/`Customer` validated fields and a single directed one-to-many
 //! relation. This domain stresses two things neither `Dog` nor
 //! `Order`/`Customer` ever exercised:
@@ -130,6 +143,15 @@ pub struct Rule {
     /// `None` for a root rule — see this module's docs on why this is
     /// `Option<Uuid>`, not a bare `Uuid`, and what that costs.
     pub parent_rule_id: Option<Uuid>,
+    /// `None` for a `Rule` that doesn't belong to any [`SelectionGroup`]
+    /// — most rules. Added by this round's own `SelectionGroup` piece;
+    /// see `ChildOf<MemberOf> for Rule` and this module's docs on why
+    /// this field had to land directly on `Rule` (rather than an
+    /// externally-supplied edge list, `RuleRelation`/`RuleDerivation`'s
+    /// own shape) despite this round's instruction not to touch existing
+    /// `Rule` code — the tension is real, not glossed over; see the
+    /// `SelectionGroup` section of this module's docs.
+    pub selection_group_id: Option<Uuid>,
 }
 
 impl Record for Rule {
@@ -202,7 +224,7 @@ impl Children<Rule, Rule, ParentOf> for NaiveRuleStore {
     fn children(&self, parent_id: Uuid) -> Vec<Uuid> {
         self.rules
             .iter()
-            .filter(|r| r.parent_id() == Some(parent_id))
+            .filter(|r| ChildOf::<ParentOf>::parent_id(*r) == Some(parent_id))
             .map(|r| r.id)
             .collect()
     }
@@ -222,6 +244,89 @@ pub type RuleTreeStore = Reversed<IndexedRuleStore, Rule, Rule, ParentOf>;
 pub fn build_rule_tree_store(rules: Vec<Rule>) -> RuleTreeStore {
     let base = IndexedRuleStore::new(rules.clone());
     Reversed::<_, Rule, Rule, ParentOf>::new(base, &rules)
+}
+
+/// A cardinality constraint over a [`SelectionGroup`]'s member `Rule`s —
+/// per this round's own task, only `ExactlyOne`/`AtLeastN` are named,
+/// implemented in full even though a real corpus run through this schema
+/// only ever needed `ExactlyOne` in practice (see this module's own
+/// `SelectionGroup` docs).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectionCardinality {
+    SelectExactlyOne,
+    SelectAtLeastN(u32),
+}
+
+/// A cardinality constraint over a set of optional `Rule`s — e.g. "pick
+/// exactly one of these three encryption-at-rest options." Member `Rule`s
+/// are modeled as *children* of a `SelectionGroup` (see [`MemberOf`]),
+/// the same `ChildOf`/`Children` shape `Order`s belonging to a `Customer`
+/// already established — deliberately not a new relation shape, per this
+/// round's own task.
+///
+/// # Why `Rule` itself had to gain a field, unlike `Source`/`RuleDerivation`
+///
+/// `ChildOf`'s whole premise (see its own doc comment) is a foreign key
+/// living *on the child record* — `Order::customer_id`, `Rule::parent_rule_id`.
+/// There is no way to implement `ChildOf<MemberOf> for Rule` honestly
+/// without `Rule` itself carrying a `selection_group_id` field somewhere
+/// to read from; unlike `RuleRelation`/`RuleDerivation` (externally-supplied
+/// edge lists, chosen *because* there's no natural foreign key to add to
+/// `Rule` for a many-to-many relation), group membership is genuinely a
+/// foreign-key-shaped, at-most-one-group-per-rule relationship — exactly
+/// what `ChildOf` models. This round's task is explicit on both counts —
+/// "reuse `ChildOf`/`Children`... not a new relation shape" *and* "don't
+/// touch existing `Rule` code" — and those two instructions are in real
+/// tension here, not reconcilable without touching something. Resolved by
+/// adding one new, `None`-defaulting, purely-additive field
+/// (`Rule::selection_group_id`) rather than inventing a parallel
+/// externally-supplied-membership shape the task's own wording
+/// preemptively rejected ("not a new relation shape") — every existing
+/// `Rule` literal needed one mechanical, behavior-preserving update
+/// (`selection_group_id: None`) to keep compiling; no existing test's
+/// assertions changed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SelectionGroup {
+    pub id: Uuid,
+    pub cardinality: SelectionCardinality,
+}
+
+impl Record for SelectionGroup {
+    type Id = Uuid;
+    fn id(&self) -> Uuid {
+        self.id
+    }
+}
+
+pub struct MemberOf;
+impl ChildOf<MemberOf> for Rule {
+    type ParentId = Uuid;
+    fn parent_id(&self) -> Option<Uuid> {
+        self.selection_group_id
+    }
+}
+
+impl Children<SelectionGroup, Rule, MemberOf> for NaiveRuleStore {
+    fn children(&self, parent_id: Uuid) -> Vec<Uuid> {
+        self.rules
+            .iter()
+            .filter(|r| ChildOf::<MemberOf>::parent_id(*r) == Some(parent_id))
+            .map(|r| r.id)
+            .collect()
+    }
+}
+
+/// The indexed stack for "list every `Rule` in a `SelectionGroup`" —
+/// [`crate::generic::store::Reversed`] again, same shape as
+/// [`RuleTreeStore`] just keyed by `MemberOf` instead of `ParentOf`, and
+/// (unlike `RuleTreeStore`) not self-referential: `P = SelectionGroup`,
+/// `C = Rule`, two distinct record types, the same shape `Order`s
+/// belonging to a `Customer` already established.
+pub type SelectionGroupStore = Reversed<IndexedRuleStore, SelectionGroup, Rule, MemberOf>;
+
+pub fn build_selection_group_store(rules: Vec<Rule>) -> SelectionGroupStore {
+    let base = IndexedRuleStore::new(rules.clone());
+    Reversed::<_, SelectionGroup, Rule, MemberOf>::new(base, &rules)
 }
 
 /// Composes repeated [`Parent`] calls into full-depth traversal — the
@@ -488,6 +593,7 @@ mod tests {
                 } else {
                     Some(Uuid::from_u128((i - 1) as u128))
                 },
+                selection_group_id: None,
             })
             .collect()
     }
@@ -532,12 +638,14 @@ mod tests {
                 shall_statement: "a".into(),
                 binding_strength: BindingStrength::Shall,
                 parent_rule_id: Some(Uuid::from_u128(1)),
+                selection_group_id: None,
             },
             Rule {
                 id: Uuid::from_u128(1),
                 shall_statement: "b".into(),
                 binding_strength: BindingStrength::Shall,
                 parent_rule_id: Some(Uuid::from_u128(0)),
+                selection_group_id: None,
             },
         ];
         let store = IndexedRuleStore::new(cyclic);
@@ -555,30 +663,35 @@ mod tests {
                 shall_statement: "root".into(),
                 binding_strength: BindingStrength::Shall,
                 parent_rule_id: None,
+                selection_group_id: None,
             },
             Rule {
                 id: Uuid::from_u128(1),
                 shall_statement: "child 1".into(),
                 binding_strength: BindingStrength::Shall,
                 parent_rule_id: Some(Uuid::from_u128(0)),
+                selection_group_id: None,
             },
             Rule {
                 id: Uuid::from_u128(2),
                 shall_statement: "child 2".into(),
                 binding_strength: BindingStrength::Shall,
                 parent_rule_id: Some(Uuid::from_u128(0)),
+                selection_group_id: None,
             },
             Rule {
                 id: Uuid::from_u128(3),
                 shall_statement: "child 3".into(),
                 binding_strength: BindingStrength::Shall,
                 parent_rule_id: Some(Uuid::from_u128(0)),
+                selection_group_id: None,
             },
             Rule {
                 id: Uuid::from_u128(4),
                 shall_statement: "grandchild".into(),
                 binding_strength: BindingStrength::Shall,
                 parent_rule_id: Some(Uuid::from_u128(1)),
+                selection_group_id: None,
             },
         ]
     }
@@ -627,6 +740,118 @@ mod tests {
         );
     }
 
+    /// A group with exactly one member — the `select_exactly_one` shape a
+    /// real corpus run through this schema actually needed in practice
+    /// (see this round's own task), prioritized here accordingly: one
+    /// rule with `selection_group_id: Some(group)`, verified as the
+    /// group's sole member via both stores.
+    fn single_member_selection_group() -> (Vec<Rule>, Uuid) {
+        let group_id = Uuid::from_u128(500);
+        let rules = vec![
+            Rule {
+                id: Uuid::from_u128(0),
+                shall_statement: "encrypt at rest with AES-256".into(),
+                binding_strength: BindingStrength::Shall,
+                parent_rule_id: None,
+                selection_group_id: Some(group_id),
+            },
+            Rule {
+                id: Uuid::from_u128(1),
+                shall_statement: "unrelated rule, no group".into(),
+                binding_strength: BindingStrength::Shall,
+                parent_rule_id: None,
+                selection_group_id: None,
+            },
+        ];
+        (rules, group_id)
+    }
+
+    #[test]
+    fn select_exactly_one_group_has_its_single_member_indexed_and_naive_agree() {
+        let (rules, group_id) = single_member_selection_group();
+        let indexed = build_selection_group_store(rules.clone());
+        let naive = NaiveRuleStore::new(rules);
+
+        assert_eq!(
+            Children::<SelectionGroup, Rule, MemberOf>::children(&indexed, group_id),
+            vec![Uuid::from_u128(0)]
+        );
+        assert_eq!(
+            Children::<SelectionGroup, Rule, MemberOf>::children(&naive, group_id),
+            vec![Uuid::from_u128(0)]
+        );
+    }
+
+    fn multi_member_selection_group() -> (Vec<Rule>, Uuid) {
+        let group_id = Uuid::from_u128(600);
+        let rules = (0..3)
+            .map(|i| Rule {
+                id: Uuid::from_u128(i),
+                shall_statement: format!("option {i}"),
+                binding_strength: BindingStrength::Shall,
+                parent_rule_id: None,
+                selection_group_id: Some(group_id),
+            })
+            .collect();
+        (rules, group_id)
+    }
+
+    #[test]
+    fn select_at_least_n_group_has_every_member_indexed_and_naive_agree() {
+        let (rules, group_id) = multi_member_selection_group();
+        let indexed = build_selection_group_store(rules.clone());
+        let naive = NaiveRuleStore::new(rules);
+
+        let mut expected: Vec<Uuid> = (0..3).map(Uuid::from_u128).collect();
+        expected.sort();
+
+        let mut indexed_members =
+            Children::<SelectionGroup, Rule, MemberOf>::children(&indexed, group_id);
+        indexed_members.sort();
+        assert_eq!(indexed_members, expected);
+
+        let mut naive_members =
+            Children::<SelectionGroup, Rule, MemberOf>::children(&naive, group_id);
+        naive_members.sort();
+        assert_eq!(naive_members, expected);
+    }
+
+    #[test]
+    fn selection_group_with_no_members_is_empty() {
+        let (rules, _) = single_member_selection_group();
+        let indexed = build_selection_group_store(rules);
+        assert!(Children::<SelectionGroup, Rule, MemberOf>::children(
+            &indexed,
+            Uuid::from_u128(999)
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn a_rule_with_no_group_never_shows_up_as_anyones_member() {
+        // `single_member_selection_group`'s second rule has
+        // `selection_group_id: None` — confirms a plain, ungrouped `Rule`
+        // (the common case) isn't accidentally swept into any group's
+        // membership by a bug in the `ChildOf<MemberOf>` impl.
+        let (rules, group_id) = single_member_selection_group();
+        let indexed = build_selection_group_store(rules);
+        let members = Children::<SelectionGroup, Rule, MemberOf>::children(&indexed, group_id);
+        assert!(!members.contains(&Uuid::from_u128(1)));
+    }
+
+    #[test]
+    fn selection_cardinality_variants_are_distinct() {
+        // `SelectExactlyOne` must never compare equal to
+        // `SelectAtLeastN(1)` — a real, easy-to-introduce bug if the two
+        // were ever collapsed (e.g. representing `ExactlyOne` as
+        // `AtLeastN(1)` internally), since a `select_exactly_one` group
+        // with *two* members should read as violated, not satisfied.
+        assert_ne!(
+            SelectionCardinality::SelectExactlyOne,
+            SelectionCardinality::SelectAtLeastN(1)
+        );
+    }
+
     fn sample_relation_rules() -> Vec<Rule> {
         (1..=3)
             .map(|i| Rule {
@@ -634,6 +859,7 @@ mod tests {
                 shall_statement: format!("rule {i}"),
                 binding_strength: BindingStrength::Shall,
                 parent_rule_id: None,
+                selection_group_id: None,
             })
             .collect()
     }

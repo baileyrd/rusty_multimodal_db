@@ -39,6 +39,7 @@ pub fn build_rule_chain(depth: usize) -> Vec<Rule> {
             } else {
                 Some(Uuid::from_u128((i - 1) as u128))
             },
+            selection_group_id: None,
         })
         .collect()
 }
@@ -55,14 +56,57 @@ pub fn build_rule_children(n: usize) -> (Vec<Rule>, Uuid) {
         shall_statement: "the system shall satisfy the root rule".into(),
         binding_strength: BindingStrength::Shall,
         parent_rule_id: None,
+        selection_group_id: None,
     }];
     rules.extend((1..=n).map(|i| Rule {
         id: Uuid::from_u128(i as u128),
         shall_statement: format!("the system shall satisfy rule {i}"),
         binding_strength: BindingStrength::Shall,
         parent_rule_id: Some(root_id),
+        selection_group_id: None,
     }));
     (rules, root_id)
+}
+
+/// Build `n` rules that all belong to the same [`super::rule_trace::SelectionGroup`]
+/// (id `0`) and have no parent-chain structure of their own — the
+/// `SelectionGroup` analogue of [`build_rule_children`], sweeping
+/// membership-set size instead of parent-tree fan-out. Returns `(rules,
+/// group_id)`.
+pub fn build_selection_group(n: usize) -> (Vec<Rule>, Uuid) {
+    let group_id = Uuid::from_u128(0);
+    let rules = (0..n)
+        .map(|i| Rule {
+            id: Uuid::from_u128(i as u128),
+            shall_statement: format!("the system shall satisfy option {i}"),
+            binding_strength: BindingStrength::Shall,
+            parent_rule_id: None,
+            selection_group_id: Some(group_id),
+        })
+        .collect();
+    (rules, group_id)
+}
+
+/// Build a linear derivation chain of `depth` rules: rule `0` is the
+/// principle root (no outgoing derivation edge of its own), rule `i`
+/// (`i > 0`) derives from rule `i - 1` — the [`super::rule_derivation`]
+/// analogue of [`build_rule_chain`], same purpose-built straight-line
+/// shape for isolating "does traversal cost scale with depth" from any
+/// branching factor. Returns `(rules, derivation_edges)`.
+pub fn build_derivation_chain(depth: usize) -> (Vec<Rule>, Vec<(Uuid, Uuid)>) {
+    let rules: Vec<Rule> = (0..depth)
+        .map(|i| Rule {
+            id: Uuid::from_u128(i as u128),
+            shall_statement: format!("the system shall satisfy rule {i}"),
+            binding_strength: BindingStrength::Shall,
+            parent_rule_id: None,
+            selection_group_id: None,
+        })
+        .collect();
+    let edges = (1..depth)
+        .map(|i| (Uuid::from_u128(i as u128), Uuid::from_u128((i - 1) as u128)))
+        .collect();
+    (rules, edges)
 }
 
 /// A generated `RuleRelation` dataset: `n` rules (no parent-chain
@@ -85,6 +129,7 @@ pub fn build_rule_relation_dataset(n: usize) -> RuleRelationDataset {
             shall_statement: format!("the system shall satisfy rule {i}"),
             binding_strength: BindingStrength::Shall,
             parent_rule_id: None,
+            selection_group_id: None,
         })
         .collect();
     let ids: Vec<Uuid> = rules.iter().map(|r| r.id).collect();
@@ -171,6 +216,26 @@ mod tests {
         assert_eq!(rules[0].parent_rule_id, None);
         for rule in &rules[1..] {
             assert_eq!(rule.parent_rule_id, Some(root_id));
+        }
+    }
+
+    #[test]
+    fn build_selection_group_produces_n_rules_all_in_the_same_group() {
+        let (rules, group_id) = build_selection_group(10);
+        assert_eq!(rules.len(), 10);
+        for rule in &rules {
+            assert_eq!(rule.selection_group_id, Some(group_id));
+        }
+    }
+
+    #[test]
+    fn build_derivation_chain_produces_a_linear_chain_of_the_requested_depth() {
+        let (rules, edges) = build_derivation_chain(10);
+        assert_eq!(rules.len(), 10);
+        assert_eq!(edges.len(), 9);
+        for (i, &(from, to)) in edges.iter().enumerate() {
+            assert_eq!(from, Uuid::from_u128((i + 1) as u128));
+            assert_eq!(to, Uuid::from_u128(i as u128));
         }
     }
 
