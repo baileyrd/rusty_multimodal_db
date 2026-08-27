@@ -108,6 +108,17 @@ required-features = ["research"]
 name = "crash_safety_harness"
 required-features = ["research"]
 
+# `multiprocess_writer`/`multiprocess_harness` (the multi-process access
+# diagnosis harness) — same reason as `crash_writer`/`crash_safety_harness`
+# above.
+[[bin]]
+name = "multiprocess_writer"
+required-features = ["research"]
+
+[[bin]]
+name = "multiprocess_harness"
+required-features = ["research"]
+
 [dependencies]
 # UUID type + deterministic construction from seeded random bytes (Builder::from_random_bytes
 # needs no extra feature — Uuid::new_v4()'s OS-randomness feature is deliberately not enabled,
