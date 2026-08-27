@@ -40,12 +40,15 @@
 //!    it, or do both always succeed?
 //! 2. **What breaks under concurrent writers** — `trial_create_race`
 //!    (the header/initial-slot region), `trial_open_new_record_race`
-//!    (the "next free slot" race the task calls out by name: both
+//!    (the "next free slot" race the diagnosis round named: both
 //!    processes independently compute the same `existing_slot_count` and
-//!    both believe *they* are appending at that position), and
-//!    `trial_update_race` (whether the commit-marker invariant, proven
-//!    only against a single writer crashing, holds against two writers
-//!    genuinely racing on the same slot).
+//!    both believe *they* are appending at that position — originally
+//!    reproduced 24/24 trials; this harness now doubles as the
+//!    regression check for the `O_APPEND`-based fix, see
+//!    `src/generic/mmap_store.rs`'s own "next free slot" doc section),
+//!    and `trial_update_race` (whether the commit-marker invariant,
+//!    proven only against a single writer crashing, holds against two
+//!    writers genuinely racing on the same slot).
 //! 3. **Reader consistency** — `trial_read_during_write`: one process
 //!    alternates a shared record between two known patterns while
 //!    another concurrently reads it, checking for any observed value
@@ -341,22 +344,25 @@ fn trial_open_new_record_race(binary: &Path) -> Vec<OpenRaceResult> {
             let a_reported = lines_a.into_iter().find(|l| l.starts_with("OPEN_"));
             let b_reported = lines_b.into_iter().find(|l| l.starts_with("OPEN_"));
 
-            // Raw-byte proof of the "next free slot" collision itself:
-            // both processes saw `existing_slot_count == 2` (neither had
-            // appended yet), so both independently chose position 2 for
-            // their own new record. Whichever process's write landed
-            // last physically owns that slot now — the other's id is
-            // nowhere in the file at all, overwritten mid-air.
+            // Raw-byte proof the collision is gone: post-fix, both
+            // processes' appends land at *distinct* positions (2 and 3,
+            // in whichever order the kernel actually placed them) — not
+            // the same position 2 the pre-fix design collided on. Check
+            // both slots and confirm each racing id is present exactly
+            // once, at some position, rather than one clobbering the
+            // other.
             let slot_2_id = read_slot_id(&path, 2);
-            let collision_winner = if slot_2_id == Uuid::from_u128(new_id_a) {
-                "A"
-            } else if slot_2_id == Uuid::from_u128(new_id_b) {
-                "B"
+            let slot_3_id = read_slot_id(&path, 3);
+            let occupants = [slot_2_id, slot_3_id];
+            let both_present = occupants.contains(&Uuid::from_u128(new_id_a))
+                && occupants.contains(&Uuid::from_u128(new_id_b));
+            let verdict = if both_present {
+                "PASS (both ids present at distinct slots — no collision)"
             } else {
-                "NEITHER (unexpected)"
+                "FAIL (collision — one id missing from slots 2/3)"
             };
             println!(
-                "  [open-new-record-race] trial {trial}: raw slot 2 id belongs to: {collision_winner}"
+                "  [open-new-record-race] trial {trial}: slot 2 = {slot_2_id}, slot 3 = {slot_3_id} — {verdict}"
             );
 
             // Authoritative check: a fresh, third-party reopen supplying
@@ -560,9 +566,15 @@ fn main() {
         "=== Trial 2: two processes racing open() each appending a different new record (the \"next free slot\" race) ==="
     );
     for (trial, result) in trial_open_new_record_race(&binary).into_iter().enumerate() {
+        let verdict =
+            if result.a_final_value == Some(111_111) && result.b_final_value == Some(222_222) {
+                "PASS (both records intact after the race)"
+            } else {
+                "FAIL (a value is missing or wrong — collision)"
+            };
         println!(
             "  trial {trial}: A reported={:?} A final value={:?} (expect Some(111111)) | \
-             B reported={:?} B final value={:?} (expect Some(222222))",
+             B reported={:?} B final value={:?} (expect Some(222222)) — {verdict}",
             result.a_reported, result.a_final_value, result.b_reported, result.b_final_value
         );
     }
