@@ -12,14 +12,20 @@
 
 use std::hash::Hash;
 
-/// Every domain record has an id.
+/// Every domain record has an id. The one trait every other trait in this
+/// file requires — see [`super::production::GenericProductionStore`]'s
+/// own doc comment for a complete, minimal, runnable example implementing
+/// this alongside [`IndexedField`]/[`ScannableField`] for a custom record
+/// type.
 pub trait Record {
     type Id: Copy + Eq + Hash;
     fn id(&self) -> Self::Id;
 }
 
 /// `R` has an equality-indexable field, identified by the zero-sized marker
-/// type `Marker` (one marker per field).
+/// type `Marker` (one marker per field). See
+/// [`super::production::GenericProductionStore`]'s doc comment for a
+/// complete example implementing this.
 ///
 /// The associated type is named `IndexValue`, not `Value` — this is
 /// "Candidate 1" (per-trait renaming) from the associated-type-ambiguity
@@ -37,7 +43,9 @@ pub trait IndexedField<Marker>: Record {
     fn indexed_value(&self) -> &Self::IndexValue;
 }
 
-/// `R` has a scannable/aggregatable field. `IndexValue: Copy` is
+/// `R` has a scannable/aggregatable field. See
+/// [`super::production::GenericProductionStore`]'s doc comment for a
+/// complete example implementing this. `IndexValue: Copy` is
 /// deliberately a *tighter* bound than `IndexedField`'s — see the design
 /// doc's §4.1 for why: it's what lets the packed-`Vec` cache trick
 /// (`Scanned`, `store.rs`) exist at all, in memory or backed by mmap
@@ -79,11 +87,16 @@ pub trait ScannableField<Marker>: Record {
 }
 
 /// `R` participates in a symmetric (undirected) relation, identified by
-/// `Marker` — the generalization of `littermate_of`.
+/// `Marker` — the generalization of `littermate_of`. See
+/// `crate::generic_spike::dog_impl` (behind the `research` feature) for a
+/// real implementation.
 pub trait SymmetricRelation<Marker>: Record {}
 
 /// `R` is the *child* side of a directed, many-to-one relation, identified
-/// by `Marker` — the generalization of `Order belongs_to Customer`.
+/// by `Marker` — the generalization of `Order belongs_to Customer`. See
+/// `crate::generic::order_customer` (behind the `research` feature) for a
+/// real implementation, and [`super::query::Parent`]/[`super::query::Children`]
+/// for the query traits that read it.
 ///
 /// `parent_id` returns `Option<Self::ParentId>`, not a bare `Self::ParentId`
 /// — added by the `Rule`/`RuleRelation` round's own follow-up fix. A
