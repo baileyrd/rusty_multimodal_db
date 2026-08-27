@@ -164,7 +164,9 @@ impl<S> GenericProductionStore<S> {
     }
 }
 
-#[cfg(test)]
+// Uses `order_customer::{Order, ...}` as its concrete test fixture — see
+// `mmap_store.rs`'s identical gating and comment for why.
+#[cfg(all(test, feature = "research"))]
 mod tests {
     use super::super::order_customer::{
         create_order_production_stack, open_order_production_stack, Amount, BelongsToCustomer,

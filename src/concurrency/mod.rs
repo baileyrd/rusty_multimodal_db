@@ -49,14 +49,29 @@ use crate::store::StoreError;
 use thiserror::Error;
 use uuid::Uuid;
 
+// The four concurrency strategies below are the benchmark comparison this
+// crate's charter set out to run — not the recommended path (see
+// `lib.rs`'s own top-level doc comment). Gated behind the `research`
+// feature; the `ConcurrentStore` trait/`ConcurrencyError` type below stay
+// unconditional since `crate::production::ProductionStore` implements
+// this trait directly (with its own bare `RwLock`, not
+// `GlobalRwLockStore` — see that type's own module docs).
+#[cfg(feature = "research")]
 pub mod actor;
+#[cfg(feature = "research")]
 pub mod dashmap_store;
+#[cfg(feature = "research")]
 pub mod global_rwlock;
+#[cfg(feature = "research")]
 pub mod sharded;
 
+#[cfg(feature = "research")]
 pub use actor::ActorStore;
+#[cfg(feature = "research")]
 pub use dashmap_store::DashMapStore;
+#[cfg(feature = "research")]
 pub use global_rwlock::GlobalRwLockStore;
+#[cfg(feature = "research")]
 pub use sharded::ShardedStore;
 
 /// Every fallible outcome across every concurrency variant. `Store` covers

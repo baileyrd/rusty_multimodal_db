@@ -46,12 +46,25 @@
 //!   `unwrap`/`expect` outside `#[cfg(test)]`, same as every other module
 //!   in this crate.
 
-use crate::record::DogRecord;
 use crate::store::StoreError;
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::path::Path;
 use thiserror::Error;
+// The rest of this file past `DurabilityError` is the shared
+// architecture/WAL machinery the seven non-`mmap` durability variants use
+// — gated behind `research` along with them (see `lib.rs`'s own doc
+// comment); these imports serve only that gated portion, except
+// `DogRecord`/`Uuid`, also needed by `test_support` below (used by every
+// durability variant's own tests, including `mmap_store.rs`'s
+// unconditional, front-door one), so those two stay available whenever
+// `#[cfg(test)]` is, not just under `research`.
+#[cfg(any(test, feature = "research"))]
+use crate::record::DogRecord;
+#[cfg(feature = "research")]
+use serde::{Deserialize, Serialize};
+#[cfg(feature = "research")]
+use std::collections::HashMap;
+#[cfg(feature = "research")]
+use std::path::Path;
+#[cfg(any(test, feature = "research"))]
 use uuid::Uuid;
 
 /// Below this many records, spawning a thread to parallelize index
@@ -69,24 +82,47 @@ use uuid::Uuid;
 /// this threshold exists to prevent. One constant, shared by every
 /// parallelized construction site, so there's a single place to tune —
 /// not four separate magic numbers.
+// Shared by `mmap_store::MmapAgeStore` (unconditional, front-door) and
+// `CanonicalCachedState::new` below (research-gated) — stays unconditional
+// since the former needs it.
 pub(crate) const PARALLEL_CONSTRUCTION_THRESHOLD: usize = 1_500;
 
+// Seven of the eight durability variants below are the benchmark
+// comparison this crate's charter set out to run — not the recommended
+// path (see `lib.rs`'s own top-level doc comment). Gated behind the
+// `research` feature; `mmap_store`/`MmapAgeStore` and `DurabilityError`
+// stay unconditional since `crate::production::ProductionStore` uses them
+// directly.
+#[cfg(feature = "research")]
 pub mod embedded_store;
+#[cfg(feature = "research")]
 pub mod hybrid;
+#[cfg(feature = "research")]
 pub mod lsm_store;
 pub mod mmap_store;
+#[cfg(feature = "research")]
 pub mod snapshot_full;
+#[cfg(feature = "research")]
 pub mod snapshot_rebuild;
+#[cfg(feature = "research")]
 pub mod wal_buffered;
+#[cfg(feature = "research")]
 pub mod wal_fsync;
 
+#[cfg(feature = "research")]
 pub use embedded_store::RedbStore;
+#[cfg(feature = "research")]
 pub use hybrid::HybridStore;
+#[cfg(feature = "research")]
 pub use lsm_store::LsmStore;
 pub use mmap_store::MmapAgeStore;
+#[cfg(feature = "research")]
 pub use snapshot_full::SnapshotFullStore;
+#[cfg(feature = "research")]
 pub use snapshot_rebuild::SnapshotRebuildStore;
+#[cfg(feature = "research")]
 pub use wal_buffered::WalBufferedStore;
+#[cfg(feature = "research")]
 pub use wal_fsync::WalFsyncStore;
 
 /// Every fallible outcome across every durability variant. One type,
@@ -145,11 +181,17 @@ impl From<DurabilityError> for StoreError {
     }
 }
 
+// Everything from here to the end of this file is shared architecture
+// for the seven non-`mmap` durability variants (`WalEntry`,
+// `CanonicalCachedState`, and the WAL helpers) — gated behind `research`
+// along with them.
+
 /// Append one entry to `writer`, length-prefixed (a 4-byte little-endian
 /// length followed by that many bincode-serialized bytes) so a reader
 /// doesn't need to know each entry's size in advance and can detect a
 /// torn trailing write (see [`read_wal_entries`]) rather than
 /// misinterpreting one. Shared by every WAL-writing variant (1, 2, 5, 7).
+#[cfg(feature = "research")]
 pub(crate) fn append_wal_entry(
     writer: &mut impl std::io::Write,
     entry: &WalEntry,
@@ -170,6 +212,7 @@ pub(crate) fn append_wal_entry(
 /// process died) stops replay at that point rather than erroring: every
 /// entry before the tear is still valid and recoverable, which is the
 /// whole point of a WAL.
+#[cfg(feature = "research")]
 pub(crate) fn read_wal_entries(path: &std::path::Path) -> Result<Vec<WalEntry>, DurabilityError> {
     if !path.exists() {
         return Ok(Vec::new());
@@ -200,6 +243,7 @@ pub(crate) fn read_wal_entries(path: &std::path::Path) -> Result<Vec<WalEntry>, 
 /// used by every WAL-based variant to order replay and — for
 /// [`HybridStore`] specifically — to decide which entries are already
 /// covered by the latest snapshot.
+#[cfg(feature = "research")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WalEntry {
     pub seq: u64,
@@ -214,6 +258,7 @@ pub struct WalEntry {
 /// of duplicated. `Serialize`/`Deserialize` are what make
 /// [`SnapshotFullStore`] (variant 4, "save-as-is") possible — it persists
 /// this struct directly, no rebuild step.
+#[cfg(feature = "research")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CanonicalCachedState {
     records: HashMap<Uuid, DogRecord>,
@@ -223,6 +268,7 @@ pub struct CanonicalCachedState {
     position_index: HashMap<Uuid, usize>,
 }
 
+#[cfg(feature = "research")]
 impl CanonicalCachedState {
     /// Build from records and littermate edges — identical construction
     /// logic to `CanonicalCachedStore::new`/`CanonicalStore::new`.
@@ -398,6 +444,9 @@ impl CanonicalCachedState {
     }
 }
 
+// Used by every durability variant's own tests, including
+// `mmap_store.rs`'s (unconditional, front-door) — stays available
+// whenever `#[cfg(test)]` is, unlike most of the rest of this file.
 #[cfg(test)]
 pub(crate) mod test_support {
     use super::*;
@@ -415,7 +464,7 @@ pub(crate) mod test_support {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "research"))]
 mod tests {
     use super::test_support::*;
     use super::*;

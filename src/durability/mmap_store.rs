@@ -322,7 +322,7 @@ mod tests {
 
     #[test]
     fn create_then_read_and_write() {
-        let dir = crate::bench_support::fresh_temp_dir("mmap_basic").unwrap();
+        let dir = crate::test_support::fresh_temp_dir("mmap_basic").unwrap();
         let path = dir.join("ages.mmap");
         let mut store = MmapAgeStore::create(sample_records(), sample_edges(), &path).unwrap();
 
@@ -343,7 +343,7 @@ mod tests {
     /// store must see every flushed write.
     #[test]
     fn flush_then_reopen_sees_the_written_ages() {
-        let dir = crate::bench_support::fresh_temp_dir("mmap_roundtrip").unwrap();
+        let dir = crate::test_support::fresh_temp_dir("mmap_roundtrip").unwrap();
         let path = dir.join("ages.mmap");
 
         {
@@ -363,7 +363,7 @@ mod tests {
 
     #[test]
     fn same_breed_and_neighbors_work() {
-        let dir = crate::bench_support::fresh_temp_dir("mmap_indexes").unwrap();
+        let dir = crate::test_support::fresh_temp_dir("mmap_indexes").unwrap();
         let path = dir.join("ages.mmap");
         let store = MmapAgeStore::create(sample_records(), sample_edges(), &path).unwrap();
         assert_eq!(

@@ -12,47 +12,101 @@ publish = false
 name = "rusty_multimodal_db"
 path = "src/lib.rs"
 
+# Every bench target below exercises the "internal/research" bucket
+# (the benchmarked-alternative backends/variants/strategies, or the
+# `bench_support`/`generic_spike` infrastructure that builds their
+# datasets) — gated behind the `research` feature the same way that code
+# is (see `lib.rs`'s own top-level doc comment), via `required-features`,
+# the same mechanism `cache_events`/`scan_ages_crossover` already used for
+# `perf-events` below.
 [[bench]]
 name = "workloads"
 harness = false
+required-features = ["research"]
 
 [[bench]]
 name = "generic_spike"
 harness = false
+required-features = ["research"]
 
 [[bench]]
 name = "order_relation_spike"
 harness = false
+required-features = ["research"]
 
 [[bench]]
 name = "generic_production"
 harness = false
+required-features = ["research"]
 
 [[bench]]
 name = "rule_trace_spike"
 harness = false
+required-features = ["research"]
 
 [[bench]]
 name = "req_traceability_spike"
 harness = false
+required-features = ["research"]
 
 [[bench]]
 name = "cache_events"
 harness = false
-required-features = ["perf-events"]
+required-features = ["research", "perf-events"]
 
 [[bench]]
 name = "scan_ages_crossover"
 harness = false
-required-features = ["perf-events"]
+required-features = ["research", "perf-events"]
 
 [[bench]]
 name = "durability"
 harness = false
+required-features = ["research"]
 
 [[bench]]
 name = "concurrency"
 harness = false
+required-features = ["research"]
+
+# Every integration test below reaches into the same "internal/research"
+# bucket (a cross-backend comparison, a durability/concurrency variant, or
+# the `Order`/`Customer` reference domain) — same `required-features`
+# treatment as the benches above. Explicit `[[test]]` entries are needed
+# to attach `required-features` at all (an auto-discovered `tests/*.rs`
+# target can't carry per-target config).
+[[test]]
+name = "cross_backend"
+required-features = ["research"]
+
+[[test]]
+name = "production_integration"
+required-features = ["research"]
+
+[[test]]
+name = "generic_production_integration"
+required-features = ["research"]
+
+[[test]]
+name = "mmap_record_identity_keying"
+required-features = ["research"]
+
+# Same treatment, same reason.
+[[example]]
+name = "memory_footprint"
+required-features = ["research"]
+
+# `crash_writer`/`crash_safety_harness` (the crash-safety diagnosis
+# harness) build `Order`/`Customer` datasets via `generic::order_customer`
+# and use `bench_support::fresh_temp_dir` — both research-gated. Explicit
+# `[[bin]]` entries needed for the same reason as `[[test]]` above.
+[[bin]]
+name = "crash_writer"
+required-features = ["research"]
+
+[[bin]]
+name = "crash_safety_harness"
+required-features = ["research"]
 
 [dependencies]
 # UUID type + deterministic construction from seeded random bytes (Builder::from_random_bytes
@@ -112,6 +166,15 @@ criterion-perf-events = { version = "0.4", optional = true }
 perfcnt = { version = "0.8", optional = true }
 
 [features]
+# The "internal/research" bucket: the benchmarked-alternative storage
+# backends, durability variants, and concurrency strategies this crate's
+# recommendation (`ProductionStore`/`GenericProductionStore`) is built on
+# and compared against, plus the dataset-generation/benchmark-support
+# infrastructure and historical spike modules — off by default, so a
+# consumer depending on this crate doesn't compile any of it in. See
+# `lib.rs`'s own top-level doc comment for the full front-door/research
+# split.
+research = []
 perf-events = ["dep:criterion-perf-events", "dep:perfcnt"]
 
 [profile.bench]

@@ -90,6 +90,12 @@
 
 pub mod mmap_field;
 pub mod mmap_store;
+/// `Order`/`Customer` — this library's reference implementation, proving
+/// the design against a second, structurally different domain than `Dog`.
+/// Not part of the recommended path to build *your own* domain (see
+/// [`super`]'s top-level doc comment for what is); kept as evidence,
+/// gated behind the `research` feature.
+#[cfg(feature = "research")]
 pub mod order_customer;
 pub mod production;
 pub mod query;
@@ -97,6 +103,7 @@ pub mod store;
 pub mod traits;
 
 pub use mmap_store::GenericMmapStore;
+#[cfg(feature = "research")]
 pub use order_customer::{
     build_order_generic_store, create_order_production_stack, open_order_production_stack, Order,
     OrderGenericStore, OrderProductionStack,

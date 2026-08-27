@@ -289,29 +289,13 @@ impl MixedWorkloadDriver {
     }
 }
 
-/// A fresh, empty, uniquely-named directory under the OS temp dir — shared
-/// by the durability variants' unit tests (`src/durability/*.rs`) and
-/// `benches/durability.rs`, so both build persisted-file paths the same
-/// way rather than duplicating temp-directory setup. Uniqueness (PID +
-/// atomic counter, not just `label`) matters because Rust's test harness
-/// runs tests concurrently by default — two tests both naming themselves
-/// `"wal_fsync"` must not collide on the same on-disk files.
-///
-/// # Errors
-///
-/// Returns the underlying [`std::io::Error`] if the directory can't be
-/// created (e.g. no space, no permission on the OS temp dir).
-pub fn fresh_temp_dir(label: &str) -> std::io::Result<std::path::PathBuf> {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!(
-        "rusty_multimodal_db_{label}_{}_{n}",
-        std::process::id()
-    ));
-    std::fs::create_dir_all(&dir)?;
-    Ok(dir)
-}
+/// Re-exported from [`crate::test_support`], which — unlike this module —
+/// isn't gated behind the `research` feature: [`crate::production::ProductionStore`]'s
+/// own infallible constructors need it unconditionally. Kept reachable at
+/// this path too so the many existing call sites written against
+/// `bench_support::fresh_temp_dir` (this crate's own tests/benches, all
+/// already research-gated or research-only) don't need to change.
+pub use crate::test_support::fresh_temp_dir;
 
 #[cfg(test)]
 mod tests {

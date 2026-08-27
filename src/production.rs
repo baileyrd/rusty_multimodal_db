@@ -65,7 +65,7 @@
 //! (`CanonicalCachedStore::new` is plain in-memory construction), but
 //! `MmapAgeStore::create` needs a filesystem path and can fail (I/O,
 //! `mmap` syscall). `Self::new`/[`From`] here allocate a fresh, uniquely-
-//! named temp-file backing (via [`crate::bench_support::fresh_temp_dir`],
+//! named temp-file backing (via [`crate::test_support::fresh_temp_dir`],
 //! the same helper every durability variant's own tests already use) and
 //! `.expect()` on failure — an explicit, documented exception to "no
 //! unwrap/expect outside tests," on the same footing
@@ -77,11 +77,11 @@
 //! (a caller-supplied, persistent path) should use [`Self::create`]/
 //! [`Self::open`] directly, which return `Result` throughout.
 
-use crate::bench_support::fresh_temp_dir;
 use crate::concurrency::{ConcurrencyError, ConcurrentStore};
 use crate::durability::{DurabilityError, MmapAgeStore};
 use crate::record::DogRecord;
 use crate::store::{DogStore, StoreError};
+use crate::test_support::fresh_temp_dir;
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 use uuid::Uuid;
