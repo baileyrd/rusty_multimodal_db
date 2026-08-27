@@ -24,7 +24,17 @@
 //! other variable-length `ScanValue` was never in scope for this mmap
 //! path — a domain with one would use the in-memory `Scanned` layer
 //! instead, same as it already can).
+//!
+//! Also implemented for [`Uuid`] — added by the record-identity-keying
+//! fix (`mmap_store.rs`'s own module docs), which needs `R::Id` encodable
+//! the same fixed-width way `R::ScanValue` already is, so a persisted
+//! slot can carry *which* record a value belongs to instead of trusting
+//! array position. `Uuid` is scoped in for the identical reason `u32`/`i64`
+//! are: every domain `GenericMmapStore` is actually instantiated for
+//! (`Order`) uses `Uuid` as its `Record::Id`, not because `Id` is
+//! constrained to `Uuid` at the trait level.
 use std::mem::size_of;
+use uuid::Uuid;
 
 /// A `ScannableField::ScanValue` that can be read from and written to a
 /// fixed-width little-endian byte slice — what
@@ -75,6 +85,26 @@ impl MmapFieldValue for i64 {
     }
 }
 
+impl MmapFieldValue for Uuid {
+    const BYTE_WIDTH: usize = 16;
+
+    /// Not actually "little-endian" — a `Uuid`'s 16 bytes are an opaque
+    /// identifier, not a number this crate ever does arithmetic on, so
+    /// there's no meaningful byte order to convert. Copied verbatim; the
+    /// `_le` name stays only for a uniform call site across every
+    /// `MmapFieldValue` impl.
+    fn write_le(&self, buf: &mut [u8]) {
+        buf.copy_from_slice(self.as_bytes());
+    }
+
+    fn read_le(buf: &[u8]) -> Self {
+        Uuid::from_bytes(
+            buf.try_into()
+                .expect("caller always passes a Self::BYTE_WIDTH-sized slice"),
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -91,5 +121,13 @@ mod tests {
         let mut buf = [0u8; 8];
         (-12_345i64).write_le(&mut buf);
         assert_eq!(i64::read_le(&buf), -12_345);
+    }
+
+    #[test]
+    fn uuid_round_trips() {
+        let mut buf = [0u8; 16];
+        let id = Uuid::from_u128(0x1234_5678_9abc_def0_1234_5678_9abc_def0);
+        id.write_le(&mut buf);
+        assert_eq!(Uuid::read_le(&buf), id);
     }
 }
