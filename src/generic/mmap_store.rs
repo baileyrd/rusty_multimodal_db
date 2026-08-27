@@ -193,12 +193,17 @@
 //! its id and value, written strictly *last*, once both of those are
 //! fully in place: [`Self::write_slot_into`] is the single function that
 //! performs a slot's id write, then its value write, then its marker
-//! write, in that exact order, and both call sites that ever establish a
-//! slot's identity (`create`'s per-record loop, and `write_slot` for
-//! `open`'s new-slot path) go through it — one function, not two
-//! independently-maintained copies of the same three-step order, so they
-//! can't drift apart the way the original id/value split implicitly
-//! invited. [`Self::is_committed`] reads that byte back; [`Self::open`]'s
+//! write, in that exact order, and both call sites that ever established a
+//! slot's identity at the time (`create`'s per-record loop, and a
+//! `write_slot` wrapper `open`'s new-slot path used) went through it —
+//! one function, not two independently-maintained copies of the same
+//! three-step order, so they couldn't drift apart the way the original
+//! id/value split implicitly invited. (`write_slot` was later replaced by
+//! [`Self::append_committed_slot`] — see this module's own "next free
+//! slot" race section — which builds the identical three-field layout
+//! but commits it through a different mechanism; `write_slot_into` itself
+//! is unchanged and still the one place that byte layout is defined.)
+//! [`Self::is_committed`] reads that byte back; [`Self::open`]'s
 //! reconciliation pass skips any slot whose marker isn't set, exactly as
 //! if that id had never been persisted at all — the record it belongs to
 //! (if still current) falls into the ordinary "no persisted entry yet"
@@ -237,6 +242,113 @@
 //! machinery needed, since a torn slot and a genuinely-new record are, by
 //! construction, indistinguishable to `open`'s reconciliation pass once
 //! the marker excludes the torn one.
+//!
+//! # The "next free slot" race — a second process's append can land on the exact same slot
+//!
+//! **Fixed in a follow-up round.** The multi-process diagnosis round (a
+//! real two-*live*-process harness, `src/bin/multiprocess_harness.rs` —
+//! contrast the crash-safety harness above, which kills one process
+//! mid-work; this one lets both run to completion and race) reproduced
+//! this directly, 24/24 trials: [`Self::open`]'s previous design decided
+//! a new record's slot position purely from `existing_slot_count`, a
+//! value read from *this process's own* memory-mapped view of the file's
+//! length, before growing it. Two processes opening concurrently, each
+//! with at least one record neither has a persisted slot for yet, both
+//! read the same pre-growth length, both compute the identical
+//! `existing_slot_count`, and both then write their own new record's
+//! `(id, value, marker)` bytes starting at that same byte offset —
+//! genuinely interleaved writes into the same slot, not just a logical
+//! disagreement. Confirmed both by direct raw-byte inspection of the
+//! collided slot (whichever process's write physically landed last wins;
+//! the other's id is nowhere in the file, overwritten mid-air) and, more
+//! directly, by a losing process's own very next read of its own
+//! just-written record observing the *other* process's value.
+//!
+//! **The fix moves the position decision out of this process's own,
+//! necessarily-stale read and into the kernel**, via `O_APPEND`.
+//! [`Self::append_committed_slot`] opens a dedicated file handle with
+//! the `append` flag set and performs exactly one `write_all` call per
+//! missing record, each carrying that slot's fully-formed bytes — id,
+//! then value, then the trailing [`COMMITTED`] marker, precomputed into
+//! one buffer, so the write that lands the slot's identity *is* the
+//! write that commits it, one syscall, not three separate mmap writes
+//! racing anything. POSIX specifies that for a regular file opened with
+//! `O_APPEND`, the repositioning to end-of-file and the write itself are
+//! atomic with respect to other `O_APPEND` writers using *separate* open
+//! file descriptions of the same file — which is exactly this shape:
+//! two processes, two independently-`open()`ed handles, each blindly
+//! `write_all`ing its own slot's bytes. Each write is placed by the
+//! kernel past whatever any concurrent appender (this process's own
+//! prior append, or another process's) has already written; two
+//! processes can no longer choose the same byte offset because neither
+//! of them is choosing it at all anymore.
+//!
+//! A new record's actual position is then read back from *that specific
+//! write's own* resulting file offset (`stream_position`, an `lseek(..,
+//! SEEK_CUR)` against the same handle that just wrote it) — not
+//! recomputed from file length, which would just reintroduce the same
+//! race one level up. This is safe to query without any coordination:
+//! a file offset lives on the open file description the `append()` call
+//! created, private to whichever process (and even which handle within
+//! that process) owns it; no other process's append can perturb it.
+//!
+//! **Verified directly against the real two-process harness, not just
+//! cited from the POSIX text** — this round's own report has the exact
+//! trial count; the previously-100%-reproducible collision (raw slot
+//! bytes belonging to only one of the two racing ids, the other
+//! silently gone) no longer occurs at all, across repeated trials, and a
+//! third-party reopen after the race sees both records, each at its own,
+//! distinct position.
+//!
+//! **One accepted, explicit platform caveat, the same shape this
+//! module's other durability assumptions get**: the atomicity POSIX
+//! documents for `O_APPEND` is a *local filesystem* property (ext4,
+//! xfs, btrfs, and similar all honor it) — NFS is a well-known,
+//! explicitly-documented exception, where two NFS clients' `O_APPEND`
+//! writes can still race each other. This crate has no NFS-backed
+//! deployment target today; the caveat is named, not silently assumed
+//! away, and not engineered around, matching this module's own stated
+//! convention of naming its durability assumptions rather than leaving
+//! them implicit.
+//!
+//! **Why `O_APPEND` over a cross-process file lock**: a lock (`fs2`,
+//! `fd-lock`, or similar) wrapping the whole claim-and-write step would
+//! also close this race, unconditionally, on every platform including
+//! NFS, at the cost of a new dependency and serializing every
+//! concurrent append against every other one for the lock's whole
+//! critical section. `O_APPEND` closes the *identical* race using a
+//! mechanism the kernel already provides for exactly this shape of
+//! problem, no new dependency, and no serialization broader than what
+//! each individual `write_all` call already implies — genuinely
+//! concurrent appends from different processes can proceed without
+//! blocking each other at all, they just can't land on the same bytes.
+//! Given it demonstrably holds up under real, repeated cross-process
+//! testing on this crate's actual target platforms, it's the simpler
+//! mechanism for a real, verified guarantee here — not a case where this
+//! project's general preference for the simple, universally-correct
+//! default (documented in `src/production.rs`'s own `RwLock`-over-
+//! sharding rationale) points the other way; that preference exists for
+//! when the "clever" option's correctness is uncertain or costly to
+//! verify, not as a rule to prefer more machinery once the simpler one
+//! is confirmed to actually work.
+//!
+//! **No `SCHEMA_VERSION` bump** — the bytes a fixed slot ends up holding
+//! are identical in shape and content to what the previous design wrote
+//! (id, then value, then `COMMITTED`, at some slot position); only the
+//! *mechanism* by which a new slot's position is chosen and its bytes
+//! land changed, not the on-disk format itself. A file written by either
+//! design opens identically under the other.
+//!
+//! **Deliberately unchanged**: `create`'s own initial-write race (two
+//! processes calling `create` on the same path at once) is a separate,
+//! already-diagnosed question — found to resolve cleanly in 24/24 trials
+//! but accidentally, not by any actual guarantee (`create`'s
+//! `.truncate(true)` still races another process's live mapping with
+//! nothing in the code making it safe by construction). This round's fix
+//! is scoped to the append/slot-claiming path `open` uses for records it
+//! discovers have no persisted slot yet — the specific mechanism this
+//! module's own diagnosis round named as a real, reproducible hazard.
+//! `create`'s race is untouched here.
 
 use super::mmap_field::MmapFieldValue;
 use super::query::{FilterEq, GetById, ScanField, UpdateField};
@@ -246,7 +358,8 @@ use super::NotFound;
 use crate::durability::DurabilityError;
 use memmap2::MmapMut;
 use std::collections::HashMap;
-use std::fs::OpenOptions;
+use std::fs::{File, OpenOptions};
+use std::io::{Seek, Write};
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 
@@ -362,14 +475,17 @@ where
     /// Write a full slot at `position` directly into `mmap`: id, then
     /// value, then the trailing [`COMMITTED`] marker — strictly in that
     /// order, the marker only once both halves of the slot's identity are
-    /// fully in place. The single function both call sites that ever
-    /// establish a slot's identity go through (`create`'s per-record
-    /// loop, before `Self` even exists yet, and [`Self::write_slot`] for
-    /// `open`'s new-slot append path) — kept as one function specifically
-    /// so those two call sites can't drift out of the write order this
-    /// round's fix depends on, the same way the original two-step id/
-    /// value split (no shared function at all) let `create` and `open`
-    /// each reimplement it independently.
+    /// fully in place. Used by `create`'s per-record loop, before `Self`
+    /// even exists yet. `open`'s new-slot append path used to go through
+    /// this too (via a since-removed `write_slot` wrapper); it now goes
+    /// through [`Self::append_committed_slot`] instead, which builds the
+    /// identical three-field byte layout but commits it via one
+    /// `O_APPEND` `write_all` call rather than three separate mmap writes
+    /// at a locally-computed position — see module docs' "next free
+    /// slot" race section for why. `read_value`/`write_value` above never
+    /// need to touch the id or marker half of a slot again once it's
+    /// written, since `position_index` already captures the id ->
+    /// position mapping in memory.
     fn write_slot_into(mmap: &mut MmapMut, position: usize, id: R::Id, value: R::ScanValue) {
         let id_width = R::Id::BYTE_WIDTH;
         let value_width = R::ScanValue::BYTE_WIDTH;
@@ -377,17 +493,6 @@ where
         id.write_le(&mut mmap[start..start + id_width]);
         value.write_le(&mut mmap[start + id_width..start + id_width + value_width]);
         mmap[start + id_width + value_width] = COMMITTED;
-    }
-
-    /// [`Self::write_slot_into`] against this store's own `mmap` — used
-    /// when a slot's identity is being established for the first time
-    /// after `Self` already exists (`open`'s handling of a record with no
-    /// prior persisted entry). `read_value`/`write_value` above never
-    /// need to touch the id or marker half of a slot again once it's
-    /// written, since `position_index` already captures the id ->
-    /// position mapping in memory.
-    fn write_slot(&mut self, position: usize, id: R::Id, value: R::ScanValue) {
-        Self::write_slot_into(&mut self.mmap, position, id, value);
     }
 
     /// Whether slot `position`'s trailing marker byte reads back as
@@ -433,6 +538,44 @@ where
         let start = Self::slot_offset(position);
         let marker_offset = start + R::Id::BYTE_WIDTH + R::ScanValue::BYTE_WIDTH;
         mmap[marker_offset] == COMMITTED
+    }
+
+    /// Atomically append one fully-formed, already-committed slot — id,
+    /// then value, then the trailing [`COMMITTED`] marker, precomputed
+    /// into a single buffer — to `appender`'s file via one `write_all`
+    /// call, and return the position that slot landed at. See this
+    /// module's doc comment (the "next free slot" race section) for why
+    /// this closes the race the previous, length-derived position
+    /// calculation had, and why the position is read back from this
+    /// specific write's own resulting file offset rather than recomputed
+    /// from the file's length.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DurabilityError::Io`] if the write or the subsequent
+    /// offset query fails.
+    fn append_committed_slot(
+        appender: &mut File,
+        id: R::Id,
+        value: R::ScanValue,
+    ) -> Result<usize, DurabilityError> {
+        let id_width = R::Id::BYTE_WIDTH;
+        let value_width = R::ScanValue::BYTE_WIDTH;
+        let slot_width = Self::slot_width();
+
+        let mut buffer = vec![0u8; slot_width];
+        id.write_le(&mut buffer[..id_width]);
+        value.write_le(&mut buffer[id_width..id_width + value_width]);
+        buffer[id_width + value_width] = COMMITTED;
+
+        appender.write_all(&buffer)?;
+        // Safe without any coordination: this file offset lives on the
+        // open file description `appender` owns privately (see module
+        // docs) — no other process's own append can perturb what this
+        // read reports.
+        let end_offset = appender.stream_position()?;
+        let position = (end_offset as usize - HEADER_LEN) / slot_width - 1;
+        Ok(position)
     }
 
     /// Write the fixed header ([`MAGIC`] + [`SCHEMA_VERSION`]) at the very
@@ -552,15 +695,15 @@ where
     /// can hit (a persisted id no longer in `records`; a record in
     /// `records` with no persisted slot yet). A record in the second case
     /// gets a freshly-appended slot, seeded from its own
-    /// [`ScannableField::scannable_value`], growing the file exactly the
-    /// way [`Self::create`] would have for it.
+    /// [`ScannableField::scannable_value`] — appended via
+    /// [`Self::append_committed_slot`], not written at a locally-computed
+    /// position; see module docs' "next free slot" race section for why.
     ///
     /// # Errors
     ///
     /// Returns [`DurabilityError::Io`] if `path` doesn't exist, can't be
-    /// mapped, or can't be resized to accommodate newly-appended slots;
-    /// [`DurabilityError::InvalidMagic`] or
-    /// [`DurabilityError::SchemaVersionMismatch`] if the file's header
+    /// mapped, or a new slot can't be appended; [`DurabilityError::InvalidMagic`]
+    /// or [`DurabilityError::SchemaVersionMismatch`] if the file's header
     /// doesn't check out — see this module's own doc comment. Either
     /// header failure returns before any slot data is read.
     pub fn open(records: Vec<R>, path: &Path) -> Result<Self, DurabilityError> {
@@ -581,10 +724,11 @@ where
         // (fewer than `slot_width` bytes left) is ignored, the same
         // permissive-truncation convention this crate's WAL reader
         // (`durability::read_wal_entries`) already follows.
-        let (persisted, existing_slot_count): (PersistedSlots<R, ScanMarker>, usize) = {
+        let persisted: PersistedSlots<R, ScanMarker> = {
             // SAFETY: see `create` — same single-process exclusive-access
-            // assumption. This mapping is read, then dropped before any
-            // resize below; `memmap2` unmaps on drop.
+            // assumption for the *mapping* itself. This mapping is read,
+            // then dropped before any append below; `memmap2` unmaps on
+            // drop.
             let mmap = unsafe { MmapMut::map_mut(&file)? };
             Self::read_header(&mmap)?;
             let existing_slot_count = (mmap.len() - HEADER_LEN) / slot_width;
@@ -600,54 +744,59 @@ where
                     R::ScanValue::read_le(&mmap[start + id_width..start + id_width + value_width]);
                 persisted.insert(id, (position, value));
             }
-            (persisted, existing_slot_count)
+            persisted
         };
 
         // Reconcile: every record in `records` either already has a
-        // persisted slot (reuse its position) or doesn't (queue it for a
-        // freshly-appended one, in `records`' own order — deterministic,
-        // not HashMap-iteration-order-dependent). A persisted id with no
+        // persisted slot (reuse its position) or doesn't (append a fresh
+        // one for it, in `records`' own order — deterministic, not
+        // HashMap-iteration-order-dependent). A persisted id with no
         // matching record in `records` is simply never added to
-        // `position_index` — see module docs' "stale" case.
+        // `position_index` — see module docs' "stale" case. Unlike the
+        // previous design, a missing record's position is *not* computed
+        // here at all — it's whatever `append_committed_slot` reports
+        // back from the write that actually landed it (see module docs'
+        // "next free slot" race section for why that distinction is the
+        // entire fix).
         let mut position_index = HashMap::with_capacity(records.len());
-        let mut new_slots: Vec<(R::Id, R::ScanValue)> = Vec::new();
+        let mut missing: Vec<&R> = Vec::new();
         for record in &records {
             match persisted.get(&record.id()) {
                 Some(&(position, _)) => {
                     position_index.insert(record.id(), position);
                 }
-                None => {
-                    let position = existing_slot_count + new_slots.len();
-                    position_index.insert(record.id(), position);
-                    new_slots.push((record.id(), record.scannable_value()));
-                }
+                None => missing.push(record),
             }
         }
 
-        let total_slots = existing_slot_count + new_slots.len();
-        file.set_len((HEADER_LEN + total_slots * slot_width) as u64)?;
-        // SAFETY: see `create`. The previous mapping above was already
-        // dropped (block-scoped) before this resize, so there's no stale
-        // mapping of the old file length left dangling.
+        if !missing.is_empty() {
+            let mut appender = OpenOptions::new().append(true).open(path)?;
+            for record in missing {
+                let position = Self::append_committed_slot(
+                    &mut appender,
+                    record.id(),
+                    record.scannable_value(),
+                )?;
+                position_index.insert(record.id(), position);
+            }
+        }
+
+        // Re-map at the file's current length — reflecting any appends
+        // just made above, through a *different* handle than `mmap`
+        // (already dropped, block-scoped, before those appends) but the
+        // same underlying file, so its on-disk length is already correct
+        // by the time this mapping is established.
+        // SAFETY: see `create`.
         let mmap = unsafe { MmapMut::map_mut(&file)? };
 
-        let mut store = Self {
+        Ok(Self {
             records: indexes.records,
             index: indexes.index,
             position_index,
             mmap,
             path: path.to_path_buf(),
             _marker: PhantomData,
-        };
-
-        if !new_slots.is_empty() {
-            for (offset, &(id, value)) in new_slots.iter().enumerate() {
-                store.write_slot(existing_slot_count + offset, id, value);
-            }
-            store.mmap.flush()?;
-        }
-
-        Ok(store)
+        })
     }
 }
 
