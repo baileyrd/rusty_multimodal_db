@@ -108,6 +108,27 @@ pub enum DurabilityError {
     /// the added enum surface.
     #[error("embedded engine error: {0}")]
     Engine(String),
+    /// Added for [`crate::generic::mmap_store::GenericMmapStore`]'s
+    /// versioned header (`open` checks it before touching any record
+    /// data) — the file's first bytes don't match the expected magic
+    /// number at all, or the file is too short to even contain a header.
+    /// Distinct from [`Self::SchemaVersionMismatch`]: this means "not a
+    /// `GenericMmapStore` file," not "an older version of one." No other
+    /// durability variant currently writes or checks a magic number, so
+    /// this is unreachable from any of them.
+    #[error("not a GenericMmapStore file: magic number mismatch or file too short for a header")]
+    InvalidMagic,
+    /// The file's magic number matches (it *is* a `GenericMmapStore`
+    /// file) but its recorded `SCHEMA_VERSION` doesn't match what this
+    /// build expects — an older (or, in principle, newer) on-disk layout.
+    /// Detection only: this round deliberately doesn't attempt to read or
+    /// migrate the record data once this fires. No other durability
+    /// variant currently writes a schema version, so this is unreachable
+    /// from any of them.
+    #[error(
+        "GenericMmapStore schema version mismatch: file has {found}, this build expects {expected}"
+    )]
+    SchemaVersionMismatch { found: u32, expected: u32 },
 }
 
 /// Lets every variant's `DogStore::update_age` impl use `?` directly on a

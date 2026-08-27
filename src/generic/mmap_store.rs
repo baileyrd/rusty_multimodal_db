@@ -126,6 +126,52 @@
 //! back to per-position reads, sorted for locality, only when it isn't. A
 //! real, measured cost of the fix in the general case; see this round's
 //! own report for the numbers.
+//!
+//! # A versioned header, so a stale file is at least detectable
+//!
+//! **Fixed in a follow-up round.** The schema-evolution diagnosis's
+//! headline finding was that nothing in *either* durability path's
+//! persisted format carries a version marker — nothing would tell a
+//! reader a file predates the code opening it. For `GenericMmapStore`
+//! specifically, confirmed directly (not assumed) before designing
+//! anything: the on-disk format described above genuinely has no header
+//! of any kind — [`GenericMmapStore::create`] writes `records.len() *
+//! slot_width()` bytes starting at file offset 0, and
+//! [`GenericMmapStore::open`] reads them back from offset 0 the same way,
+//! with nothing at any fixed offset a reader could check.
+//!
+//! Every file `GenericMmapStore::create` writes now begins with a fixed
+//! [`HEADER_LEN`]-byte header — an 8-byte [`MAGIC`] constant, then
+//! [`SCHEMA_VERSION`] as a little-endian `u32` (via the same
+//! [`MmapFieldValue`] round-trip every id/value already uses) — followed
+//! by the id+value slot layout, otherwise unchanged. [`GenericMmapStore::open`]
+//! reads and checks this header *before* touching any slot data:
+//!
+//! - Magic bytes don't match (or the file is too short to even hold a
+//!   header) → [`DurabilityError::InvalidMagic`] — not a
+//!   `GenericMmapStore` file at all, full stop.
+//! - Magic matches but the version doesn't →
+//!   [`DurabilityError::SchemaVersionMismatch`], naming both the found
+//!   and expected version. Nothing past the header is read in this case —
+//!   no attempt to reconcile records against a slot layout this build
+//!   doesn't actually know how to interpret.
+//! - Both match → proceeds exactly as before this round.
+//!
+//! **Detection only, deliberately.** No migration path is built for a
+//! version mismatch — the point of this round is giving a real migration
+//! story something reliable to check *for*, not building that story
+//! speculatively with no real old-to-new migration to test against yet.
+//!
+//! **One inherent, one-time limitation, stated plainly rather than
+//! glossed over**: a file written by the *previous* round (id+value
+//! slots, no header — the fix immediately before this one) has no magic
+//! number at all, so reopening one now correctly fails, but as
+//! `InvalidMagic`, not `SchemaVersionMismatch` — there is no way to
+//! retroactively distinguish "an older version of this exact store" from
+//! "an unrelated file" for a format that never had a version concept to
+//! begin with. Every file written *from this round forward* gets the real
+//! distinction; this one prior format simply predates the marker that
+//! would have let it be told apart.
 
 use super::mmap_field::MmapFieldValue;
 use super::query::{FilterEq, GetById, ScanField, UpdateField};
@@ -138,6 +184,27 @@ use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
+
+/// Identifies a file as one [`GenericMmapStore`] wrote, at all — 8
+/// arbitrary-but-fixed bytes, ASCII-readable purely for the convenience of
+/// anyone inspecting a file by hand (`hexdump`/`xxd`), not a meaningful
+/// abbreviation the code relies on. One global constant, not per-`R` —
+/// the header identifies "a `GenericMmapStore`-shaped file," not which
+/// domain it belongs to; nothing in this format encodes that today, on
+/// either side of this round.
+const MAGIC: [u8; 8] = *b"GMMAPST\0";
+
+/// Bumped whenever [`GenericMmapStore`]'s on-disk *slot* layout changes in
+/// a way that would make an old file misread under a new build — e.g. the
+/// record-identity-keying round that preceded this one (id+value slots
+/// instead of bare values) would have bumped this, had it existed yet.
+/// Detection only this round: nothing here migrates an old version
+/// forward, see this module's own doc comment.
+const SCHEMA_VERSION: u32 = 1;
+
+/// [`MAGIC`] followed by [`SCHEMA_VERSION`] as a little-endian `u32` — see
+/// this module's doc comment for the full header design.
+const HEADER_LEN: usize = MAGIC.len() + 4;
 
 /// The generic, durable storage core: owns every record, one equality
 /// index (`IndexMarker`), and one mmap-backed scannable field
@@ -199,15 +266,21 @@ where
         R::Id::BYTE_WIDTH + R::ScanValue::BYTE_WIDTH
     }
 
+    /// Byte offset of slot `position`'s first byte — every slot sits after
+    /// the fixed [`HEADER_LEN`]-byte header, not at file offset 0 directly.
+    fn slot_offset(position: usize) -> usize {
+        HEADER_LEN + position * Self::slot_width()
+    }
+
     fn read_value(&self, position: usize) -> R::ScanValue {
         let id_width = R::Id::BYTE_WIDTH;
-        let start = position * Self::slot_width() + id_width;
+        let start = Self::slot_offset(position) + id_width;
         R::ScanValue::read_le(&self.mmap[start..start + R::ScanValue::BYTE_WIDTH])
     }
 
     fn write_value(&mut self, position: usize, value: R::ScanValue) {
         let id_width = R::Id::BYTE_WIDTH;
-        let start = position * Self::slot_width() + id_width;
+        let start = Self::slot_offset(position) + id_width;
         value.write_le(&mut self.mmap[start..start + R::ScanValue::BYTE_WIDTH]);
     }
 
@@ -218,22 +291,57 @@ where
     /// of a slot again once it's written, since `position_index` already
     /// captures the id -> position mapping in memory.
     fn write_slot(&mut self, position: usize, id: R::Id, value: R::ScanValue) {
-        let slot_width = Self::slot_width();
         let id_width = R::Id::BYTE_WIDTH;
-        let start = position * slot_width;
+        let slot_width = Self::slot_width();
+        let start = Self::slot_offset(position);
         id.write_le(&mut self.mmap[start..start + id_width]);
         value.write_le(&mut self.mmap[start + id_width..start + slot_width]);
+    }
+
+    /// Write the fixed header ([`MAGIC`] + [`SCHEMA_VERSION`]) at the very
+    /// start of `mmap` — called once, by [`Self::create`] only. `open`
+    /// never writes a header; it only ever reads and validates one an
+    /// earlier `create` already wrote.
+    fn write_header(mmap: &mut MmapMut) {
+        mmap[0..MAGIC.len()].copy_from_slice(&MAGIC);
+        SCHEMA_VERSION.write_le(&mut mmap[MAGIC.len()..HEADER_LEN]);
+    }
+
+    /// Read and validate the header at the start of `mmap` — see this
+    /// module's own doc comment for exactly what each failure means and
+    /// why they're kept distinct. Called by [`Self::open`] before any
+    /// slot data is read; a file that fails this check has none of its
+    /// record data touched at all.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DurabilityError::InvalidMagic`] if `mmap` is shorter than
+    /// [`HEADER_LEN`] or its first [`MAGIC`]`.len()` bytes don't match,
+    /// or [`DurabilityError::SchemaVersionMismatch`] if the magic matches
+    /// but the recorded version doesn't.
+    fn read_header(mmap: &MmapMut) -> Result<(), DurabilityError> {
+        if mmap.len() < HEADER_LEN || mmap[0..MAGIC.len()] != MAGIC {
+            return Err(DurabilityError::InvalidMagic);
+        }
+        let found = u32::read_le(&mmap[MAGIC.len()..HEADER_LEN]);
+        if found != SCHEMA_VERSION {
+            return Err(DurabilityError::SchemaVersionMismatch {
+                found,
+                expected: SCHEMA_VERSION,
+            });
+        }
+        Ok(())
     }
 
     /// True once every slot currently in the file maps to a live record in
     /// `position_index` — i.e. no record has ever been dropped between an
     /// `open` and the `records` this store was actually built from. Since
     /// positions are unique and never reused, `position_index.len()`
-    /// matching the file's total slot count is sufficient to prove every
-    /// slot 0..total is covered (pigeonhole — see module docs' `scan`
-    /// section for why this matters).
+    /// matching the file's total slot count (the header excluded) is
+    /// sufficient to prove every slot 0..total is covered (pigeonhole —
+    /// see module docs' `scan` section for why this matters).
     fn is_gapless(&self) -> bool {
-        self.position_index.len() * Self::slot_width() == self.mmap.len()
+        self.position_index.len() * Self::slot_width() == self.mmap.len() - HEADER_LEN
     }
 
     fn build_indexes(records: &[R]) -> Indexes<R, IndexMarker> {
@@ -251,10 +359,11 @@ where
         }
     }
 
-    /// Build fresh: create a new `slot_width() * records.len()`-byte file
-    /// at `path`, one `(id, value)` slot per record in `records`' own
-    /// order, and memory-map it. Mirrors `MmapAgeStore::create`'s overall
-    /// shape, generically, with the id prefix module docs describe.
+    /// Build fresh: create a new `HEADER_LEN + slot_width() * records.len()`-byte
+    /// file at `path` — the versioned header first, then one `(id, value)`
+    /// slot per record in `records`' own order — and memory-map it.
+    /// Mirrors `MmapAgeStore::create`'s overall shape, generically, with
+    /// the header and id prefix this module's own docs describe.
     ///
     /// # Errors
     ///
@@ -273,7 +382,7 @@ where
             .create(true)
             .truncate(true)
             .open(path)?;
-        file.set_len((records.len() * slot_width) as u64)?;
+        file.set_len((HEADER_LEN + records.len() * slot_width) as u64)?;
 
         // SAFETY: this process holds exclusive read/write access to the
         // freshly-created file at `path` for the lifetime of the mapping;
@@ -281,9 +390,10 @@ where
         // under the mapping — the same single-process-exclusive-access
         // assumption `MmapAgeStore::create` documents.
         let mut mmap = unsafe { MmapMut::map_mut(&file)? };
+        Self::write_header(&mut mmap);
         let mut position_index = HashMap::with_capacity(records.len());
         for (position, record) in records.iter().enumerate() {
-            let start = position * slot_width;
+            let start = Self::slot_offset(position);
             let id_width = R::Id::BYTE_WIDTH;
             record.id().write_le(&mut mmap[start..start + id_width]);
             record
@@ -316,7 +426,11 @@ where
     /// # Errors
     ///
     /// Returns [`DurabilityError::Io`] if `path` doesn't exist, can't be
-    /// mapped, or can't be resized to accommodate newly-appended slots.
+    /// mapped, or can't be resized to accommodate newly-appended slots;
+    /// [`DurabilityError::InvalidMagic`] or
+    /// [`DurabilityError::SchemaVersionMismatch`] if the file's header
+    /// doesn't check out — see this module's own doc comment. Either
+    /// header failure returns before any slot data is read.
     pub fn open(records: Vec<R>, path: &Path) -> Result<Self, DurabilityError> {
         let indexes = Self::build_indexes(&records);
         let slot_width = Self::slot_width();
@@ -324,20 +438,22 @@ where
 
         let file = OpenOptions::new().read(true).write(true).open(path)?;
 
-        // First pass: read every persisted (id, value) pair, keyed by id
-        // — the reconciliation step this fix exists to add. A trailing
-        // partial slot (fewer than `slot_width` bytes left) is ignored,
-        // the same permissive-truncation convention this crate's WAL
-        // reader (`durability::read_wal_entries`) already follows.
+        // First pass: check the header, then (only once it checks out)
+        // read every persisted (id, value) pair, keyed by id — the
+        // reconciliation step the record-identity-keying fix added. A
+        // trailing partial slot (fewer than `slot_width` bytes left) is
+        // ignored, the same permissive-truncation convention this crate's
+        // WAL reader (`durability::read_wal_entries`) already follows.
         let (persisted, existing_slot_count): (PersistedSlots<R, ScanMarker>, usize) = {
             // SAFETY: see `create` — same single-process exclusive-access
             // assumption. This mapping is read, then dropped before any
             // resize below; `memmap2` unmaps on drop.
             let mmap = unsafe { MmapMut::map_mut(&file)? };
-            let existing_slot_count = mmap.len() / slot_width;
+            Self::read_header(&mmap)?;
+            let existing_slot_count = (mmap.len() - HEADER_LEN) / slot_width;
             let mut persisted = HashMap::with_capacity(existing_slot_count);
             for position in 0..existing_slot_count {
-                let start = position * slot_width;
+                let start = Self::slot_offset(position);
                 let id = R::Id::read_le(&mmap[start..start + id_width]);
                 let value = R::ScanValue::read_le(&mmap[start + id_width..start + slot_width]);
                 persisted.insert(id, (position, value));
@@ -367,7 +483,7 @@ where
         }
 
         let total_slots = existing_slot_count + new_slots.len();
-        file.set_len((total_slots * slot_width) as u64)?;
+        file.set_len((HEADER_LEN + total_slots * slot_width) as u64)?;
         // SAFETY: see `create`. The previous mapping above was already
         // dropped (block-scoped) before this resize, so there's no stale
         // mapping of the old file length left dangling.
@@ -446,8 +562,8 @@ where
         let id_width = R::Id::BYTE_WIDTH;
         let slot_width = Self::slot_width();
         if self.is_gapless() {
-            return self
-                .mmap
+            // Skip the header — everything from here on is slot data.
+            return self.mmap[HEADER_LEN..]
                 .chunks_exact(slot_width)
                 .map(|slot| R::ScanValue::read_le(&slot[id_width..slot_width]))
                 .collect();
@@ -583,6 +699,125 @@ mod tests {
             FilterEq::filter_eq(&store, &OrderStatus::Shipped),
             vec![uuid::Uuid::from_u128(1)]
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Baseline: a file written at [`SCHEMA_VERSION`] opens cleanly — the
+    /// header check must not get in the way of the ordinary case.
+    #[test]
+    fn opening_a_file_at_the_current_schema_version_succeeds() {
+        let dir = crate::bench_support::fresh_temp_dir("generic_mmap_header_baseline").unwrap();
+        let path = dir.join("amount.mmap");
+        {
+            let store = GenericMmapStore::<Order, Status, Amount>::create(sample(), &path).unwrap();
+            Flush::flush(&store).unwrap();
+        }
+
+        let reopened = GenericMmapStore::<Order, Status, Amount>::open(sample(), &path);
+        assert!(
+            reopened.is_ok(),
+            "a file written at the current schema version must open cleanly, got {:?}",
+            reopened.err()
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Poking a different version number into an otherwise-valid file's
+    /// header is exactly the on-disk shape a real older (or newer)
+    /// `SCHEMA_VERSION` would have produced — a reader can't tell the
+    /// difference between "an old build wrote this" and this test's
+    /// direct byte edit, which is the point: it proves the *detection*
+    /// mechanism, not any particular history of the constant.
+    #[test]
+    fn opening_a_file_with_a_mismatched_schema_version_fails_distinctly() {
+        let dir = crate::bench_support::fresh_temp_dir("generic_mmap_header_version").unwrap();
+        let path = dir.join("amount.mmap");
+        {
+            let store = GenericMmapStore::<Order, Status, Amount>::create(sample(), &path).unwrap();
+            Flush::flush(&store).unwrap();
+        }
+
+        let bogus_version: u32 = SCHEMA_VERSION.wrapping_add(1);
+        {
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .unwrap();
+            // SAFETY: same single-process exclusive-access assumption as
+            // every other mapping in this module — this is a test-only
+            // corruption of a file this same test just wrote and owns.
+            let mut mmap = unsafe { MmapMut::map_mut(&file).unwrap() };
+            bogus_version.write_le(&mut mmap[MAGIC.len()..HEADER_LEN]);
+            mmap.flush().unwrap();
+        }
+
+        let result = GenericMmapStore::<Order, Status, Amount>::open(sample(), &path);
+        match result.err() {
+            Some(DurabilityError::SchemaVersionMismatch { found, expected }) => {
+                assert_eq!(found, bogus_version);
+                assert_eq!(expected, SCHEMA_VERSION);
+            }
+            other => panic!("expected SchemaVersionMismatch, got {other:?}"),
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The other failure mode, kept distinct from a version mismatch: the
+    /// magic bytes themselves don't match at all — not "an older version
+    /// of this store," but "not this store's file to begin with." Only
+    /// the magic is corrupted here, leaving the (already-correct) version
+    /// bytes untouched — if this were ever misread as a version mismatch
+    /// instead, that confusion is exactly what this test exists to catch.
+    #[test]
+    fn opening_a_file_with_the_wrong_magic_number_fails_distinctly_from_a_version_mismatch() {
+        let dir = crate::bench_support::fresh_temp_dir("generic_mmap_header_magic").unwrap();
+        let path = dir.join("amount.mmap");
+        {
+            let store = GenericMmapStore::<Order, Status, Amount>::create(sample(), &path).unwrap();
+            Flush::flush(&store).unwrap();
+        }
+
+        {
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .unwrap();
+            // SAFETY: see the version-mismatch test above.
+            let mut mmap = unsafe { MmapMut::map_mut(&file).unwrap() };
+            mmap[0..MAGIC.len()].copy_from_slice(&[0xFFu8; MAGIC.len()]);
+            mmap.flush().unwrap();
+        }
+
+        let result = GenericMmapStore::<Order, Status, Amount>::open(sample(), &path);
+        assert!(
+            matches!(result, Err(DurabilityError::InvalidMagic)),
+            "expected InvalidMagic, got {:?}",
+            result.err()
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A file too short to even contain a header must fail the same way a
+    /// wrong-magic file does (there's no magic to compare at all) — a
+    /// clean, typed error, not an out-of-bounds panic on the header slice.
+    #[test]
+    fn a_file_shorter_than_the_header_fails_as_invalid_magic_not_a_panic() {
+        let dir = crate::bench_support::fresh_temp_dir("generic_mmap_header_short").unwrap();
+        let path = dir.join("garbage.mmap");
+        std::fs::write(&path, [0u8; 4]).unwrap(); // shorter than HEADER_LEN
+
+        let result = GenericMmapStore::<Order, Status, Amount>::open(sample(), &path);
+        assert!(
+            matches!(result, Err(DurabilityError::InvalidMagic)),
+            "expected InvalidMagic, got {:?}",
+            result.err()
+        );
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
