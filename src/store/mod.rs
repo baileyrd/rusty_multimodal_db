@@ -11,14 +11,37 @@
 //! `STORAGE-006-littermate-graph-traversal.md` for the requirements each
 //! implementation satisfies.
 
+// The four backends below are the benchmark comparison this crate's
+// charter set out to run — not the recommended path (see `lib.rs`'s own
+// top-level doc comment). Gated behind the `research` feature; the
+// `DogStore` trait/`StoreError` type below stay unconditional since
+// `crate::production::ProductionStore` implements this trait directly.
+// Also available under plain `#[cfg(test)]`: `bench_support`'s own tests
+// use `AosStore` for a sanity check — see `canonical_cached` above for
+// why this doesn't widen what an external consumer actually sees.
+#[cfg(any(test, feature = "research"))]
 pub mod aos;
+#[cfg(feature = "research")]
 pub mod canonical;
+// Also available under plain `#[cfg(test)]` regardless of `research`:
+// `concurrency::test_support::run_concurrency_stress_test` (used by
+// `ProductionStore`'s own flagship, always-on test) replays writes
+// against a fresh `CanonicalCachedStore` as its single-threaded
+// reference — `#[cfg(test)]` code never ships to a downstream consumer's
+// build regardless of feature flags, so this doesn't widen what an
+// external consumer actually sees.
+#[cfg(any(test, feature = "research"))]
 pub mod canonical_cached;
+#[cfg(feature = "research")]
 pub mod soa;
 
+#[cfg(any(test, feature = "research"))]
 pub use aos::AosStore;
+#[cfg(feature = "research")]
 pub use canonical::CanonicalStore;
+#[cfg(any(test, feature = "research"))]
 pub use canonical_cached::CanonicalCachedStore;
+#[cfg(feature = "research")]
 pub use soa::SoaStore;
 
 use crate::record::DogRecord;

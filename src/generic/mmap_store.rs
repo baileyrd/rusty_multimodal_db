@@ -757,7 +757,12 @@ where
     }
 }
 
-#[cfg(test)]
+// Uses `order_customer::{Order, ...}` as its concrete test fixture (the
+// generic machinery under test here has no domain of its own) — gated
+// behind `research` the same way that module is, so a default (research
+// off) `cargo test` still compiles cleanly; `cargo test --features
+// research` (or `--all-features`) runs these.
+#[cfg(all(test, feature = "research"))]
 mod tests {
     use super::*;
     use crate::generic::order_customer::{Amount, Order, OrderStatus, Status};

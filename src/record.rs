@@ -2,6 +2,18 @@
 //!
 //! Deliberately three fields, no generic schema support — see
 //! `docs/charter/CHARTER.md`'s non-goals and ADR-0001.
+//!
+//! # Why this stays unconditionally `pub`, unlike the rest of the `Dog` story
+//!
+//! The `research` feature (see `lib.rs`'s own doc comment) gates away
+//! the benchmarked-alternative backends/variants/strategies and the
+//! dataset-generation infrastructure built around `Dog` — but not
+//! [`DogRecord`] itself. [`crate::production::ProductionStore`] (front
+//! door, unconditional) implements [`crate::store::DogStore`], whose
+//! trait methods return/accept `DogRecord` directly; a real caller can't
+//! use `ProductionStore` through that trait at all without `DogRecord`
+//! being nameable. It's the one piece of the `Dog` domain that's part of
+//! the public contract, not the evidence.
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
