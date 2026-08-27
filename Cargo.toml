@@ -33,6 +33,10 @@ name = "rule_trace_spike"
 harness = false
 
 [[bench]]
+name = "req_traceability_spike"
+harness = false
+
+[[bench]]
 name = "cache_events"
 harness = false
 required-features = ["perf-events"]

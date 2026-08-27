@@ -36,7 +36,22 @@
 //!   `forward_scannable_pairs!`-style macro pattern, prototyped
 //!   spike-locally as `forward_related_to_pairs!` rather than added to
 //!   `crate::generic` itself — a promotion decision for a later round, not
-//!   this one).
+//!   this one). `rule_trace` also carries `SelectionGroup` (a sixth-round
+//!   addition, kept alongside `Rule` since its membership relation is
+//!   modeled as `Rule` being a `ChildOf` a `SelectionGroup`).
+//! - [`source`]/[`source_bench_support`] — the sixth spike round's
+//!   `Source` piece: the same optional-nested-parent-chain shape `Rule`
+//!   already established, applied to a different record, plus a
+//!   root-lookup query (`domain_tags` only live on the root; a nested
+//!   `Source`'s effective tags come from walking up to it).
+//! - [`rule_derivation`] — the sixth spike round's `RuleDerivation`
+//!   piece: a directed `Rule`-to-`Rule` "elaborates on" link, deliberately
+//!   modeled via a *separate* trait triad from `rule_trace`'s own
+//!   `RuleRelation` one (`DerivationRelation`/`DerivesFrom`/`Derived`,
+//!   not `DirectedRelation`/`RelatedTo`/`DirectedRelated`) — see that
+//!   module's own docs for why derivation links are firewalled from
+//!   `RuleRelation`'s binding-dependency graph at the type level, not
+//!   just by convention.
 //!
 //! # Isolation (unchanged from every prior round)
 //!
@@ -49,7 +64,10 @@ pub mod dog_impl;
 pub mod order_bench_support;
 pub mod order_naive;
 pub mod rule_bench_support;
+pub mod rule_derivation;
 pub mod rule_trace;
+pub mod source;
+pub mod source_bench_support;
 
 pub use dog_impl::{build_dog_generic_store, DogGenericStore};
 pub use order_naive::NaiveOrderStore;
