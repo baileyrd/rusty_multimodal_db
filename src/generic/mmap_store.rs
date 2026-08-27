@@ -172,6 +172,71 @@
 //! begin with. Every file written *from this round forward* gets the real
 //! distinction; this one prior format simply predates the marker that
 //! would have let it be told apart.
+//!
+//! # A trailing commit marker, so a crash can't produce a torn slot
+//!
+//! **Fixed in a follow-up round.** The crash-safety diagnosis
+//! (subprocess `SIGKILL`, not a graceful drop — see that round's own
+//! harness, `src/bin/crash_safety_harness.rs`) reproduced a real torn
+//! write 8/8 times: a crash between a new slot's id write and its value
+//! write leaves a slot with a *valid-looking id paired with a stale or
+//! garbage value* — data that passes the schema-version/magic-number
+//! check while being silently wrong. That diagnosis specifically
+//! exercised slot **creation** (`create`, and `open`'s new-slot append
+//! path, both of which write a slot's id then its value as two
+//! independent, unsynchronized writes); this round's own diagnosis pass
+//! (see `open`'s doc comment on `is_committed`) checked the **update**
+//! path too, directly, rather than assuming the same fix automatically
+//! covers it.
+//!
+//! Every slot now carries one extra trailing byte — [`COMMITTED`] — after
+//! its id and value, written strictly *last*, once both of those are
+//! fully in place: [`Self::write_slot_into`] is the single function that
+//! performs a slot's id write, then its value write, then its marker
+//! write, in that exact order, and both call sites that ever establish a
+//! slot's identity (`create`'s per-record loop, and `write_slot` for
+//! `open`'s new-slot path) go through it — one function, not two
+//! independently-maintained copies of the same three-step order, so they
+//! can't drift apart the way the original id/value split implicitly
+//! invited. [`Self::is_committed`] reads that byte back; [`Self::open`]'s
+//! reconciliation pass skips any slot whose marker isn't set, exactly as
+//! if that id had never been persisted at all — the record it belongs to
+//! (if still current) falls into the ordinary "no persisted entry yet"
+//! path and gets a fresh, properly-committed slot appended, while the
+//! torn slot's bytes stay in the file, inert, the same documented,
+//! already-accepted cost every other stale/orphaned slot has (no
+//! compaction).
+//!
+//! **Why a single trailing byte, not "id written last" instead**: the id
+//! field is 16 bytes ([`uuid::Uuid`]); relying on *that* write itself
+//! being atomic would trade one unverified assumption for another — this
+//! project has no guarantee a 16-byte `copy_from_slice` is atomic with
+//! respect to a process-level crash across every platform/filesystem this
+//! crate might run on. A single byte is the smallest unit this code can
+//! write at all, which is about as close to a real atomicity guarantee as
+//! this gets without much heavier machinery (a write-ahead log, or
+//! copy-on-write) — stated explicitly, per this project's own convention
+//! of naming its durability assumptions rather than leaving them
+//! implicit, not proven beyond what "smallest possible write" implies.
+//! [`Self::is_committed`]'s own doc comment covers the update path's
+//! separate, narrower assumption in the same spirit.
+//!
+//! **Another one-time limitation, same shape as the header round's own**:
+//! a file written by the *previous* round (id+value slots, header, no
+//! commit marker) has a different [`SCHEMA_VERSION`] recorded in its
+//! header, so reopening one now correctly fails as
+//! [`DurabilityError::SchemaVersionMismatch`] rather than being misread
+//! under the new, wider slot layout — the version bump this round makes
+//! is exactly what the header round built the mechanism to catch.
+//!
+//! **Detection-and-repair, not detection-only this time**: unlike the
+//! header round (which only detects a version mismatch, deliberately not
+//! migrating), a torn slot found mid-reconciliation is actively repaired
+//! in place, by the same "append a fresh slot for a record with no
+//! persisted entry" path `open` already had — no separate migration
+//! machinery needed, since a torn slot and a genuinely-new record are, by
+//! construction, indistinguishable to `open`'s reconciliation pass once
+//! the marker excludes the torn one.
 
 use super::mmap_field::MmapFieldValue;
 use super::query::{FilterEq, GetById, ScanField, UpdateField};
@@ -195,16 +260,25 @@ use std::path::{Path, PathBuf};
 const MAGIC: [u8; 8] = *b"GMMAPST\0";
 
 /// Bumped whenever [`GenericMmapStore`]'s on-disk *slot* layout changes in
-/// a way that would make an old file misread under a new build — e.g. the
-/// record-identity-keying round that preceded this one (id+value slots
-/// instead of bare values) would have bumped this, had it existed yet.
-/// Detection only this round: nothing here migrates an old version
-/// forward, see this module's own doc comment.
-const SCHEMA_VERSION: u32 = 1;
+/// a way that would make an old file misread under a new build — bumped
+/// this round for the trailing per-slot [`COMMITTED`] marker byte (see
+/// this module's own doc comment), the same way the record-identity-
+/// keying round would have bumped it for the id+value slot layout, had
+/// this marker existed yet at that point.
+const SCHEMA_VERSION: u32 = 2;
 
 /// [`MAGIC`] followed by [`SCHEMA_VERSION`] as a little-endian `u32` — see
 /// this module's doc comment for the full header design.
 const HEADER_LEN: usize = MAGIC.len() + 4;
+
+/// The value [`GenericMmapStore::is_committed`] looks for in a slot's
+/// trailing marker byte. Any other byte value — including `0`, what a
+/// freshly-extended file's zero-filled bytes already are before anything
+/// writes to them — means "not committed," so a slot that was never
+/// reached at all (file merely grown, e.g. by `open`'s `file.set_len`
+/// ahead of writing it) and a slot whose marker write was interrupted by
+/// a crash both read the same safe way: absent, not corrupted.
+const COMMITTED: u8 = 1;
 
 /// The generic, durable storage core: owns every record, one equality
 /// index (`IndexMarker`), and one mmap-backed scannable field
@@ -260,10 +334,11 @@ where
     R::Id: MmapFieldValue,
     R::ScanValue: MmapFieldValue,
 {
-    /// Bytes per persisted slot: the id prefix plus the scannable value —
-    /// see module docs for why a slot is no longer just the bare value.
+    /// Bytes per persisted slot: the id prefix, the scannable value, and
+    /// the trailing [`COMMITTED`] marker byte — see module docs for why
+    /// neither addition is optional.
     fn slot_width() -> usize {
-        R::Id::BYTE_WIDTH + R::ScanValue::BYTE_WIDTH
+        R::Id::BYTE_WIDTH + R::ScanValue::BYTE_WIDTH + 1
     }
 
     /// Byte offset of slot `position`'s first byte — every slot sits after
@@ -284,18 +359,80 @@ where
         value.write_le(&mut self.mmap[start..start + R::ScanValue::BYTE_WIDTH]);
     }
 
-    /// Write a full `(id, value)` slot at `position` — used when a slot's
-    /// identity is being established for the first time (`create`, and
-    /// `open`'s handling of a record with no prior persisted entry).
-    /// `read_value`/`write_value` above never need to touch the id half
-    /// of a slot again once it's written, since `position_index` already
-    /// captures the id -> position mapping in memory.
-    fn write_slot(&mut self, position: usize, id: R::Id, value: R::ScanValue) {
+    /// Write a full slot at `position` directly into `mmap`: id, then
+    /// value, then the trailing [`COMMITTED`] marker — strictly in that
+    /// order, the marker only once both halves of the slot's identity are
+    /// fully in place. The single function both call sites that ever
+    /// establish a slot's identity go through (`create`'s per-record
+    /// loop, before `Self` even exists yet, and [`Self::write_slot`] for
+    /// `open`'s new-slot append path) — kept as one function specifically
+    /// so those two call sites can't drift out of the write order this
+    /// round's fix depends on, the same way the original two-step id/
+    /// value split (no shared function at all) let `create` and `open`
+    /// each reimplement it independently.
+    fn write_slot_into(mmap: &mut MmapMut, position: usize, id: R::Id, value: R::ScanValue) {
         let id_width = R::Id::BYTE_WIDTH;
-        let slot_width = Self::slot_width();
+        let value_width = R::ScanValue::BYTE_WIDTH;
         let start = Self::slot_offset(position);
-        id.write_le(&mut self.mmap[start..start + id_width]);
-        value.write_le(&mut self.mmap[start + id_width..start + slot_width]);
+        id.write_le(&mut mmap[start..start + id_width]);
+        value.write_le(&mut mmap[start + id_width..start + id_width + value_width]);
+        mmap[start + id_width + value_width] = COMMITTED;
+    }
+
+    /// [`Self::write_slot_into`] against this store's own `mmap` — used
+    /// when a slot's identity is being established for the first time
+    /// after `Self` already exists (`open`'s handling of a record with no
+    /// prior persisted entry). `read_value`/`write_value` above never
+    /// need to touch the id or marker half of a slot again once it's
+    /// written, since `position_index` already captures the id ->
+    /// position mapping in memory.
+    fn write_slot(&mut self, position: usize, id: R::Id, value: R::ScanValue) {
+        Self::write_slot_into(&mut self.mmap, position, id, value);
+    }
+
+    /// Whether slot `position`'s trailing marker byte reads back as
+    /// [`COMMITTED`] — the one thing [`Self::open`]'s reconciliation pass
+    /// trusts before treating a slot's id/value bytes as real data at
+    /// all. A slot that fails this check (marker byte anything other than
+    /// `COMMITTED`) is skipped entirely during reconciliation, exactly as
+    /// if it had never been persisted — see module docs for the full
+    /// mechanism and why a single trailing byte, not id-write-ordering,
+    /// is what this round's fix relies on.
+    ///
+    /// **Scoped to slot *creation* only, deliberately** — this crate's own
+    /// crash-safety diagnosis (this round's own follow-up pass, not the
+    /// original diagnosis round) checked the in-place *update* path
+    /// separately, directly, rather than assuming this fix covers it too:
+    /// [`UpdateField::update`]/[`Self::write_value`] overwrite only a
+    /// slot's already-committed value bytes, never its id or marker, via
+    /// one `copy_from_slice` call of `R::ScanValue::BYTE_WIDTH` bytes. A
+    /// process-level `SIGKILL` can only land at an instruction boundary,
+    /// never inside one CPU store instruction, and that single fixed-
+    /// width, compile-time-sized copy is exactly the shape LLVM is
+    /// expected to lower to one (or a small, fixed number of) store
+    /// instructions rather than a byte-wise loop — so an in-place value
+    /// update tearing mid-write was expected to be far harder to trigger
+    /// than the original id/value gap. Reproduced empirically: many
+    /// rapid, back-to-back, unsynchronized updates alternating between
+    /// two maximally-distinguishable byte patterns, killed at
+    /// uncontrolled points relative to individual writes, across repeated
+    /// trials (`src/bin/crash_safety_harness.rs`'s `trial_torn_update`) —
+    /// every single trial read back exactly one of the two known
+    /// patterns, never a mix. That result is evidence for, not proof of,
+    /// this remaining safe on every platform/compiler this crate might
+    /// ever run on — it depends on codegen this project doesn't pin or
+    /// verify per-target, a real, narrower, explicitly-accepted residual
+    /// assumption, not a second commit-marker mechanism. Closing that gap
+    /// for certain would mean paying the same append-and-repoint cost
+    /// `create`/`write_slot` pay for a *new* slot on every single
+    /// in-place `update` too — turning every mutation into unbounded,
+    /// log-structured file growth — which is exactly the "much heavier
+    /// machinery" this round's own module doc says a single-byte marker
+    /// is meant to avoid building without a real design needing it first.
+    fn is_committed(mmap: &MmapMut, position: usize) -> bool {
+        let start = Self::slot_offset(position);
+        let marker_offset = start + R::Id::BYTE_WIDTH + R::ScanValue::BYTE_WIDTH;
+        mmap[marker_offset] == COMMITTED
     }
 
     /// Write the fixed header ([`MAGIC`] + [`SCHEMA_VERSION`]) at the very
@@ -393,12 +530,7 @@ where
         Self::write_header(&mut mmap);
         let mut position_index = HashMap::with_capacity(records.len());
         for (position, record) in records.iter().enumerate() {
-            let start = Self::slot_offset(position);
-            let id_width = R::Id::BYTE_WIDTH;
-            record.id().write_le(&mut mmap[start..start + id_width]);
-            record
-                .scannable_value()
-                .write_le(&mut mmap[start + id_width..start + slot_width]);
+            Self::write_slot_into(&mut mmap, position, record.id(), record.scannable_value());
             position_index.insert(record.id(), position);
         }
         mmap.flush()?;
@@ -439,11 +571,16 @@ where
         let file = OpenOptions::new().read(true).write(true).open(path)?;
 
         // First pass: check the header, then (only once it checks out)
-        // read every persisted (id, value) pair, keyed by id — the
+        // read every *committed* (id, value) pair, keyed by id — the
         // reconciliation step the record-identity-keying fix added. A
-        // trailing partial slot (fewer than `slot_width` bytes left) is
-        // ignored, the same permissive-truncation convention this crate's
-        // WAL reader (`durability::read_wal_entries`) already follows.
+        // slot whose marker byte isn't `COMMITTED` (never reached, or a
+        // crash landed before its marker write) is skipped here entirely
+        // — see module docs — so it falls through reconciliation below
+        // exactly as if it had never been persisted, rather than handing
+        // a torn id/value pair to a caller. A trailing partial slot
+        // (fewer than `slot_width` bytes left) is ignored, the same
+        // permissive-truncation convention this crate's WAL reader
+        // (`durability::read_wal_entries`) already follows.
         let (persisted, existing_slot_count): (PersistedSlots<R, ScanMarker>, usize) = {
             // SAFETY: see `create` — same single-process exclusive-access
             // assumption. This mapping is read, then dropped before any
@@ -451,11 +588,16 @@ where
             let mmap = unsafe { MmapMut::map_mut(&file)? };
             Self::read_header(&mmap)?;
             let existing_slot_count = (mmap.len() - HEADER_LEN) / slot_width;
+            let value_width = R::ScanValue::BYTE_WIDTH;
             let mut persisted = HashMap::with_capacity(existing_slot_count);
             for position in 0..existing_slot_count {
+                if !Self::is_committed(&mmap, position) {
+                    continue;
+                }
                 let start = Self::slot_offset(position);
                 let id = R::Id::read_le(&mmap[start..start + id_width]);
-                let value = R::ScanValue::read_le(&mmap[start + id_width..start + slot_width]);
+                let value =
+                    R::ScanValue::read_le(&mmap[start + id_width..start + id_width + value_width]);
                 persisted.insert(id, (position, value));
             }
             (persisted, existing_slot_count)
@@ -560,12 +702,22 @@ where
     /// measured cost of that fallback path.
     fn scan(&self) -> Vec<R::ScanValue> {
         let id_width = R::Id::BYTE_WIDTH;
+        let value_width = R::ScanValue::BYTE_WIDTH;
         let slot_width = Self::slot_width();
         if self.is_gapless() {
             // Skip the header — everything from here on is slot data.
+            // `is_gapless` (see its own doc comment) already guarantees
+            // every slot in this range is committed, via the same
+            // pigeonhole argument: an uncommitted slot is never in
+            // `position_index`, so if every slot *were* accounted for
+            // here despite one being uncommitted, `position_index` would
+            // be short by exactly that slot and this fast path wouldn't
+            // have been taken at all. `[id_width..id_width + value_width]`
+            // stops short of the trailing marker byte — it's never part
+            // of a value.
             return self.mmap[HEADER_LEN..]
                 .chunks_exact(slot_width)
-                .map(|slot| R::ScanValue::read_le(&slot[id_width..slot_width]))
+                .map(|slot| R::ScanValue::read_le(&slot[id_width..id_width + value_width]))
                 .collect();
         }
         let mut positions: Vec<usize> = self.position_index.values().copied().collect();
@@ -816,6 +968,66 @@ mod tests {
             matches!(result, Err(DurabilityError::InvalidMagic)),
             "expected InvalidMagic, got {:?}",
             result.err()
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A slot whose trailing marker byte isn't [`COMMITTED`] — exactly
+    /// what the crash-safety diagnosis reproduced (a crash between a new
+    /// slot's id write and its value write, or between the value and
+    /// marker writes this round adds) — must be treated as if it had
+    /// never been persisted at all, not read as whatever stale/garbage
+    /// bytes happen to sit there. The corrupted value is deliberately set
+    /// to something `sample()` never produces, so a passing assertion
+    /// here can only mean the marker check actually excluded the slot,
+    /// not a coincidence of matching bytes.
+    #[test]
+    fn a_slot_with_an_unset_commit_marker_is_treated_as_never_persisted() {
+        let dir = crate::bench_support::fresh_temp_dir("generic_mmap_torn_slot").unwrap();
+        let path = dir.join("amount.mmap");
+        {
+            let store = GenericMmapStore::<Order, Status, Amount>::create(sample(), &path).unwrap();
+            Flush::flush(&store).unwrap();
+        }
+
+        let corrupted_position = 1; // sample()[1] is id 2, amount_cents 4_200
+        {
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .unwrap();
+            // SAFETY: same single-process exclusive-access assumption as
+            // every other mapping in this module — a test-only corruption
+            // of a file this same test just wrote and owns.
+            let mut mmap = unsafe { MmapMut::map_mut(&file).unwrap() };
+            let start = GenericMmapStore::<Order, Status, Amount>::slot_offset(corrupted_position);
+            let id_width = uuid::Uuid::BYTE_WIDTH;
+            let value_width = i64::BYTE_WIDTH;
+            // Id bytes stay untouched — a real torn write always keeps a
+            // valid-looking id. Value is corrupted to a sentinel
+            // `sample()` never writes; marker is cleared.
+            (-1i64).write_le(&mut mmap[start + id_width..start + id_width + value_width]);
+            mmap[start + id_width + value_width] = 0;
+            mmap.flush().unwrap();
+        }
+
+        let reopened = GenericMmapStore::<Order, Status, Amount>::open(sample(), &path).unwrap();
+        assert_eq!(
+            GetById::get(&reopened, uuid::Uuid::from_u128(2))
+                .unwrap()
+                .amount_cents,
+            4_200,
+            "an uncommitted slot must be re-seeded from the supplied record, not read as the \
+             corrupted stale value"
+        );
+        assert_eq!(
+            GetById::get(&reopened, uuid::Uuid::from_u128(1))
+                .unwrap()
+                .amount_cents,
+            2_500,
+            "an untouched slot must be unaffected by a neighboring slot's corruption"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

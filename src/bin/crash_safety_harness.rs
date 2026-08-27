@@ -34,7 +34,7 @@
 //! "durable to physical storage" — read the report's caveat on it rather
 //! than treating "survived" as proof of true crash-durability.
 //!
-//! # The three trials
+//! # The trials
 //!
 //! 1. **Unflushed data loss** (`trial_unflushed`) — create a store
 //!    (flushed once, as `create` always does — that's the durable
@@ -47,12 +47,35 @@
 //!    updates and only then is killed (triggered by its `FLUSHED` line,
 //!    so the kill provably happens after `flush()` returned). Reopen and
 //!    check whether every update survived, every trial.
-//! 3. **Torn writes** (`trial_torn_write`) — append one new `(id, value)`
-//!    slot to an already-valid file the same way `GenericMmapStore::open`'s
-//!    new-slot path does (id half, then value half, no barrier between),
-//!    with the writer killed in the gap between those two writes. Inspect
-//!    the raw slot bytes afterward: did the id write land without the
-//!    value write, or vice versa?
+//! 3. **Torn writes, against this round's fix** (`trial_torn_write`) —
+//!    append one new slot to an already-valid file the same way
+//!    `GenericMmapStore::open`'s new-slot path does since the fix: id,
+//!    then value, then a trailing commit-marker byte, three independent
+//!    writes with no barrier between any of them. Two sub-trials kill in
+//!    each of the two gaps (`kill_after_id`/`kill_after_value`). Verified
+//!    through the real public API, not just raw bytes: the harness
+//!    reopens with `GenericMmapStore::open` using `records` that include
+//!    a *fresh* seed value for the new id (deliberately different from
+//!    both the torn write's attempted value and the pre-existing
+//!    records), and checks what a caller actually observes — the fix is
+//!    confirmed only if every killed trial reads back that fresh reseed
+//!    value (proving the torn slot was excluded from reconciliation and
+//!    a clean new slot took its place), never the value the interrupted
+//!    write was attempting and never anything else. An uninterrupted
+//!    control run confirms the harness itself is sound (the *original*
+//!    attempted value survives when nothing kills the writer).
+//! 4. **Torn updates** (`trial_torn_update`) — the diagnosis only tested
+//!    slot *creation*; this checks the *update* path separately, rather
+//!    than assuming the same fix covers it (it doesn't touch the update
+//!    path at all — see `GenericMmapStore::is_committed`'s own doc
+//!    comment for why). Runs many rapid, unsynchronized, unpaced
+//!    `UpdateField::update` calls on one already-committed record,
+//!    alternating between two maximally bit-different values, killed at
+//!    an uncontrolled point relative to individual writes (a short,
+//!    fixed sleep, not a readiness line — any synchronization point would
+//!    only ever land the kill *between* calls, never inside one). Checks
+//!    whether the final persisted value is ever anything other than
+//!    exactly one of the two known patterns.
 //!
 //! Each trial repeats [`TRIALS`] times — a single run of a crash test
 //! proves little either way; consistency (or its absence) across repeats
@@ -65,6 +88,7 @@
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 use rusty_multimodal_db::bench_support::fresh_temp_dir;
 use rusty_multimodal_db::generic::mmap_store::GenericMmapStore;
@@ -79,15 +103,15 @@ const RECORD_COUNT: usize = 500;
 /// Kill after this many `WROTE <i>` lines have been observed — well
 /// before the writer would finish `RECORD_COUNT` on its own.
 const KILL_AFTER: usize = 250;
-
-/// Mirrors `src/bin/crash_writer.rs`'s own copy of this layout, which in
-/// turn mirrors the private layout `src/generic/mmap_store.rs`'s module
-/// doc documents. See that binary's top-of-file comment for why this
-/// isn't a shared `pub` constant instead.
-const HEADER_LEN: usize = 12;
-const ID_WIDTH: usize = 16;
-const VALUE_WIDTH: usize = 8;
-const SLOT_WIDTH: usize = ID_WIDTH + VALUE_WIDTH;
+/// Iterations `torn-update` is asked to attempt — deliberately far more
+/// than it can complete before the short kill sleep below elapses; the
+/// point is to be killed mid-burst, not to finish.
+const TORN_UPDATE_ITERATIONS: u64 = 500_000_000;
+/// How long the parent waits before killing the `torn-update` child.
+/// Short and fixed, not tied to any readiness line from the child — a
+/// line-based sync point would only ever let the kill land *between*
+/// update calls, never inside one, defeating the point of this trial.
+const TORN_UPDATE_KILL_DELAY: Duration = Duration::from_millis(2);
 
 fn writer_binary_path() -> PathBuf {
     let mut path = std::env::current_exe().expect("locate this binary's own path");
@@ -145,6 +169,26 @@ fn spawn_and_kill_after(binary: &Path, args: &[&str], target_line: &str) -> Vec<
          KILL_AFTER) need to leave a bigger window; got status {status:?}"
     );
     seen
+}
+
+/// Spawn `binary` with `args`, wait `delay`, then `SIGKILL` it and reap
+/// it — no readiness-line synchronization, for trials where any such
+/// synchronization would itself prevent the kill from landing where it
+/// needs to.
+fn spawn_and_kill_after_delay(binary: &Path, args: &[&str], delay: Duration) {
+    let mut child = Command::new(binary)
+        .args(args)
+        .stdout(Stdio::null())
+        .spawn()
+        .expect("spawn crash_writer");
+    std::thread::sleep(delay);
+    child.kill().expect("SIGKILL the child");
+    let status = child.wait().expect("reap the killed child");
+    assert!(
+        !status.success(),
+        "child exited cleanly before we could kill it — TORN_UPDATE_ITERATIONS/\
+         TORN_UPDATE_KILL_DELAY need adjusting; got status {status:?}"
+    );
 }
 
 struct UnflushedTrialResult {
@@ -248,108 +292,160 @@ fn trial_flushed(binary: &Path) -> Vec<FlushedTrialResult> {
         .collect()
 }
 
-struct TornWriteResult {
-    id_written: bool,
-    value_written: bool,
+/// What a caller observes through the real `GenericMmapStore` public API
+/// after a torn-write attempt — the authoritative check, not a raw-byte
+/// inspection. `Some(value)` if the id is visible at all (it always
+/// should be, either as the reseed value or, in the control case, the
+/// originally-attempted one); this trial only ever supplies ids that are
+/// present in `records`, so `None` would itself be a bug in the harness.
+type TornWriteObserved = i64;
+
+const TORN_WRITE_NEW_ID: u128 = 9_999;
+/// The value the (possibly-interrupted) writer attempts to persist.
+const TORN_WRITE_ATTEMPTED_VALUE: i64 = 424_242;
+/// The value the *record* the harness supplies to `open` carries as its
+/// own seed — deliberately different from
+/// [`TORN_WRITE_ATTEMPTED_VALUE`], so a reopened value of exactly this
+/// number can only mean "the torn slot was excluded and a fresh one was
+/// seeded from the caller's own record," not a coincidence.
+const TORN_WRITE_RESEED_VALUE: i64 = 999_999;
+
+fn build_torn_write_baseline() -> (PathBuf, tempdir_guard::TempDirGuard, usize) {
+    let dir = fresh_temp_dir("crash_torn_write").expect("fresh temp dir for torn-write trial");
+    let path = dir.join("orders.mmap");
+    let existing = make_orders(3);
+    let existing_slot_count = existing.len();
+    {
+        // A normal, un-killed create — the durable baseline this trial
+        // appends one new slot to. Dropped before spawning the child so
+        // the child gets exclusive access to the file, same single-
+        // process-exclusive-access assumption every mapping in this
+        // crate documents.
+        let _store = GenericMmapStore::<Order, Status, Amount>::create(existing, &path)
+            .expect("create baseline file");
+    }
+    (path, tempdir_guard::TempDirGuard(dir), existing_slot_count)
 }
 
-fn read_slot(path: &Path, position: usize) -> (Vec<u8>, Vec<u8>) {
-    let bytes = std::fs::read(path).expect("read the raw file");
-    let start = HEADER_LEN + position * SLOT_WIDTH;
-    let id_bytes = bytes[start..start + ID_WIDTH].to_vec();
-    let value_bytes = bytes[start + ID_WIDTH..start + SLOT_WIDTH].to_vec();
-    (id_bytes, value_bytes)
+/// Reopen through the real public API with `records` = the original
+/// baseline plus one record for [`TORN_WRITE_NEW_ID`] seeded at
+/// [`TORN_WRITE_RESEED_VALUE`], and return what a caller actually
+/// observes for that id.
+fn observe_after_torn_write(path: &Path) -> TornWriteObserved {
+    let mut records = make_orders(3);
+    records.push(Order {
+        id: Uuid::from_u128(TORN_WRITE_NEW_ID),
+        customer_id: Uuid::from_u128(1),
+        amount_cents: TORN_WRITE_RESEED_VALUE,
+        status: OrderStatus::Pending,
+        created_at_unix_ms: 0,
+        discount_cents: 0,
+    });
+    let store = GenericMmapStore::<Order, Status, Amount>::open(records, path)
+        .expect("reopen after a torn-write attempt");
+    GetById::get(&store, Uuid::from_u128(TORN_WRITE_NEW_ID))
+        .expect("the new id is always in `records`")
+        .amount_cents
 }
 
-fn trial_torn_write(binary: &Path) -> Vec<TornWriteResult> {
+/// Run the writer to completion, uninterrupted — proves the harness
+/// itself is sound (the attempted value survives when nothing kills the
+/// writer) before trusting what a kill produces.
+fn torn_write_control(binary: &Path) -> TornWriteObserved {
+    let (path, _dir_guard, existing_slot_count) = build_torn_write_baseline();
+    let status = Command::new(binary)
+        .args([
+            "torn-write",
+            path.to_str().expect("utf8 path"),
+            &existing_slot_count.to_string(),
+            &TORN_WRITE_NEW_ID.to_string(),
+            &TORN_WRITE_ATTEMPTED_VALUE.to_string(),
+        ])
+        .status()
+        .expect("run crash_writer to completion, uninterrupted");
+    assert!(status.success(), "control writer should exit cleanly");
+    observe_after_torn_write(&path)
+}
+
+/// Kill after `kill_on` (`"ID_WRITTEN"` or `"VALUE_WRITTEN"`) is observed
+/// on the child's stdout, `TRIALS` times, returning what a caller
+/// observes for the new id after each kill.
+fn trial_torn_write(binary: &Path, kill_on: &str) -> Vec<TornWriteObserved> {
     (0..TRIALS)
-        .map(|trial| {
-            let dir = fresh_temp_dir(&format!("crash_torn_{trial}"))
-                .expect("fresh temp dir for torn-write trial");
-            let path = dir.join("orders.mmap");
-            let existing = make_orders(3);
-            let existing_slot_count = existing.len();
-            {
-                // A normal, un-killed create — the durable baseline this
-                // trial appends one new slot to. Dropped before spawning
-                // the child so the child gets exclusive access to the
-                // file, same single-process-exclusive-access assumption
-                // every mapping in this crate documents.
-                let _store = GenericMmapStore::<Order, Status, Amount>::create(existing, &path)
-                    .expect("create baseline file");
-            }
-
-            let new_id = Uuid::from_u128(9_999);
-            let new_value: i64 = 424_242;
+        .map(|_trial| {
+            let (path, _dir_guard, existing_slot_count) = build_torn_write_baseline();
             spawn_and_kill_after(
                 binary,
                 &[
                     "torn-write",
                     path.to_str().expect("utf8 path"),
                     &existing_slot_count.to_string(),
-                    &new_id.as_u128().to_string(),
-                    &new_value.to_string(),
+                    &TORN_WRITE_NEW_ID.to_string(),
+                    &TORN_WRITE_ATTEMPTED_VALUE.to_string(),
                 ],
-                "ID_WRITTEN",
+                kill_on,
             );
-
-            let (id_bytes, value_bytes) = read_slot(&path, existing_slot_count);
-            let id_written = id_bytes == new_id.as_bytes();
-            let value_written = i64::from_le_bytes(
-                value_bytes
-                    .as_slice()
-                    .try_into()
-                    .expect("value slot is VALUE_WIDTH bytes"),
-            ) == new_value;
-
-            let _ = std::fs::remove_dir_all(&dir);
-            TornWriteResult {
-                id_written,
-                value_written,
-            }
+            observe_after_torn_write(&path)
         })
         .collect()
 }
 
-/// Uninterrupted control run for the torn-write trial: proves the
-/// harness itself is sound by confirming both halves land when nothing
-/// kills the writer.
-fn torn_write_control(binary: &Path) -> TornWriteResult {
-    let dir = fresh_temp_dir("crash_torn_control").expect("fresh temp dir for control run");
-    let path = dir.join("orders.mmap");
-    let existing = make_orders(3);
-    let existing_slot_count = existing.len();
-    {
-        let _store = GenericMmapStore::<Order, Status, Amount>::create(existing, &path)
-            .expect("create baseline file");
-    }
-    let new_id = Uuid::from_u128(9_999);
-    let new_value: i64 = 424_242;
-    let status = Command::new(binary)
-        .args([
-            "torn-write",
-            path.to_str().expect("utf8 path"),
-            &existing_slot_count.to_string(),
-            &new_id.as_u128().to_string(),
-            &new_value.to_string(),
-        ])
-        .status()
-        .expect("run crash_writer to completion, uninterrupted");
-    assert!(status.success(), "control writer should exit cleanly");
+const TORN_UPDATE_ID: u128 = 55_555;
 
-    let (id_bytes, value_bytes) = read_slot(&path, existing_slot_count);
-    let id_written = id_bytes == new_id.as_bytes();
-    let value_written = i64::from_le_bytes(
-        value_bytes
-            .as_slice()
-            .try_into()
-            .expect("value slot is VALUE_WIDTH bytes"),
-    ) == new_value;
-    let _ = std::fs::remove_dir_all(&dir);
-    TornWriteResult {
-        id_written,
-        value_written,
-    }
+fn torn_update_patterns() -> (i64, i64) {
+    (
+        i64::from_le_bytes([0x11u8; 8]),
+        i64::from_le_bytes([0x22u8; 8]),
+    )
+}
+
+/// The final on-disk value after a kill mid-burst of unsynchronized
+/// updates — checked against exactly the two known patterns.
+fn trial_torn_update(binary: &Path) -> Vec<i64> {
+    let (pattern_a, _pattern_b) = torn_update_patterns();
+    let id = Uuid::from_u128(TORN_UPDATE_ID);
+    (0..TRIALS)
+        .map(|trial| {
+            let dir = fresh_temp_dir(&format!("crash_torn_update_{trial}"))
+                .expect("fresh temp dir for torn-update trial");
+            let path = dir.join("orders.mmap");
+            let seed_record = Order {
+                id,
+                customer_id: Uuid::from_u128(1),
+                amount_cents: pattern_a,
+                status: OrderStatus::Pending,
+                created_at_unix_ms: 0,
+                discount_cents: 0,
+            };
+            {
+                let _store = GenericMmapStore::<Order, Status, Amount>::create(
+                    vec![seed_record.clone()],
+                    &path,
+                )
+                .expect("create baseline file");
+            }
+
+            spawn_and_kill_after_delay(
+                binary,
+                &[
+                    "torn-update",
+                    path.to_str().expect("utf8 path"),
+                    &id.as_u128().to_string(),
+                    &TORN_UPDATE_ITERATIONS.to_string(),
+                ],
+                TORN_UPDATE_KILL_DELAY,
+            );
+
+            let store = GenericMmapStore::<Order, Status, Amount>::open(vec![seed_record], &path)
+                .expect("reopen after the crashed update burst");
+            let value = GetById::get(&store, id)
+                .expect("record exists")
+                .amount_cents;
+
+            let _ = std::fs::remove_dir_all(&dir);
+            value
+        })
+        .collect()
 }
 
 fn main() {
@@ -377,16 +473,70 @@ fn main() {
     }
     println!();
 
-    println!("=== Trial 3: torn id/value slot write (killed between the two halves) ===");
+    println!("=== Trial 3: torn slot write, verified against this round's fix ===");
+    println!(
+        "  attempted value: {TORN_WRITE_ATTEMPTED_VALUE}, reseed value: {TORN_WRITE_RESEED_VALUE}"
+    );
     let control = torn_write_control(&binary);
     println!(
-        "  uninterrupted control run: id_written={} value_written={} (expect true/true)",
-        control.id_written, control.value_written
+        "  uninterrupted control run: observed={control} (expect {TORN_WRITE_ATTEMPTED_VALUE}, the attempted value)"
     );
-    for (trial, result) in trial_torn_write(&binary).into_iter().enumerate() {
-        println!(
-            "  trial {trial}: id_written={} value_written={}",
-            result.id_written, result.value_written
-        );
+    println!("  -- killed after ID_WRITTEN (before value+marker) --");
+    for (trial, observed) in trial_torn_write(&binary, "ID_WRITTEN")
+        .into_iter()
+        .enumerate()
+    {
+        let verdict = if observed == TORN_WRITE_RESEED_VALUE {
+            "PASS (correctly excluded, fresh reseed)"
+        } else if observed == TORN_WRITE_ATTEMPTED_VALUE {
+            "FAIL (torn slot wrongly treated as committed)"
+        } else {
+            "FAIL (unexpected value)"
+        };
+        println!("    trial {trial}: observed={observed} — {verdict}");
+    }
+    println!("  -- killed after VALUE_WRITTEN (before marker) --");
+    for (trial, observed) in trial_torn_write(&binary, "VALUE_WRITTEN")
+        .into_iter()
+        .enumerate()
+    {
+        let verdict = if observed == TORN_WRITE_RESEED_VALUE {
+            "PASS (correctly excluded, fresh reseed)"
+        } else if observed == TORN_WRITE_ATTEMPTED_VALUE {
+            "FAIL (torn slot wrongly treated as committed)"
+        } else {
+            "FAIL (unexpected value)"
+        };
+        println!("    trial {trial}: observed={observed} — {verdict}");
+    }
+    println!();
+
+    println!(
+        "=== Trial 4: torn in-place update (checked, not assumed, per this round's diagnosis) ==="
+    );
+    let (pattern_a, pattern_b) = torn_update_patterns();
+    println!("  pattern A={pattern_a}, pattern B={pattern_b}");
+    for (trial, observed) in trial_torn_update(&binary).into_iter().enumerate() {
+        let verdict = if observed == pattern_a || observed == pattern_b {
+            "PASS (exactly one known pattern)"
+        } else {
+            "FAIL (torn value — neither pattern)"
+        };
+        println!("  trial {trial}: observed={observed} — {verdict}");
+    }
+}
+
+/// A tiny RAII guard so `build_torn_write_baseline`'s temp dir gets
+/// cleaned up wherever its returned tuple eventually drops, without
+/// every call site needing to remember to do it manually.
+mod tempdir_guard {
+    use std::path::PathBuf;
+
+    pub struct TempDirGuard(pub PathBuf);
+
+    impl Drop for TempDirGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
     }
 }
