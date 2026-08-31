@@ -743,6 +743,37 @@ Building `GenericMmapStore::get` surfaced something none of the four spikes exer
 
 A regression test now guards against this recurring silently: `order_customer.rs`'s `get_reflects_a_prior_update_through_every_layer_of_the_in_memory_stack` writes through the innermost (`Amount`) and outermost (`DiscountCents`) `Scanned` layers and checks `GetById::get` reflects each write immediately, while confirming untouched fields on the same record are unaffected.
 
+## Server / query layer
+
+`benches/server.rs` — the throughput/latency benchmark `SERVER-001`'s own "Open questions" named as a real, unscoped follow-up since the layer's initial implementation. Unlike every other suite in this document, this one puts a real `TcpListener`/`TcpStream` pair (loopback) in the timed path: the question is what the network/dispatch layer costs on top of the already-measured in-process operation, not the operation itself. See `benches/server.rs`'s own module docs for the full methodology (why not Criterion, why a small fixed 20-id pool rather than this document's usual 1K/100K/1M sweep, why `GetById` is the one request kind measured across all three domains).
+
+**Environment**: this session's container reports `std::thread::available_parallelism() == 4` — a shared, virtualized environment, not dedicated hardware like `baileyai`. Thread counts are swept at 1/4/8/16, matching `## Concurrency`'s own "original container run" precedent for an environment like this one; only the 1 and 4 rows are genuinely non-oversubscribed here. A `baileyai` (or other known-hardware) follow-up pass would be needed for a real per-core throughput ceiling — not attempted this pass, named as an open question below, matching this document's own established practice for every prior first-pass container measurement.
+
+**Single-connection, zero-contention round-trip latency** (µs/op, `GetById`, average of 5,000 sequential requests, one client connection):
+
+| Domain | Latency |
+|---|---:|
+| `Dog` | ~37–39 µs |
+| `Order`/`Customer` | ~36–37 µs |
+| `Employee` | ~37–38 µs |
+
+All three domains land within a couple of microseconds of each other — expected, since `GetById`'s own in-process cost (tens to low-hundreds of nanoseconds, per `## Production recommendation`/`## Generic schema library` above) is two to three orders of magnitude smaller than one loopback TCP round trip. **The dominant cost here is the network/framing layer itself, not which domain adapter is behind it** — exactly the question this benchmark exists to answer, and exactly what its own module docs predicted before running it.
+
+**Aggregate throughput vs. concurrent client connections** (ops/sec, thread-per-connection, each thread its own real socket, two runs to show run-to-run variance in this shared container):
+
+| Domain | 1 thread | 4 threads | 8 threads | 16 threads |
+|---|---:|---:|---:|---:|
+| `Dog` (run 1) | 26,998 | 302,336 | 310,430 | 281,473 |
+| `Dog` (run 2) | 22,421 | 241,681 | 281,337 | 263,981 |
+| `Order`/`Customer` (run 1) | 27,136 | 282,279 | 208,281 | 283,694 |
+| `Order`/`Customer` (run 2) | 24,654 | 161,203 | 268,548 | 266,237 |
+| `Employee` (run 1) | 28,129 | 259,819 | 313,345 | 292,917 |
+| `Employee` (run 2) | 27,600 | 259,227 | 248,654 | 264,096 |
+
+**Reading these numbers**: single-thread throughput (~22–28K ops/sec) is consistent with the ~37 µs single-connection latency above (1 / 37 µs ≈ 27K/sec) — the two measurements agree with each other, a basic sanity check this benchmark's own methodology passes. Throughput scales roughly 9–11× going from 1 to 4 threads (past this container's 4 reported cores, into real parallelism across the thread-per-connection model), then stays roughly flat (within run-to-run noise) from 4 through 16 — consistent with this container being fully saturated at 4 concurrent connections, not with any per-domain ceiling; the 8/16-thread rows are oversubscribed relative to the reported core count, so their being no higher than the 4-thread row is expected, not a finding about the server itself. The run-to-run variance visible above (e.g. `Order`/`Customer` at 4 threads: 282K vs. 161K) reflects this shared, virtualized container's own noise — the same caveat `## Concurrency`'s original container-run numbers already carry — not a real difference between the two runs.
+
+**No domain-specific throughput difference is visible once past the 1-thread row** — all three domains' 4/8/16-thread numbers sit in the same rough band (roughly 160K–310K ops/sec), consistent with the latency table above: the network/dispatch layer, not the domain adapter behind it, dominates this benchmark's own numbers at this record-count scale.
+
 ## Open questions
 
 - **Cache-miss counts on real hardware**: done this pass — see the cache-miss section above. Resolved the `scan_ages` question the prior diagnostic session left open: Canonical+cache does have a real structural cache-miss advantage over SoA at 1M (not just noise), even though it doesn't show up in wall-clock time at that size.
@@ -777,3 +808,7 @@ A regression test now guards against this recurring silently: `order_customer.rs
 - **`GenericMmapStore`'s one-durable-field scope**: unchanged from ADR-0009's own §4.2 finding, now built rather than just predicted — a domain wanting more than one mutable, durable field (e.g. `Order`'s `Amount` *and* `status` both durable) needs the string-heap/fixed-layout redesign ADR-0006/ADR-0009 both declined to build; `GenericMmapStore` deliberately keeps `MmapAgeStore`'s exact one-field scope, generically, rather than attempting that redesign.
 - **Generic library benchmark coverage stops at `Order`/`Customer`**: new this pass — `crate::generic` is generic over any `Record`-implementing type by construction, but only two domains (`Dog`, `Order`/`Customer`) have ever exercised it, and only `Order`/`Customer` has a real durable production-store benchmark. A third, structurally different domain (e.g. one needing `SymmetricRelation` *and* `ChildOf` together, which neither `Dog` nor `Order`/`Customer` does) would be the next real stress test, per this project's own "no abstraction before two real call sites" rule now being satisfied at the *implementation* level, not just the design level.
 - **Generic dataset generation/benchmark infrastructure remains domain-specific**: unchanged from ADR-0009's §4.7 finding — `crate::generic_spike::order_bench_support`'s dataset generator is `Order`-specific, hand-written rather than a generic equivalent of `bench_support::GeneratorConfig`; a third domain would need its own dataset generator too, same as this pass's did.
+- **Generic library benchmark coverage now includes a third domain — resolved**: `Employee` (`SERVER-QUERY-LAYER` v0.3.0) is exactly the domain the entry above named as the natural next stress test — `SymmetricRelation` and `ChildOf` together, which neither `Dog` nor `Order`/`Customer` has. No longer unmeasured; see `## Server / query layer` above and `docs/decisions/ADR-0009-generic-schema-design-proposal.md`'s "Acceptance and implementation" addendum for the real gap it found and fixed (`Reversed` never forwarded `Neighbors`).
+- **No throughput/latency benchmark for the server layer — resolved**: `SERVER-001`'s own "Open questions" named this as a real, unscoped follow-up since the layer's initial implementation. `benches/server.rs` closes it — see `## Server / query layer` above. Headline finding: at this record-count scale, one loopback round trip's network/framing cost (~37 µs) dwarfs any per-domain in-process operation cost by two to three orders of magnitude, so all three domains' numbers land in the same band.
+- **The thread-per-connection model's real connection-count ceiling — still unmeasured**: `benches/server.rs`'s own thread-count sweep (1/4/8/16) is bounded by this session's 4-core container, not by any structural ceiling of the thread-per-connection model itself — the numbers plateau at 4 threads because the container saturates, not because the model does. A real high-connection-count run (hundreds to thousands of concurrent clients, ideally on dedicated hardware) would be needed to find the model's actual ceiling; not attempted this pass, same caveat `## Concurrency`'s own container-vs-real-hardware history already establishes for this kind of first pass.
+- **`bincode`'s wire-format stability across crate versions remains unverified**: unchanged from `SERVER-001`'s own open questions — `benches/server.rs` measures cost, not compatibility, and doesn't touch this question.

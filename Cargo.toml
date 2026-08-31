@@ -69,6 +69,15 @@ name = "concurrency"
 harness = false
 required-features = ["research"]
 
+# Needs both: real sockets + ConnectionStore/serve (server) against all
+# three domains, two of which (Order/Customer, Employee) are research-gated
+# reference material — same pairing tests/server_order_integration.rs and
+# tests/server_employee_integration.rs already require.
+[[bench]]
+name = "server"
+harness = false
+required-features = ["server", "research"]
+
 # Every integration test below reaches into the same "internal/research"
 # bucket (a cross-backend comparison, a durability/concurrency variant, or
 # the `Order`/`Customer` reference domain) — same `required-features`

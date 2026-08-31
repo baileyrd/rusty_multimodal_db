@@ -120,6 +120,10 @@ addressing** — see `src/server`'s own module docs and
 using it. Do not expose a server built from this module beyond a trusted,
 localhost/development network.
 
+```sh
+cargo bench --features server,research --bench server   # real-socket round-trip latency + thread-per-connection throughput sweep, all three domains
+```
+
 ## Running the suite
 
 ```sh

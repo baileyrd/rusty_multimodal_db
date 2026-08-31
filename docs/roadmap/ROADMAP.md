@@ -22,7 +22,7 @@ Status vocabulary: `Proposed`, `Draft`, `Accepted`, `In Progress`,
 | `GENERIC-SCHEMA-DESIGN` | A generic record/schema/query abstraction (`Record`/`IndexedField`/`ScannableField`/`SymmetricRelation`/`ChildOf` traits, composable store wrapper layers) validated against `Dog` and a second, structurally different domain (`Order`/`Customer` — directed relation, currency-like field, enum categorical field, timestamp field); ADR-0009 (**Accepted** — see `GENERIC-SCHEMA-LIBRARY` below); `docs/design/GENERIC-SCHEMA-DESIGN.md` | `PRODUCTION-DEFAULT` | — (no spec written for the design itself; implementation tracked by `STORAGE-012`) | Four validation spikes (`src/generic_spike/`) resolved every risk this design's §4 named, then `GENERIC-SCHEMA-LIBRARY` promoted it into a real library | Accepted/Implemented | this PR |
 | `GENERIC-SCHEMA-LIBRARY` | Promotes `GENERIC-SCHEMA-DESIGN` into `crate::generic`: promoted traits/query/store (unchanged from four validation spikes), `Order`/`Customer` as the real reference implementation, `GenericMmapStore`/`GenericProductionStore` (generic mmap durability + `RwLock` concurrency — new beyond every spike), a flagship durability+concurrency integration test, a benchmark suite confirming no regression from spike to real code; ADR-0009 moved to Accepted; `STORAGE-012` | `GENERIC-SCHEMA-DESIGN` | `STORAGE-012` | `cargo test` green including the new flagship integration test (run 5× to rule out flakiness); `cargo bench --bench generic_production` completes and is reported in `RESULTS.md` alongside the spike rounds' numbers; no `src/production.rs`/`src/store/**`/`src/durability/**`/`src/concurrency/**` changes | Implemented | this PR |
 | `SERVER-QUERY-LAYER-DESIGN` | A network server/query layer design in front of `ProductionStore`/`GenericProductionStore`: a `Request`/`Response` protocol (`GetById`/`FilterEq`/`ScanField`/`UpdateField`/`Parent`/`Children`/`Neighbors`), length-prefixed `bincode` framing, thread-per-connection dispatch reusing the existing `RwLock`-shared-store concurrency pattern; ADR-0010 (**Accepted** — owner approved as proposed); `docs/design/SERVER-QUERY-LAYER-DESIGN.md`; explicitly excludes authentication, transport encryption, transactions, and a query language | `GENERIC-SCHEMA-LIBRARY`, `PRODUCTION-DEFAULT` | — (no spec written for the design itself; a `SERVER-001` spec is registered by the implementation unit that follows, matching `GENERIC-SCHEMA-DESIGN`'s own precedent) | Request/response/dispatch shapes compiled in a standalone scratch probe (types only, not executed); owner reviewed and accepted the design and ADR-0010 without requesting changes | Accepted | this PR |
-| `SERVER-QUERY-LAYER` | The real implementation of `SERVER-QUERY-LAYER-DESIGN`: `src/server/**` (`server` Cargo feature, off by default), `Dog`/`Order`-`Customer`/`Employee` domain adapters, a minimal server binary (`dog_server`), real end-to-end tests over a genuine socket including a flagship concurrent-client stress test, schema discovery (`DescribeSchema`/`ADR-0011`, v0.2.0), and a third validation domain (`Employee`, v0.3.0 — the first with both `Parent`/`Children` and `Neighbors` real, which found and fixed a real `Reversed`/`Neighbors`-forwarding gap in `crate::generic`); `SERVER-001` | `SERVER-QUERY-LAYER-DESIGN` | `SERVER-001` | `cargo test --features server` and `cargo test --features server,research` both green, including the flagship stress test and all three schema-driven tests; `cargo test`/`cargo test --all-features` unaffected (the `server` module adds no default-build surface); `cargo fmt`/`clippy`/`check` clean; no `src/production.rs`/`src/store/**`/`src/durability/**`/`src/concurrency/**` changes (the one exception, `src/generic/{store,production}.rs`'s `Neighbors`-forwarding completion, is named in `SERVER-001`'s own Non-goals) | Implemented | PR #35, #37, #39 |
+| `SERVER-QUERY-LAYER` | The real implementation of `SERVER-QUERY-LAYER-DESIGN`: `src/server/**` (`server` Cargo feature, off by default), `Dog`/`Order`-`Customer`/`Employee` domain adapters, a minimal server binary (`dog_server`), real end-to-end tests over a genuine socket including a flagship concurrent-client stress test, schema discovery (`DescribeSchema`/`ADR-0011`, v0.2.0), a third validation domain (`Employee`, v0.3.0 — the first with both `Parent`/`Children` and `Neighbors` real, which found and fixed a real `Reversed`/`Neighbors`-forwarding gap in `crate::generic`), and a throughput/latency benchmark (`benches/server.rs`, v0.4.0); `SERVER-001` | `SERVER-QUERY-LAYER-DESIGN` | `SERVER-001` | `cargo test --features server` and `cargo test --features server,research` both green, including the flagship stress test and all three schema-driven tests; `cargo test`/`cargo test --all-features` unaffected (the `server` module adds no default-build surface); `cargo fmt`/`clippy`/`check` clean; no `src/production.rs`/`src/store/**`/`src/durability/**`/`src/concurrency/**` changes (the one exception, `src/generic/{store,production}.rs`'s `Neighbors`-forwarding completion, is named in `SERVER-001`'s own Non-goals); `cargo bench --features server,research --bench server` completes, numbers in `RESULTS.md` | Implemented | PR #35, #37, #39, this PR |
 
 ## Sequencing notes
 
@@ -195,6 +195,28 @@ request (`Parent`/`Children`/`Neighbors`) is a real operation, none
 `Unsupported` — verified both at the `crate::generic` layer (a durable
 flush-plus-reopen test) and over the real wire protocol
 (`tests/server_employee_integration.rs`).
+
+A third follow-up round closed the throughput/latency gap `SERVER-001`'s
+own "Open questions" had named since its v0.1.0 acceptance criteria —
+the "2" in the owner's "3 then 2" ("this domain, then a throughput
+benchmark next"). `benches/server.rs` (`SERVER-001` v0.4.0) is a custom,
+non-Criterion harness matching `benches/concurrency.rs`'s own shape (a
+`Barrier`-synchronized thread sweep, aggregate ops/sec from the slowest
+thread), the first benchmark in this crate to put a real
+`TcpListener`/`TcpStream` pair in its timed path rather than measuring
+`dispatch` in-process or a real socket only for pass/fail correctness.
+Measures single-connection `GetById` round-trip latency and aggregate
+throughput under a 1/4/8/16-thread sweep, across all three domains.
+Headline finding: at this record-count scale, the network/framing
+layer's own cost (~37 µs per round trip, this session's container) so
+thoroughly dominates any per-domain in-process operation cost (tens to
+low-hundreds of nanoseconds, per `RESULTS.md`'s existing sections) that
+all three domains' numbers land in the same band — see `RESULTS.md`'s
+`## Server / query layer` section for the full account and its own
+caveats (this session's 4-core container bounds the thread-count sweep;
+a `baileyai` follow-up would be needed for a real per-core ceiling,
+matching `## Concurrency`'s own established container-then-real-hardware
+precedent).
 
 ## Out of scope for this roadmap (see architecture doc "where this can go
 next")
