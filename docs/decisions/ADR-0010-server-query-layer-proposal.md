@@ -1,7 +1,7 @@
 # ADR-0010: Add a network server/query layer in front of `ProductionStore`/`GenericProductionStore`
 
-- Status: **Proposed**
-- Date: 2026-08-31
+- Status: **Accepted** (promoted from Proposed on 2026-08-31 — the owner approved the design as proposed; no changes requested)
+- Date: 2026-08-31 (proposed and accepted same day)
 - Deciders: baileyrd
 - Related: `docs/design/SERVER-QUERY-LAYER-DESIGN.md` (the full design
   document this ADR summarizes), `docs/FUTURE-GROWTH.md` ("Path to a
@@ -85,9 +85,9 @@ runtime, and field-addressing choices). Summarized:
    sub-protocol (deferred — real, separate scope) vs. small integer tags
    fixed per domain at server start (**chosen** for v1).
 
-## Decision (proposed, not accepted)
+## Decision
 
-- `docs/design/SERVER-QUERY-LAYER-DESIGN.md` records the full proposed
+- `docs/design/SERVER-QUERY-LAYER-DESIGN.md` records the full accepted
   design: a `Request`/`Response` enum pair covering
   `GetById`/`FilterEq`/`ScanField`/`UpdateField`/`Parent`/`Children`/
   `Neighbors`, length-prefixed `bincode` framing over
@@ -96,16 +96,21 @@ runtime, and field-addressing choices). Summarized:
 - No new dependency is introduced by this design; `bincode` (already
   present) is reused. `tokio`, an HTTP framework, and a gRPC toolchain are
   named and explicitly not added.
-- No existing source file is modified, and no server implementation is
-  authorized by this ADR — same posture `ADR-0009`'s original proposal
-  took.
+- **Acceptance of this ADR authorizes the design, not implementation
+  code.** No existing source file is modified by this ADR itself. Per this
+  ADR's own "Validation and revisit triggers" below, the next unit
+  registers a `SERVER-001` specification and a real implementation packet
+  (per `delivery-loop.md`'s "Plan" step) before any server code is
+  written — matching how `STORAGE-012` followed `GENERIC-SCHEMA-DESIGN`'s
+  own acceptance as a separate step, not the same commit.
 - Authentication, authorization, transport encryption, and any query
-  language beyond fixed field-tag addressing are named as explicit
-  non-goals of this proposal, not silently deferred — see the design
-  document's "Non-goals" and "Security, privacy, and compatibility"
-  sections. **This proposal does not authorize deploying a server binary
+  language beyond fixed field-tag addressing remain explicit non-goals of
+  the *accepted* design, not silently deferred — see the design document's
+  "Non-goals" and "Security, privacy, and compatibility" sections.
+  **Accepting this ADR does not authorize deploying a server binary
   outside a trusted, localhost/development context** — that would require
-  at minimum the authentication/encryption work this ADR explicitly defers.
+  at minimum the authentication/encryption work this ADR explicitly defers,
+  and would be its own decision when it's proposed.
 
 ## Consequences
 

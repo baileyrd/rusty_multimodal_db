@@ -1,6 +1,10 @@
-# Server/Query Layer Design (Proposed)
+# Server/Query Layer Design (Accepted)
 
-- Status: **Proposed** — no implementation authorized. See
+- Status: **Accepted** (promoted from Proposed on 2026-08-31 — the owner
+  approved the design as proposed, no changes requested). Acceptance
+  authorizes the design; implementation still requires its own unit
+  (registering `SERVER-001` and a planning packet) before any server code
+  is written — see ADR-0010's "Decision" section. See
   `ADR-0010-server-query-layer-proposal.md` for the decision record this
   document backs.
 - Date: 2026-08-31
