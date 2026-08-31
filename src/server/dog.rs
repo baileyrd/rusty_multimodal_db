@@ -4,7 +4,10 @@
 //! `Children` are unsupported here — see [`super::order`] for the
 //! complementary case).
 
-use super::protocol::{ErrorCode, FieldRef, ParentLookup, RecordId, ScanValue};
+use super::protocol::{
+    DomainSchema, ErrorCode, FieldCapabilities, FieldDescriptor, FieldRef, ParentLookup, RecordId,
+    RelationCapabilities, ScanValue, ValueKind,
+};
 use super::ConnectionStore;
 use crate::concurrency::{ConcurrencyError, ConcurrentStore};
 use crate::store::{DogStore, StoreError};
@@ -99,6 +102,37 @@ impl<S: DogStore + ConcurrentStore + Send + Sync> ConnectionStore for DogConnect
     fn neighbors(&self, id: RecordId) -> Result<Vec<RecordId>, ErrorCode> {
         Ok(DogStore::neighbors(&self.store, id))
     }
+
+    fn describe(&self) -> DomainSchema {
+        DomainSchema {
+            fields: vec![
+                FieldDescriptor {
+                    tag: FIELD_BREED,
+                    name: "breed".into(),
+                    value_kind: ValueKind::Str,
+                    capabilities: FieldCapabilities {
+                        filter_eq: false,
+                        scan: false,
+                        update: false,
+                    },
+                },
+                FieldDescriptor {
+                    tag: FIELD_AGE,
+                    name: "age".into(),
+                    value_kind: ValueKind::U32,
+                    capabilities: FieldCapabilities {
+                        filter_eq: false,
+                        scan: true,
+                        update: true,
+                    },
+                },
+            ],
+            relations: RelationCapabilities {
+                parent_children: false,
+                neighbors: true,
+            },
+        }
+    }
 }
 
 #[cfg(test)]
@@ -163,6 +197,23 @@ mod tests {
             adapter.neighbors(Uuid::from_u128(1)),
             Ok(vec![Uuid::from_u128(2)])
         );
+    }
+
+    #[test]
+    fn describe_names_both_fields_and_reports_neighbors_only() {
+        let adapter = sample_adapter();
+        let schema = adapter.describe();
+        assert_eq!(schema.fields.len(), 2);
+        assert!(schema.fields.iter().any(|f| f.name == "breed"
+            && f.value_kind == ValueKind::Str
+            && !f.capabilities.scan
+            && !f.capabilities.update));
+        assert!(schema.fields.iter().any(|f| f.name == "age"
+            && f.value_kind == ValueKind::U32
+            && f.capabilities.scan
+            && f.capabilities.update));
+        assert!(schema.relations.neighbors);
+        assert!(!schema.relations.parent_children);
     }
 
     #[test]

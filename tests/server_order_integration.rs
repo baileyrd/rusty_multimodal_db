@@ -186,3 +186,59 @@ fn a_real_client_gets_filters_scans_updates_parent_and_children_over_the_wire() 
         other => panic!("expected Neighbors on Order/Customer to report an error, got {other:?}"),
     }
 }
+
+/// The `Order`/`Customer` half of the schema-driven round trip (ADR-0011)
+/// — see `tests/server_dog_integration.rs`'s identical-purpose test for
+/// why this proves discovery is actually usable, not just that
+/// `DescribeSchema` returns static data. Discovers the "status" field by
+/// name, then uses its tag to filter — the operation `Order`/`Customer`
+/// supports that `Dog` doesn't (`FilterEq`, not `Neighbors`).
+#[test]
+fn a_schema_driven_client_discovers_and_uses_the_status_field() {
+    let addr = start_server();
+    let mut client = connect(addr);
+
+    let schema = match roundtrip(&mut client, Request::DescribeSchema) {
+        Response::Schema(schema) => schema,
+        other => panic!("expected Response::Schema, got {other:?}"),
+    };
+    assert!(schema.relations.parent_children);
+    assert!(!schema.relations.neighbors);
+
+    let status_field = schema
+        .fields
+        .iter()
+        .find(|f| f.name == "status")
+        .expect("DescribeSchema should name a \"status\" field");
+    assert!(status_field.capabilities.filter_eq);
+
+    // Shipped == 1, per server::order's own status_to_u32 mapping — the
+    // client doesn't need to know that encoding beyond "this is the value
+    // GetById returned for order 1's status field."
+    let order_1_status = match roundtrip(
+        &mut client,
+        Request::GetById {
+            id: Uuid::from_u128(1),
+        },
+    ) {
+        Response::Record { fields, .. } => fields
+            .into_iter()
+            .find(|(tag, _)| *tag == status_field.tag)
+            .map(|(_, v)| v)
+            .expect("GetById should include the status field"),
+        other => panic!("expected Response::Record, got {other:?}"),
+    };
+
+    assert_eq!(
+        roundtrip(
+            &mut client,
+            Request::FilterEq {
+                field: status_field.tag,
+                value: order_1_status
+            }
+        ),
+        Response::RecordList {
+            records: vec![Uuid::from_u128(1)]
+        }
+    );
+}

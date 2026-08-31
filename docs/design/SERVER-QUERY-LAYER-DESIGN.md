@@ -283,12 +283,18 @@ document itself; implementation tracked by `STORAGE-012`, here by
 - The thread-per-connection model's real connection-count ceiling is
   unmeasured (no benchmark exists yet) — named as an accepted, deliberate
   limitation of choosing it over `tokio`, not a proven-acceptable one.
-- Whether a schema-description RPC (enabling string field names and
-  non-Rust clients) is ever worth building is explicitly deferred to a
-  future decision, not ruled out permanently.
+- **Resolved** — a schema-description RPC (`DescribeSchema`/`Response::Schema`)
+  was built; see ADR-0011 (Accepted) and `SERVER-001` v0.2.0. Field
+  *names* are now discoverable at runtime; field *tags* remain the wire
+  addressing scheme. Non-Rust clients remain unaddressed (schema
+  discovery doesn't by itself solve serialization-format
+  interoperability, only field naming/capability discovery) — still a
+  real, separate, unscoped question if it's ever pursued.
 
 ## Change history
 
 - 2026-08-31: Initial proposal, in response to the owner selecting
   "server/query layer" as the next direction from `docs/FUTURE-GROWTH.md`'s
   two named options.
+- 2026-08-31: ADR-0011 (Accepted) added schema discovery — see this
+  document's "Open questions" above and `SERVER-001` v0.2.0.

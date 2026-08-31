@@ -99,6 +99,13 @@ cargo test --features server,research       # + Order/Customer, the second valid
 cargo run --features server --bin dog_server   # a minimal local server, Dog domain
 ```
 
+A client that doesn't know a domain at compile time can send
+`Request::DescribeSchema` first — the `Response::Schema` it gets back
+names every field, its wire type, and which operations it supports (see
+`ADR-0011`), so it can drive `GetById`/`FilterEq`/`ScanField`/
+`UpdateField`/`Parent`/`Children`/`Neighbors` from discovered field tags
+instead of hardcoded ones.
+
 **No authentication, no authorization, no transport encryption, no
 transaction semantics, no query language beyond fixed field-tag
 addressing** — see `src/server`'s own module docs and
@@ -147,6 +154,7 @@ at the right file:
   - `ADR-0008` — `ProductionStore` as the production default
   - `ADR-0009` — the generic schema design proposal (now Accepted)
   - `ADR-0010` — the server/query layer proposal (now Accepted)
+  - `ADR-0011` — schema discovery for the server/query layer (now Accepted)
 - **`docs/specifications/SPEC-REGISTRY.md`** + **`docs/specifications/storage/`**/**`docs/specifications/server/`**
   — the `STORAGE-0xx`/`SERVER-0xx` requirement/spec tree each round implemented against.
 - **`docs/roadmap/ROADMAP.md`** — status vocabulary and what's next.

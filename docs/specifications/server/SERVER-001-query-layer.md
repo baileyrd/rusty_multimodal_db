@@ -1,6 +1,6 @@
 # SERVER-001 — Network server/query layer: `Request`/`Response` protocol in front of `ProductionStore`/`GenericProductionStore`
 
-- Version: 0.1.0
+- Version: 0.2.0 (schema discovery added, ADR-0011 — see "Change history")
 - Status: Accepted
 - Owners: baileyrd
 - Depends on: `STORAGE-011` (`ProductionStore`), `STORAGE-012` (`GenericProductionStore`)
@@ -39,6 +39,8 @@
 - `SERVER-001-FR-007`: **A minimal server binary** (`src/bin/dog_server.rs`, `required-features = ["server"]`) — a real, runnable `Dog`-domain server seeded from a small hand-written sample dataset (not `generator`, which is research-gated), so it builds under `server` alone.
 - `SERVER-001-FR-008`: **Real end-to-end test coverage**, not just `dispatch`'s in-process logic — `tests/server_dog_integration.rs` and `tests/server_order_integration.rs` drive a real `TcpListener`/`TcpStream` pair (a background thread with a real socket, not a genuinely separate OS process — see those files' own module docs on what that does and doesn't prove) through `GetById`/`FilterEq`/`ScanField`/`UpdateField`/`Parent`/`Children`/`Neighbors`, including the domain-appropriate `Unsupported` cases.
 - `SERVER-001-FR-009`: **A flagship concurrent-client stress test**, matching this crate's established rigor — `tests/server_dog_integration.rs`'s `concurrent_clients_over_the_wire_match_a_sequential_replay` runs 8 real client connections × 200 interleaved `GetById`/`UpdateField` requests each against a small contended id pool, verified via sequential-replay linearizability against a fresh in-memory reference (the same pattern `run_concurrency_stress_test`/`production_integration.rs` use), with the write-log append made atomic with the request's round trip — the same fix (and the same false-positive failure mode) `run_concurrency_stress_test`'s own doc comment already documents.
+- `SERVER-001-FR-010` (v0.2.0, ADR-0011): **Schema discovery** — `Request::DescribeSchema`/`Response::Schema(DomainSchema)`; `ConnectionStore::describe(&self) -> DomainSchema` (infallible, no store access needed). Both domain adapters implement it, reporting every named field's `ValueKind` and per-operation `FieldCapabilities` (`filter_eq`/`scan`/`update`) honestly — including fields that exist but support none of the three (`Order`'s `created_at_unix_ms`/`discount_cents`) — plus `RelationCapabilities` (`parent_children`/`neighbors`). Field *tags* remain the wire addressing scheme; this adds runtime discovery of what a compile-time client already knows, not a new addressing scheme.
+- `SERVER-001-FR-011` (v0.2.0, ADR-0011): **Schema discovery is genuinely usable, not just descriptive** — `tests/server_dog_integration.rs`'s `a_schema_driven_client_discovers_and_uses_the_age_field` and `tests/server_order_integration.rs`'s `a_schema_driven_client_discovers_and_uses_the_status_field` each drive a real client that starts with zero compile-time field-tag knowledge, calls `DescribeSchema`, finds a field by name, and completes a real `UpdateField`/`FilterEq` using only the discovered tag.
 
 ## Architecture and interfaces
 
@@ -63,8 +65,8 @@ Identical posture to ADR-0010's own "Security, privacy, and compatibility": no a
 
 ## Acceptance criteria
 
-- `cargo test --features server` passes (`Dog` domain: unit tests in `server::{dog,framing,protocol}` + `server::tests`, plus `tests/server_dog_integration.rs`'s three tests including the concurrent-client stress test).
-- `cargo test --features server,research` additionally passes `server::order::tests::*` and `tests/server_order_integration.rs`.
+- `cargo test --features server` passes (`Dog` domain: unit tests in `server::{dog,framing,protocol}` + `server::tests`, plus `tests/server_dog_integration.rs`'s four tests including the concurrent-client stress test and the schema-driven test).
+- `cargo test --features server,research` additionally passes `server::order::tests::*` and `tests/server_order_integration.rs`'s two tests (the domain round trip and its own schema-driven test).
 - `cargo test --all-features`/`cargo test` (default) both still pass unchanged elsewhere — the `server` module adds no default-build surface.
 - `cargo fmt --all -- --check` / `cargo clippy --all-targets --all-features -- -D warnings` / `cargo check --all-targets --all-features` all clean.
 - No `src/production.rs`, `src/generic/**`, `src/store/**`, `src/durability/**`, or `src/concurrency/**` changes — verified by diff.
@@ -77,7 +79,12 @@ Identical posture to ADR-0010's own "Security, privacy, and compatibility": no a
 
 ## Traceability
 
-Implements: the server/query-layer capability ADR-0010 (Accepted) and `docs/design/SERVER-QUERY-LAYER-DESIGN.md` (Accepted) proposed. No prior spec superseded.
+Implements: the server/query-layer capability ADR-0010 (Accepted) and `docs/design/SERVER-QUERY-LAYER-DESIGN.md` (Accepted) proposed; v0.2.0's schema discovery implements ADR-0011 (Accepted). No prior spec superseded.
+
+## Change history
+
+- 0.1.0: Initial implementation — `Request`/`Response` protocol, framing, thread-per-connection dispatch, both domain adapters, the flagship stress test.
+- 0.2.0 (ADR-0011): Schema discovery — `DescribeSchema`/`Response::Schema(DomainSchema)`, `ConnectionStore::describe`, both adapters' shapes, two schema-driven integration tests (FR-010, FR-011).
 
 ## Open questions
 

@@ -27,6 +27,19 @@
 //!   named enum — clearer for the two error shapes this implementation
 //!   actually produces (`UnknownField`, `Unsupported`), plus `Malformed`
 //!   for a value that doesn't match its field's real type.
+//!
+//! # Schema discovery (`DescribeSchema`/`Response::Schema`), ADR-0011
+//!
+//! The original design deferred string field names/schema discovery,
+//! choosing compile-time-fixed integer tags for v1. ADR-0011 revisits
+//! that: `Request::DescribeSchema` (no arguments — one server instance
+//! serves one domain) returns a [`DomainSchema`] naming every field this
+//! domain adapter exposes, its wire value type, and which operations it
+//! supports, plus whether the domain has a directed (`Parent`/`Children`)
+//! or symmetric (`Neighbors`) relation. Field *tags* are unchanged and
+//! still required for `FilterEq`/`ScanField`/`UpdateField` — this adds a
+//! runtime way to discover what a compile-time client already knows, not
+//! a new addressing scheme.
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -67,6 +80,58 @@ pub enum ParentLookup {
     NoParent,
     /// `id` is not a real record at all.
     ChildNotFound,
+}
+
+/// A field's wire value type — mirrors [`ScanValue`]'s variants without
+/// carrying a value, for [`FieldDescriptor`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ValueKind {
+    U32,
+    I64,
+    Bool,
+    Str,
+}
+
+/// Which operations a field supports over this protocol — not every
+/// `ScannableField`/`IndexedField` in-process is necessarily reachable
+/// the same way over the wire (e.g. `Order::created_at_unix_ms` is
+/// `ScannableField` in-memory but was never part of the durable
+/// production stack this server wraps, so it's read-only here).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FieldCapabilities {
+    pub filter_eq: bool,
+    pub scan: bool,
+    pub update: bool,
+}
+
+/// One field a domain adapter exposes, named and typed for a client that
+/// doesn't know the domain at compile time.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FieldDescriptor {
+    pub tag: FieldRef,
+    pub name: String,
+    pub value_kind: ValueKind,
+    pub capabilities: FieldCapabilities,
+}
+
+/// Which relation kinds a domain supports — at most one of the two is
+/// ever true for either domain this crate serves today (see
+/// `dog.rs`/`order.rs`'s own module docs on why each has the relation
+/// kind it does, not both).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RelationCapabilities {
+    pub parent_children: bool,
+    pub neighbors: bool,
+}
+
+/// The full answer to `Request::DescribeSchema` — everything a client
+/// needs to drive `GetById`/`FilterEq`/`ScanField`/`UpdateField`/
+/// `Parent`/`Children`/`Neighbors` against this domain without having
+/// compiled against it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DomainSchema {
+    pub fields: Vec<FieldDescriptor>,
+    pub relations: RelationCapabilities,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -115,6 +180,9 @@ pub enum Request {
     Neighbors {
         id: RecordId,
     },
+    /// Discover this server's domain schema at runtime — see this
+    /// module's own "Schema discovery" doc section, ADR-0011.
+    DescribeSchema,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -133,6 +201,8 @@ pub enum Response {
     Id {
         id: RecordId,
     },
+    /// Answers `Request::DescribeSchema`.
+    Schema(DomainSchema),
     NotFound,
     NoParent,
     Ok,
