@@ -151,6 +151,70 @@ fn a_real_client_gets_filters_scans_and_updates_over_the_wire() {
     }
 }
 
+/// A genuinely schema-driven round trip (ADR-0011): the client starts with
+/// zero compile-time knowledge of `Dog`'s field tags — it discovers them
+/// from `DescribeSchema`'s field *names*, then uses the discovered tag to
+/// drive `UpdateField`/`GetById`. Not just checking `Response::Schema`'s
+/// static content (that's `server::dog::tests::describe_names_both_fields_and_reports_neighbors_only`)
+/// — this proves discovery is actually usable to complete a real request.
+#[test]
+fn a_schema_driven_client_discovers_and_uses_the_age_field() {
+    let addr = start_server();
+    let mut client = connect(addr);
+
+    let schema = match roundtrip(&mut client, Request::DescribeSchema) {
+        Response::Schema(schema) => schema,
+        other => panic!("expected Response::Schema, got {other:?}"),
+    };
+    assert!(schema.relations.neighbors);
+    assert!(!schema.relations.parent_children);
+
+    let age_field = schema
+        .fields
+        .iter()
+        .find(|f| f.name == "age")
+        .expect("DescribeSchema should name an \"age\" field");
+    assert!(age_field.capabilities.scan && age_field.capabilities.update);
+
+    assert_eq!(
+        roundtrip(
+            &mut client,
+            Request::UpdateField {
+                id: Uuid::from_u128(1),
+                field: age_field.tag,
+                value: ScanValue::U32(11),
+            }
+        ),
+        Response::Ok
+    );
+
+    let breed_field = schema
+        .fields
+        .iter()
+        .find(|f| f.name == "breed")
+        .expect("DescribeSchema should name a \"breed\" field");
+    match roundtrip(
+        &mut client,
+        Request::GetById {
+            id: Uuid::from_u128(1),
+        },
+    ) {
+        Response::Record { fields, .. } => {
+            let age_value = fields
+                .iter()
+                .find(|(tag, _)| *tag == age_field.tag)
+                .map(|(_, v)| v.clone());
+            assert_eq!(age_value, Some(ScanValue::U32(11)));
+            let breed_value = fields
+                .iter()
+                .find(|(tag, _)| *tag == breed_field.tag)
+                .map(|(_, v)| v.clone());
+            assert_eq!(breed_value, Some(ScanValue::Str("labrador".into())));
+        }
+        other => panic!("expected Response::Record, got {other:?}"),
+    }
+}
+
 #[test]
 fn a_second_independent_connection_shares_the_same_store_state() {
     let addr = start_server();

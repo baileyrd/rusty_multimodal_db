@@ -29,7 +29,10 @@
 //! relation (`docs/design/GENERIC-SCHEMA-DESIGN.md` §4.3), not a
 //! convenience this adapter invents.
 
-use super::protocol::{ErrorCode, FieldRef, ParentLookup, RecordId, ScanValue};
+use super::protocol::{
+    DomainSchema, ErrorCode, FieldCapabilities, FieldDescriptor, FieldRef, ParentLookup, RecordId,
+    RelationCapabilities, ScanValue, ValueKind,
+};
 use super::ConnectionStore;
 use crate::generic::order_customer::{
     Amount, BelongsToCustomer, Customer, Order, OrderProductionStack, OrderStatus, Status,
@@ -150,6 +153,49 @@ impl ConnectionStore for OrderConnectionStore {
         // Order/Customer has no SymmetricRelation.
         Err(ErrorCode::Unsupported)
     }
+
+    fn describe(&self) -> DomainSchema {
+        let read_only = |value_kind: ValueKind, name: &str, tag: FieldRef| FieldDescriptor {
+            tag,
+            name: name.into(),
+            value_kind,
+            capabilities: FieldCapabilities {
+                filter_eq: false,
+                scan: false,
+                update: false,
+            },
+        };
+        DomainSchema {
+            fields: vec![
+                FieldDescriptor {
+                    tag: FIELD_AMOUNT,
+                    name: "amount_cents".into(),
+                    value_kind: ValueKind::I64,
+                    capabilities: FieldCapabilities {
+                        filter_eq: false,
+                        scan: true,
+                        update: true,
+                    },
+                },
+                FieldDescriptor {
+                    tag: FIELD_STATUS,
+                    name: "status".into(),
+                    value_kind: ValueKind::U32,
+                    capabilities: FieldCapabilities {
+                        filter_eq: true,
+                        scan: false,
+                        update: false,
+                    },
+                },
+                read_only(ValueKind::I64, "created_at_unix_ms", FIELD_CREATED_AT),
+                read_only(ValueKind::I64, "discount_cents", FIELD_DISCOUNT),
+            ],
+            relations: RelationCapabilities {
+                parent_children: true,
+                neighbors: false,
+            },
+        }
+    }
 }
 
 #[cfg(test)]
@@ -255,6 +301,43 @@ mod tests {
         let mut children = adapter.children(Uuid::from_u128(100)).unwrap();
         children.sort();
         assert_eq!(children, vec![Uuid::from_u128(1), Uuid::from_u128(2)]);
+    }
+
+    #[test]
+    fn describe_names_all_four_fields_and_reports_parent_children_only() {
+        let adapter = sample_adapter();
+        let schema = adapter.describe();
+        assert_eq!(schema.fields.len(), 4);
+        let amount = schema
+            .fields
+            .iter()
+            .find(|f| f.name == "amount_cents")
+            .unwrap();
+        assert!(
+            amount.capabilities.scan
+                && amount.capabilities.update
+                && !amount.capabilities.filter_eq
+        );
+        let status = schema.fields.iter().find(|f| f.name == "status").unwrap();
+        assert!(
+            status.capabilities.filter_eq
+                && !status.capabilities.scan
+                && !status.capabilities.update
+        );
+        for read_only_name in ["created_at_unix_ms", "discount_cents"] {
+            let field = schema
+                .fields
+                .iter()
+                .find(|f| f.name == read_only_name)
+                .unwrap();
+            assert!(
+                !field.capabilities.filter_eq
+                    && !field.capabilities.scan
+                    && !field.capabilities.update
+            );
+        }
+        assert!(schema.relations.parent_children);
+        assert!(!schema.relations.neighbors);
     }
 
     #[test]

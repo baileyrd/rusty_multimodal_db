@@ -33,7 +33,9 @@ pub mod framing;
 pub mod order;
 pub mod protocol;
 
-use protocol::{ErrorCode, FieldRef, ParentLookup, RecordId, Request, Response, ScanValue};
+use protocol::{
+    DomainSchema, ErrorCode, FieldRef, ParentLookup, RecordId, Request, Response, ScanValue,
+};
 use std::io::{BufReader, BufWriter};
 use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
@@ -90,6 +92,12 @@ pub trait ConnectionStore: Send + Sync {
     /// `Err(ErrorCode::Unsupported)` for a domain with no symmetric
     /// relation at all (e.g. `Order`/`Customer`).
     fn neighbors(&self, id: RecordId) -> Result<Vec<RecordId>, ErrorCode>;
+
+    /// This domain's schema, for a client that doesn't know it at compile
+    /// time — ADR-0011. Infallible: every `ConnectionStore` implementor
+    /// knows its own field/relation shape unconditionally, no store access
+    /// needed.
+    fn describe(&self) -> DomainSchema;
 }
 
 fn err_response(code: ErrorCode) -> Response {
@@ -141,6 +149,7 @@ pub fn dispatch<S: ConnectionStore + ?Sized>(store: &S, req: Request) -> Respons
             Ok(records) => Response::RecordList { records },
             Err(code) => err_response(code),
         },
+        Request::DescribeSchema => Response::Schema(store.describe()),
     }
 }
 
@@ -266,6 +275,25 @@ mod tests {
         fn neighbors(&self, _id: RecordId) -> Result<Vec<RecordId>, ErrorCode> {
             Err(ErrorCode::Unsupported)
         }
+        fn describe(&self) -> DomainSchema {
+            use protocol::{FieldCapabilities, FieldDescriptor, RelationCapabilities, ValueKind};
+            DomainSchema {
+                fields: vec![FieldDescriptor {
+                    tag: FIELD_A,
+                    name: "a".into(),
+                    value_kind: ValueKind::U32,
+                    capabilities: FieldCapabilities {
+                        filter_eq: true,
+                        scan: true,
+                        update: true,
+                    },
+                }],
+                relations: RelationCapabilities {
+                    parent_children: true,
+                    neighbors: false,
+                },
+            }
+        }
     }
 
     #[test]
@@ -363,6 +391,15 @@ mod tests {
                 }
             ),
             Response::NotFound
+        );
+    }
+
+    #[test]
+    fn describe_schema_returns_the_fixture_store_own_shape() {
+        let store = FixtureStore;
+        assert_eq!(
+            dispatch(&store, Request::DescribeSchema),
+            Response::Schema(store.describe())
         );
     }
 
