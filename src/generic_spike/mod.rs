@@ -52,6 +52,18 @@
 //!   module's own docs for why derivation links are firewalled from
 //!   `RuleRelation`'s binding-dependency graph at the type level, not
 //!   just by convention.
+//! - [`employee_impl`] — a seventh spike round, purpose-built (not
+//!   motivated by an external reference domain the way `Order`/`Customer`
+//!   or `Rule` were) to exercise `SymmetricRelation` and `ChildOf`
+//!   together on one self-referential record type (`Employee`:
+//!   `reports_to`, `ChildOf`; `collaborates_with`, `SymmetricRelation`) —
+//!   a combination this project's own status tracking had named as the
+//!   natural next stress test, and which no domain had exercised at
+//!   either the in-memory or durable-production layer before. Found and
+//!   fixed a real, load-bearing gap directly in `crate::generic::{store,production}`
+//!   (`Reversed` never forwarded `Neighbors`; `GenericProductionStore` had
+//!   no `neighbors` method) — see this module's own doc comment for the
+//!   full account, not worked around spike-locally.
 //!
 //! # Isolation (unchanged from every prior round)
 //!
@@ -61,6 +73,7 @@
 //! `impl` blocks on the existing [`crate::record::DogRecord`] type.
 
 pub mod dog_impl;
+pub mod employee_impl;
 pub mod order_bench_support;
 pub mod order_naive;
 pub mod rule_bench_support;

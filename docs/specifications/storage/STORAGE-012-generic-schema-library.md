@@ -1,6 +1,6 @@
 # STORAGE-012 — Generic schema library: promote the generic record/schema/query design into a real, public library
 
-- Version: 0.1.0
+- Version: 0.2.0 (`Reversed`/`Neighbors` forwarding completion — see "Change history")
 - Status: Accepted
 - Owners: baileyrd
 - Depends on: `STORAGE-001`, `STORAGE-002`, `STORAGE-005`, `STORAGE-009`, `STORAGE-010`, `STORAGE-011`
@@ -40,6 +40,7 @@ Four validation spikes (kept as historical record in `src/generic_spike/`) resol
 - `STORAGE-012-FR-007`: **Write-through consistency for the durable path, documented gap for the in-memory path** — `ScannableField::set_scannable_value` is added and used by `GenericMmapStore::get` so it reflects the latest `UpdateField::update` write. The pre-existing in-memory `Scanned`/`BaseStore` composition's lack of this property is documented (`crate::generic`'s module docs, ADR-0009, `RESULTS.md`) as a real, unscoped follow-up — not silently worked around, and not fixed by this spec.
 - `STORAGE-012-FR-008`: **Documentation** — ADR-0009 moves from Proposed to Accepted with an implementation addendum; `docs/design/GENERIC-SCHEMA-DESIGN.md` gains an "Implementation status"/"What actually happened" addendum describing what changed between the original design and the real code; `src/lib.rs`/`README.md` describe `crate::generic` alongside the existing `Dog`/`ProductionStore` story; `docs/roadmap/ROADMAP.md`, `docs/traceability/TRACEABILITY.md`, `docs/specifications/SPEC-REGISTRY.md`, `docs/PROJECT-STATUS.md` are updated to reflect this as a real, implemented milestone.
 - `STORAGE-012-FR-009`: **No new dependency** — this spec reuses `memmap2` (already present, from `STORAGE-009`) and every other existing dependency; no new entry in `Cargo.toml`'s `[dependencies]`.
+- `STORAGE-012-FR-010` (v0.2.0): **`Reversed` forwards `Neighbors`** — `src/generic/store.rs` gains a `Neighbors<R, RelMarker>` forwarding impl on `Reversed<S, P, C, Marker>`, and `src/generic/production.rs` gains a `neighbors<R, Marker>` inherent method on `GenericProductionStore<S>`. Neither existed before: every prior consumer of `Reversed` (`Order`/`Customer`) had a `ChildOf` relation but no `SymmetricRelation`, so the gap was invisible until `SERVER-QUERY-LAYER`'s third validation domain (`Employee`, self-referential on both relation kinds at once) tried to stack `Symmetric` beneath `Reversed` and found `Neighbors` silently unavailable through the composed stack. This is a completion of FR-001's original promotion scope (every capability trait a wrapper's inner store implements should forward through it), not a new design decision — `crate::generic`'s trait/wrapper shapes are otherwise unchanged. See ADR-0009's "Acceptance and implementation" addendum for the full account.
 
 ## Architecture and interfaces
 
@@ -74,4 +75,9 @@ Not applicable — synthetic in-memory/on-disk data only, same as every other sp
 
 ## Traceability
 
-Implements: the "full implementation of the generic schema library" deliverable, promoting ADR-0009 from Proposed to Accepted.
+Implements: the "full implementation of the generic schema library" deliverable, promoting ADR-0009 from Proposed to Accepted. v0.2.0's `Neighbors`-forwarding completion closes ADR-0009's own "revisit if" trigger (`SymmetricRelation` + `ChildOf` together, untested until `SERVER-QUERY-LAYER`'s `Employee` domain exercised it).
+
+## Change history
+
+- 0.1.0: Initial promotion — `src/generic/**` as a real, public library; `Order`/`Customer` reference implementation; `GenericMmapStore`/`GenericProductionStore`; the flagship durability-plus-concurrency integration test; the write-through-consistency fix for the durable path (FR-007).
+- 0.2.0: `Reversed`/`Neighbors` forwarding completion (FR-010) — found and fixed while validating `SERVER-QUERY-LAYER`'s third domain, `Employee`; no other `crate::generic` behavior changed.

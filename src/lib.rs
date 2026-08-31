@@ -61,20 +61,29 @@
 //! framing, thread-per-connection, reusing whichever `RwLock` the wrapped
 //! store already manages (no new lock at this layer). Off by default
 //! behind its own `server` feature (distinct from `research` — this is new
-//! capability, not a benchmarked alternative), and validated against both
-//! `Dog` ([`server::dog::DogConnectionStore`]) and `Order`/`Customer`
-//! ([`server::order::OrderConnectionStore`], additionally behind
-//! `research` since `order_customer` itself is). A client that doesn't
-//! know a domain at compile time can send `Request::DescribeSchema` first
-//! to discover its fields, types, and supported operations at runtime
-//! (see `docs/decisions/ADR-0011-server-schema-discovery.md`, Accepted) —
+//! capability, not a benchmarked alternative), and validated against three
+//! domains: `Dog` ([`server::dog::DogConnectionStore`], `Neighbors` only),
+//! `Order`/`Customer` ([`server::order::OrderConnectionStore`],
+//! `Parent`/`Children` only), and `Employee`
+//! ([`server::employee::EmployeeConnectionStore`], both — the first
+//! domain to combine them, self-referential on `reports_to`/`ChildOf`
+//! and `collaborates_with`/`SymmetricRelation` at once), the latter two
+//! additionally behind `research` since their reference domains are. A
+//! client that doesn't know a domain at compile time can send
+//! `Request::DescribeSchema` first to discover its fields, types, and
+//! supported operations at runtime (see
+//! `docs/decisions/ADR-0011-server-schema-discovery.md`, Accepted) —
 //! field *tags* stay the wire addressing scheme either way. **No authentication, no
 //! authorization, no transport encryption, no transaction semantics, no
 //! query language beyond fixed field-tag addressing** — see [`server`]'s
 //! own module docs and `docs/decisions/ADR-0010-server-query-layer-proposal.md`
 //! (Accepted) before using it; this is new, parallel capability, same as
-//! `generic` above — nothing in `production`/`generic::production` changed
-//! to build it.
+//! `generic` above. One exception to "nothing in `production`/
+//! `generic::production` changed to build it": validating `Employee`
+//! surfaced a real gap in `generic::store`/`generic::production`
+//! (`Reversed` never forwarded `Neighbors`) — fixed there directly, see
+//! `docs/decisions/ADR-0009-generic-schema-design-proposal.md`'s
+//! "Acceptance and implementation" addendum.
 //!
 //! # Everything else: benchmarked alternatives, behind `research`
 //!

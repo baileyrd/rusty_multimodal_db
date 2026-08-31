@@ -13,7 +13,7 @@
 //! every operation goes through the existing, already-validated
 //! [`ConnectionStore`] adapter around a real store type
 //! ([`dog::DogConnectionStore`] wraps [`crate::production::ProductionStore`];
-//! [`order::OrderConnectionStore`] wraps
+//! [`order::OrderConnectionStore`]/[`employee::EmployeeConnectionStore`] wrap
 //! [`crate::generic::production::GenericProductionStore`]). Concurrency
 //! across client connections adds no new lock: it collapses onto whatever
 //! `RwLock` the wrapped store already manages internally, per
@@ -28,6 +28,8 @@
 //! development network** — see ADR-0010's Consequences.
 
 pub mod dog;
+#[cfg(feature = "research")]
+pub mod employee;
 pub mod framing;
 #[cfg(feature = "research")]
 pub mod order;
@@ -43,10 +45,12 @@ use std::thread;
 
 /// One shared trait the dispatch loop is generic over, implemented by a
 /// thin per-domain adapter — the dispatch loop itself never depends on
-/// which concrete store it's serving. See [`dog::DogConnectionStore`]/
-/// [`order::OrderConnectionStore`] for the two domains this crate
-/// validates against, matching this project's own "validate against a
-/// second, structurally different domain" discipline
+/// which concrete store it's serving. See [`dog::DogConnectionStore`]
+/// (`Neighbors` only), [`order::OrderConnectionStore`] (`Parent`/`Children`
+/// only), and [`employee::EmployeeConnectionStore`] (both — the first
+/// domain to combine them) for the three domains this crate validates
+/// against, matching this project's own "validate against a second,
+/// structurally different domain" discipline
 /// (`docs/decisions/ADR-0009-generic-schema-design-proposal.md`).
 pub trait ConnectionStore: Send + Sync {
     /// Full-record read. `None` if `id` has no record — an ordinary
