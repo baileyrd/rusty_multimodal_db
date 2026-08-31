@@ -29,9 +29,9 @@
 //! quadrupling the trait surface for a wrapper that only ever has one
 //! real implementation strategy (take the lock, delegate).
 
-use super::query::{Children, FilterEq, GetById, Parent, ScanField, UpdateField};
+use super::query::{Children, FilterEq, GetById, Neighbors, Parent, ScanField, UpdateField};
 use super::store::Flush;
-use super::traits::{ChildOf, IndexedField, Record, ScannableField};
+use super::traits::{ChildOf, IndexedField, Record, ScannableField, SymmetricRelation};
 use super::NotFound;
 use crate::durability::DurabilityError;
 use std::sync::RwLock;
@@ -224,6 +224,24 @@ impl<S> GenericProductionStore<S> {
         S: Children<P, C, Marker>,
     {
         self.inner.read().expect(LOCK_POISONED).children(parent_id)
+    }
+
+    /// A symmetric relation — the generic analogue of `Dog::neighbors`.
+    /// Added alongside the `Employee`-style third-domain validation round
+    /// (`SERVER-QUERY-LAYER`): no domain wrapped in `GenericProductionStore`
+    /// had ever needed `SymmetricRelation` before, so this method — and
+    /// the `Reversed`-forwards-`Neighbors` impl it depends on when a
+    /// domain also has a `ChildOf` relation — didn't exist until now.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the lock is poisoned — see `LOCK_POISONED`.
+    pub fn neighbors<R, Marker>(&self, id: R::Id) -> Vec<R::Id>
+    where
+        R: SymmetricRelation<Marker>,
+        S: Neighbors<R, Marker>,
+    {
+        self.inner.read().expect(LOCK_POISONED).neighbors(id)
     }
 
     /// Force the durable layer(s) inside `S` to physical disk. Takes the

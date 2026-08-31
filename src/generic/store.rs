@@ -588,3 +588,24 @@ where
         self.inner.update(id, value)
     }
 }
+
+// Forwarding impl: `Reversed<S, ..>` re-exposing `Neighbors` — added for
+// the first domain needing `SymmetricRelation` and `ChildOf` together on
+// one record type (an `Employee`-style domain: `reports_to`, a directed
+// self-relation, plus `collaborates_with`, a symmetric one) —
+// `SERVER-QUERY-LAYER`'s third-domain validation round. `R`/`RelMarker`
+// are independent of this impl's own `P`/`C`/`Marker`, not tied to the
+// `ChildOf` relation `Reversed` itself indexes — in the self-referential
+// case that motivated this (`R = P = C`), the same record type
+// participates in both relations, but nothing here requires that.
+impl<S, P, C, Marker, R, RelMarker> Neighbors<R, RelMarker> for Reversed<S, P, C, Marker>
+where
+    P: Record,
+    C: ChildOf<Marker, ParentId = P::Id>,
+    R: SymmetricRelation<RelMarker>,
+    S: Neighbors<R, RelMarker>,
+{
+    fn neighbors(&self, id: R::Id) -> Vec<R::Id> {
+        self.inner.neighbors(id)
+    }
+}

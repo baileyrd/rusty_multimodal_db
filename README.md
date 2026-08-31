@@ -95,7 +95,7 @@ additive capability, not a benchmarked alternative):
 ```sh
 cargo build --features server
 cargo test --features server               # Dog domain only
-cargo test --features server,research       # + Order/Customer, the second validation domain
+cargo test --features server,research       # + Order/Customer and Employee, the second and third validation domains
 cargo run --features server --bin dog_server   # a minimal local server, Dog domain
 ```
 
@@ -105,6 +105,13 @@ names every field, its wire type, and which operations it supports (see
 `ADR-0011`), so it can drive `GetById`/`FilterEq`/`ScanField`/
 `UpdateField`/`Parent`/`Children`/`Neighbors` from discovered field tags
 instead of hardcoded ones.
+
+Three domain adapters validate the protocol: `Dog` (`Neighbors` only),
+`Order`/`Customer` (`Parent`/`Children` only), and `Employee` — the third,
+purpose-built to combine both relation kinds on one self-referential
+record type (`reports_to`/`ChildOf`, `collaborates_with`/
+`SymmetricRelation`), the first domain where every relation-kind request
+is a real operation, none `Unsupported`.
 
 **No authentication, no authorization, no transport encryption, no
 transaction semantics, no query language beyond fixed field-tag
