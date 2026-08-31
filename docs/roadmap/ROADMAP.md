@@ -21,6 +21,7 @@ Status vocabulary: `Proposed`, `Draft`, `Accepted`, `In Progress`,
 | `PRODUCTION-DEFAULT` | `ProductionStore` (`src/production.rs`): `CanonicalCachedStore`'s architecture + mmap durability + global `RwLock` concurrency, consolidated into one recommended type implementing both `DogStore` and `ConcurrentStore`; ADR-0008; a flagship integration test exercising mmap durability and `RwLock` concurrency together for the first time; `src/lib.rs`/`README.md`/`docs/architecture/SYSTEM-ARCHITECTURE.md` reorganized to lead with it; `RESULTS.md`'s `## Production recommendation` section | `CONCURRENCY-PROTOTYPES` | `STORAGE-011` | `cargo test` green including the new flagship integration test; `cargo bench --bench workloads -- production` and `cargo bench --bench concurrency` report `ProductionStore` numbers; `RESULTS.md` ties all six prior rounds together | Implemented | follow-on PR |
 | `GENERIC-SCHEMA-DESIGN` | A generic record/schema/query abstraction (`Record`/`IndexedField`/`ScannableField`/`SymmetricRelation`/`ChildOf` traits, composable store wrapper layers) validated against `Dog` and a second, structurally different domain (`Order`/`Customer` — directed relation, currency-like field, enum categorical field, timestamp field); ADR-0009 (**Accepted** — see `GENERIC-SCHEMA-LIBRARY` below); `docs/design/GENERIC-SCHEMA-DESIGN.md` | `PRODUCTION-DEFAULT` | — (no spec written for the design itself; implementation tracked by `STORAGE-012`) | Four validation spikes (`src/generic_spike/`) resolved every risk this design's §4 named, then `GENERIC-SCHEMA-LIBRARY` promoted it into a real library | Accepted/Implemented | this PR |
 | `GENERIC-SCHEMA-LIBRARY` | Promotes `GENERIC-SCHEMA-DESIGN` into `crate::generic`: promoted traits/query/store (unchanged from four validation spikes), `Order`/`Customer` as the real reference implementation, `GenericMmapStore`/`GenericProductionStore` (generic mmap durability + `RwLock` concurrency — new beyond every spike), a flagship durability+concurrency integration test, a benchmark suite confirming no regression from spike to real code; ADR-0009 moved to Accepted; `STORAGE-012` | `GENERIC-SCHEMA-DESIGN` | `STORAGE-012` | `cargo test` green including the new flagship integration test (run 5× to rule out flakiness); `cargo bench --bench generic_production` completes and is reported in `RESULTS.md` alongside the spike rounds' numbers; no `src/production.rs`/`src/store/**`/`src/durability/**`/`src/concurrency/**` changes | Implemented | this PR |
+| `SERVER-QUERY-LAYER-DESIGN` | A network server/query layer proposal in front of `ProductionStore`/`GenericProductionStore`: a `Request`/`Response` protocol (`GetById`/`FilterEq`/`ScanField`/`UpdateField`/`Parent`/`Children`/`Neighbors`), length-prefixed `bincode` framing, thread-per-connection dispatch reusing the existing `RwLock`-shared-store concurrency pattern; ADR-0010 (**Proposed**, not accepted); `docs/design/SERVER-QUERY-LAYER-DESIGN.md`; explicitly excludes authentication, transport encryption, transactions, and a query language | `GENERIC-SCHEMA-LIBRARY`, `PRODUCTION-DEFAULT` | — (no spec written for the design itself; a `SERVER-001` spec would be registered at acceptance/implementation, matching `GENERIC-SCHEMA-DESIGN`'s own precedent) | Proposed request/response/dispatch shapes compiled in a standalone scratch probe (types only, not executed); owner review of the design and ADR-0010, per this project's own design-before-implementation precedent for a new public protocol | Proposed | this PR |
 
 ## Sequencing notes
 
@@ -124,6 +125,19 @@ production store) — `Dog` stays a benchmark fixture, not a target domain,
 so `Order`/`Customer` became the real reference implementation directly;
 see ADR-0009's "Acceptance and implementation" section for why this
 deviation was made rather than followed as originally written.
+
+`SERVER-QUERY-LAYER-DESIGN` follows `GENERIC-SCHEMA-LIBRARY` as this
+project's first roadmap unit motivated by `docs/FUTURE-GROWTH.md` rather
+than by a benchmark finding — the owner chose it over the other named
+direction (SQLite/DuckDB-tier parity) when asked which of the two, if
+either, to pursue after the project reached a fully-`Implemented` roadmap
+with no unit in progress. Deliberately staged as design-only, matching
+`GENERIC-SCHEMA-DESIGN`'s own precedent: a network-facing protocol is a
+comparably hard-to-reverse public-surface decision, and this unit stops for
+owner review before any server implementation code is written. Its
+"Depends on" `GENERIC-SCHEMA-LIBRARY`/`PRODUCTION-DEFAULT` reflects that
+both store types it wraps (`ProductionStore`, `GenericProductionStore`)
+need to already exist, not that either is modified by this design.
 
 ## Out of scope for this roadmap (see architecture doc "where this can go
 next")

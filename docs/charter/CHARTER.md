@@ -46,6 +46,19 @@ No server, no persistence, no network surface, no CLI beyond what's needed
 to drive benchmarks. Everything lives in memory for the duration of a
 benchmark run.
 
+**Amended by later ADRs, recorded here rather than left as an unexplained
+contradiction**: "no persistence" and "no ... concurrency control" were
+superseded by ADR-0005/ADR-0006 (durability) and ADR-0007/ADR-0008
+(concurrency, `ProductionStore`) once those became real, benchmarked
+capabilities — this charter's original text is kept as the historical
+record of the bootstrap-time scope, not rewritten, per this project's own
+"layer findings, don't rewrite history" convention (see `RESULTS.md`).
+"No server, no network surface" is, as of ADR-0010, a **Proposed** (not yet
+accepted) amendment in the same vein — see
+`docs/design/SERVER-QUERY-LAYER-DESIGN.md` and ADR-0010 for the design and
+its explicit, deliberately-unresolved security gaps (no authentication, no
+transport encryption) before treating this line as superseded in practice.
+
 ## Explicit non-goals
 
 - Not building a production database or storage engine.
