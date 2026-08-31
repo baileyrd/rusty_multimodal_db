@@ -53,6 +53,25 @@
 //! for the acceptance record. This is new, parallel capability — nothing
 //! above changed to build it.
 //!
+//! # A third arc: a network server, behind `server`
+//!
+//! [`server`] puts a thin, real network listener in front of
+//! [`production::ProductionStore`]/[`generic::production::GenericProductionStore`]
+//! — a `Request`/`Response` wire protocol over length-prefixed `bincode`
+//! framing, thread-per-connection, reusing whichever `RwLock` the wrapped
+//! store already manages (no new lock at this layer). Off by default
+//! behind its own `server` feature (distinct from `research` — this is new
+//! capability, not a benchmarked alternative), and validated against both
+//! `Dog` ([`server::dog::DogConnectionStore`]) and `Order`/`Customer`
+//! ([`server::order::OrderConnectionStore`], additionally behind
+//! `research` since `order_customer` itself is). **No authentication, no
+//! authorization, no transport encryption, no transaction semantics, no
+//! query language beyond fixed field-tag addressing** — see [`server`]'s
+//! own module docs and `docs/decisions/ADR-0010-server-query-layer-proposal.md`
+//! (Accepted) before using it; this is new, parallel capability, same as
+//! `generic` above — nothing in `production`/`generic::production` changed
+//! to build it.
+//!
 //! # Everything else: benchmarked alternatives, behind `research`
 //!
 //! `store`, `durability`, and `concurrency` hold the other three `Dog`
@@ -111,6 +130,19 @@ pub mod generic;
 pub mod generic_spike;
 pub mod production;
 pub mod record;
+/// A network server/query layer in front of [`production::ProductionStore`]/
+/// [`generic::production::GenericProductionStore`] — accepted design,
+/// `docs/design/SERVER-QUERY-LAYER-DESIGN.md`, ADR-0010 (Accepted). Off by
+/// default behind the `server` Cargo feature, distinct from `research`:
+/// this is new, real, additive capability, not a benchmarked-alternative
+/// or historical-spike module, but it introduces a real
+/// network-listening binary surface with **no authentication, no
+/// authorization, and no transport encryption** — see this module's own
+/// doc comment and ADR-0010's Consequences before enabling it, and never
+/// expose a server built from it beyond a trusted, localhost/development
+/// network.
+#[cfg(feature = "server")]
+pub mod server;
 pub mod store;
 /// The crate's one shared scratch-directory helper — unconditionally
 /// available (unlike `bench_support`) since [`production::ProductionStore`]'s

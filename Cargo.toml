@@ -91,6 +91,18 @@ required-features = ["research"]
 name = "mmap_record_identity_keying"
 required-features = ["research"]
 
+# The server integration tests spin up a real TCP listener against the
+# `server` feature's `ConnectionStore` adapters. The Dog-domain test only
+# needs `server`; the Order/Customer one additionally needs `research`
+# (see `src/server/order.rs`'s own module docs).
+[[test]]
+name = "server_dog_integration"
+required-features = ["server"]
+
+[[test]]
+name = "server_order_integration"
+required-features = ["server", "research"]
+
 # Same treatment, same reason.
 [[example]]
 name = "memory_footprint"
@@ -118,6 +130,14 @@ required-features = ["research"]
 [[bin]]
 name = "multiprocess_harness"
 required-features = ["research"]
+
+# A minimal, real server binary for the `Dog` domain — a hand-written
+# three-record sample dataset, not `generator` (research-gated), so this
+# builds under `server` alone. See `src/server/mod.rs`'s own doc comment
+# for what this binary does and does not provide before running it.
+[[bin]]
+name = "dog_server"
+required-features = ["server"]
 
 [dependencies]
 # UUID type + deterministic construction from seeded random bytes (Builder::from_random_bytes
@@ -186,6 +206,16 @@ perfcnt = { version = "0.8", optional = true }
 # `lib.rs`'s own top-level doc comment for the full front-door/research
 # split.
 research = []
+# The network server/query layer (`src/server/`) — off by default, distinct
+# from `research`: this is new, real, additive capability (ADR-0010,
+# Accepted), not a benchmarked-alternative or historical-spike module. No
+# new dependency (reuses `bincode`/`serde`/`uuid`, all already present).
+# Validating it against the `Order`/`Customer` domain additionally needs
+# `research` (see `src/server/order.rs`'s own module docs) since
+# `order_customer` itself is research-gated reference material; the `Dog`
+# side needs `server` alone. See `src/server/mod.rs`'s own doc comment for
+# what this does and does not provide before enabling it.
+server = []
 perf-events = ["dep:criterion-perf-events", "dep:perfcnt"]
 
 [profile.bench]
