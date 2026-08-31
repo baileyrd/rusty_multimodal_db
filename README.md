@@ -83,6 +83,29 @@ spike/comparison module. See `src/lib.rs`'s own top-level doc comment for
 the full front-door/research split, and `RESULTS.md` for the numbers that
 justified each pick.
 
+### The `server` feature: a network server/query layer
+
+`server::serve` puts a thin, real TCP listener in front of
+`ProductionStore`/`GenericProductionStore` — a `Request`/`Response` wire
+protocol over length-prefixed `bincode` framing, thread-per-connection,
+reusing whichever `RwLock` the wrapped store already manages (no new lock
+at this layer). Off by default, distinct from `research` (this is new,
+additive capability, not a benchmarked alternative):
+
+```sh
+cargo build --features server
+cargo test --features server               # Dog domain only
+cargo test --features server,research       # + Order/Customer, the second validation domain
+cargo run --features server --bin dog_server   # a minimal local server, Dog domain
+```
+
+**No authentication, no authorization, no transport encryption, no
+transaction semantics, no query language beyond fixed field-tag
+addressing** — see `src/server`'s own module docs and
+`docs/decisions/ADR-0010-server-query-layer-proposal.md` (Accepted) before
+using it. Do not expose a server built from this module beyond a trusted,
+localhost/development network.
+
 ## Running the suite
 
 ```sh
@@ -109,6 +132,9 @@ at the right file:
 - **`docs/design/GENERIC-SCHEMA-DESIGN.md`** — the original design
   proposal for the generic record/schema/query library (`crate::generic`),
   now Accepted and implemented.
+- **`docs/design/SERVER-QUERY-LAYER-DESIGN.md`** — the design proposal for
+  the network server/query layer (`server` feature), now Accepted and
+  implemented.
 - **`docs/decisions/`** — one ADR per accepted architectural decision, in
   order:
   - `ADR-0001` — the three-backend (AoS/SoA/canonical) empirical comparison
@@ -120,8 +146,9 @@ at the right file:
   - `ADR-0007` — the concurrency strategies compared
   - `ADR-0008` — `ProductionStore` as the production default
   - `ADR-0009` — the generic schema design proposal (now Accepted)
-- **`docs/specifications/SPEC-REGISTRY.md`** + **`docs/specifications/storage/`**
-  — the `STORAGE-0xx` requirement/spec tree each round implemented against.
+  - `ADR-0010` — the server/query layer proposal (now Accepted)
+- **`docs/specifications/SPEC-REGISTRY.md`** + **`docs/specifications/storage/`**/**`docs/specifications/server/`**
+  — the `STORAGE-0xx`/`SERVER-0xx` requirement/spec tree each round implemented against.
 - **`docs/roadmap/ROADMAP.md`** — status vocabulary and what's next.
 - **`docs/FUTURE-GROWTH.md`** — unplanned, unscheduled directions this
   project could grow in (a server/query layer, SQLite/DuckDB-style

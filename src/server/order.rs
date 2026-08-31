@@ -1,0 +1,268 @@
+//! [`ConnectionStore`] adapter wrapping
+//! [`crate::generic::production::GenericProductionStore<OrderProductionStack>`]
+//! for `Order`/`Customer` — the second validation domain (a real directed
+//! relation, via `Parent`/`Children`; no symmetric relation, so
+//! `Neighbors` is unsupported here — the complementary case to
+//! [`super::dog`]). Behind the `research` feature: `order_customer` itself
+//! is research-gated reference material (see `crate::generic`'s own module
+//! docs), so validating the server against it needs both `server` and
+//! `research` enabled together.
+//!
+//! # `OrderProductionStack` only durably tracks `Status`/`Amount`
+//!
+//! `Order` has three `ScannableField`s in-memory (`Amount`, `CreatedAt`,
+//! `DiscountCents`), but [`OrderProductionStack`] (the *durable*
+//! production stack this adapter wraps) only carries `Status` (indexed)
+//! and `Amount` (the one mmap-backed field) — `CreatedAt`/`DiscountCents`
+//! aren't part of it at all (see `order_customer`'s own module docs on
+//! why exactly one field is durable). So `ScanField`/`UpdateField` only
+//! ever support `Amount` here; `GetById` still returns every field
+//! (reconstructed from the caller-supplied records, the same write-through
+//! guarantee every durable variant in this crate provides) since a
+//! full-record read doesn't need a field to be independently scannable.
+//!
+//! # `Parent`/`Children` take differently-typed ids
+//!
+//! `Parent`'s `id` is an `Order` id (every order has exactly one
+//! customer); `Children`'s `id` is a `Customer` id (a customer has zero or
+//! more orders) — matching the real, asymmetric shape of a directed
+//! relation (`docs/design/GENERIC-SCHEMA-DESIGN.md` §4.3), not a
+//! convenience this adapter invents.
+
+use super::protocol::{ErrorCode, FieldRef, ParentLookup, RecordId, ScanValue};
+use super::ConnectionStore;
+use crate::generic::order_customer::{
+    Amount, BelongsToCustomer, Customer, Order, OrderProductionStack, OrderStatus, Status,
+};
+use crate::generic::production::GenericProductionStore;
+
+pub const FIELD_AMOUNT: FieldRef = 0;
+pub const FIELD_STATUS: FieldRef = 1;
+pub const FIELD_CREATED_AT: FieldRef = 2;
+pub const FIELD_DISCOUNT: FieldRef = 3;
+
+/// `OrderStatus`'s wire encoding — a fixed discriminant, not `OrderStatus`
+/// itself (the protocol's [`ScanValue`] enum stays domain-agnostic; this
+/// mapping is this adapter's own concern, the same way the field tags
+/// themselves are).
+fn status_to_u32(status: OrderStatus) -> u32 {
+    match status {
+        OrderStatus::Pending => 0,
+        OrderStatus::Shipped => 1,
+        OrderStatus::Delivered => 2,
+        OrderStatus::Cancelled => 3,
+        OrderStatus::Refunded => 4,
+    }
+}
+
+fn status_from_u32(value: u32) -> Option<OrderStatus> {
+    match value {
+        0 => Some(OrderStatus::Pending),
+        1 => Some(OrderStatus::Shipped),
+        2 => Some(OrderStatus::Delivered),
+        3 => Some(OrderStatus::Cancelled),
+        4 => Some(OrderStatus::Refunded),
+        _ => None,
+    }
+}
+
+pub struct OrderConnectionStore {
+    store: GenericProductionStore<OrderProductionStack>,
+}
+
+impl OrderConnectionStore {
+    pub fn new(store: GenericProductionStore<OrderProductionStack>) -> Self {
+        Self { store }
+    }
+}
+
+impl ConnectionStore for OrderConnectionStore {
+    fn get(&self, id: RecordId) -> Option<Vec<(FieldRef, ScanValue)>> {
+        self.store.get::<Order>(id).map(|order| {
+            vec![
+                (FIELD_AMOUNT, ScanValue::I64(order.amount_cents)),
+                (FIELD_STATUS, ScanValue::U32(status_to_u32(order.status))),
+                (FIELD_CREATED_AT, ScanValue::I64(order.created_at_unix_ms)),
+                (FIELD_DISCOUNT, ScanValue::I64(order.discount_cents)),
+            ]
+        })
+    }
+
+    fn filter_eq(&self, field: FieldRef, value: &ScanValue) -> Result<Vec<RecordId>, ErrorCode> {
+        match (field, value) {
+            (FIELD_STATUS, ScanValue::U32(raw)) => match status_from_u32(*raw) {
+                Some(status) => Ok(self.store.filter_eq::<Order, Status>(&status)),
+                None => Err(ErrorCode::Malformed),
+            },
+            (FIELD_STATUS, _) => Err(ErrorCode::Malformed),
+            (FIELD_AMOUNT | FIELD_CREATED_AT | FIELD_DISCOUNT, _) => Err(ErrorCode::Unsupported),
+            _ => Err(ErrorCode::UnknownField),
+        }
+    }
+
+    fn scan_field(&self, field: FieldRef) -> Result<Vec<ScanValue>, ErrorCode> {
+        match field {
+            FIELD_AMOUNT => Ok(self
+                .store
+                .scan::<Order, Amount>()
+                .into_iter()
+                .map(ScanValue::I64)
+                .collect()),
+            FIELD_STATUS | FIELD_CREATED_AT | FIELD_DISCOUNT => Err(ErrorCode::Unsupported),
+            _ => Err(ErrorCode::UnknownField),
+        }
+    }
+
+    fn update_field(
+        &self,
+        id: RecordId,
+        field: FieldRef,
+        value: ScanValue,
+    ) -> Result<bool, ErrorCode> {
+        match (field, value) {
+            (FIELD_AMOUNT, ScanValue::I64(amount)) => {
+                match self.store.update::<Order, Amount>(id, amount) {
+                    Ok(()) => Ok(true),
+                    Err(_not_found) => Ok(false),
+                }
+            }
+            (FIELD_AMOUNT, _) => Err(ErrorCode::Malformed),
+            (FIELD_STATUS | FIELD_CREATED_AT | FIELD_DISCOUNT, _) => Err(ErrorCode::Unsupported),
+            _ => Err(ErrorCode::UnknownField),
+        }
+    }
+
+    fn parent(&self, id: RecordId) -> Result<ParentLookup, ErrorCode> {
+        match self.store.parent::<Order, BelongsToCustomer>(id) {
+            Ok(Some(customer_id)) => Ok(ParentLookup::Parent(customer_id)),
+            Ok(None) => Ok(ParentLookup::NoParent),
+            Err(_not_found) => Ok(ParentLookup::ChildNotFound),
+        }
+    }
+
+    fn children(&self, id: RecordId) -> Result<Vec<RecordId>, ErrorCode> {
+        Ok(self
+            .store
+            .children::<Customer, Order, BelongsToCustomer>(id))
+    }
+
+    fn neighbors(&self, _id: RecordId) -> Result<Vec<RecordId>, ErrorCode> {
+        // Order/Customer has no SymmetricRelation.
+        Err(ErrorCode::Unsupported)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::generic::order_customer::{create_order_production_stack, OrderStatus};
+    use crate::test_support::fresh_temp_dir;
+    use uuid::Uuid;
+
+    fn sample_adapter() -> OrderConnectionStore {
+        let dir = fresh_temp_dir("server_order_adapter").unwrap();
+        let path = dir.join("amount.mmap");
+        let orders = vec![
+            crate::generic::order_customer::Order {
+                id: Uuid::from_u128(1),
+                customer_id: Uuid::from_u128(100),
+                amount_cents: 2_500,
+                status: OrderStatus::Shipped,
+                created_at_unix_ms: 1_000,
+                discount_cents: 0,
+            },
+            crate::generic::order_customer::Order {
+                id: Uuid::from_u128(2),
+                customer_id: Uuid::from_u128(100),
+                amount_cents: 4_200,
+                status: OrderStatus::Pending,
+                created_at_unix_ms: 2_000,
+                discount_cents: 0,
+            },
+        ];
+        let stack = create_order_production_stack(orders, &path).unwrap();
+        OrderConnectionStore::new(GenericProductionStore::new(stack))
+    }
+
+    #[test]
+    fn get_returns_every_field() {
+        let adapter = sample_adapter();
+        assert_eq!(
+            adapter.get(Uuid::from_u128(1)).unwrap(),
+            vec![
+                (FIELD_AMOUNT, ScanValue::I64(2_500)),
+                (FIELD_STATUS, ScanValue::U32(1)),
+                (FIELD_CREATED_AT, ScanValue::I64(1_000)),
+                (FIELD_DISCOUNT, ScanValue::I64(0)),
+            ]
+        );
+        assert!(adapter.get(Uuid::from_u128(99)).is_none());
+    }
+
+    #[test]
+    fn filter_eq_by_status_and_unsupported_fields() {
+        let adapter = sample_adapter();
+        assert_eq!(
+            adapter.filter_eq(FIELD_STATUS, &ScanValue::U32(1)),
+            Ok(vec![Uuid::from_u128(1)])
+        );
+        assert_eq!(
+            adapter.filter_eq(FIELD_AMOUNT, &ScanValue::I64(0)),
+            Err(ErrorCode::Unsupported)
+        );
+    }
+
+    #[test]
+    fn scan_and_update_amount_only() {
+        let adapter = sample_adapter();
+        let mut amounts = adapter.scan_field(FIELD_AMOUNT).unwrap();
+        amounts.sort_by_key(|v| match v {
+            ScanValue::I64(n) => *n,
+            _ => 0,
+        });
+        assert_eq!(amounts, vec![ScanValue::I64(2_500), ScanValue::I64(4_200)]);
+        assert_eq!(
+            adapter.scan_field(FIELD_DISCOUNT),
+            Err(ErrorCode::Unsupported)
+        );
+
+        assert_eq!(
+            adapter.update_field(Uuid::from_u128(1), FIELD_AMOUNT, ScanValue::I64(9_000)),
+            Ok(true)
+        );
+        assert_eq!(
+            adapter.get(Uuid::from_u128(1)).unwrap()[0],
+            (FIELD_AMOUNT, ScanValue::I64(9_000))
+        );
+        assert_eq!(
+            adapter.update_field(Uuid::from_u128(99), FIELD_AMOUNT, ScanValue::I64(1)),
+            Ok(false)
+        );
+    }
+
+    #[test]
+    fn parent_and_children_reflect_belongs_to_customer() {
+        let adapter = sample_adapter();
+        assert_eq!(
+            adapter.parent(Uuid::from_u128(1)),
+            Ok(ParentLookup::Parent(Uuid::from_u128(100)))
+        );
+        assert_eq!(
+            adapter.parent(Uuid::from_u128(99)),
+            Ok(ParentLookup::ChildNotFound)
+        );
+
+        let mut children = adapter.children(Uuid::from_u128(100)).unwrap();
+        children.sort();
+        assert_eq!(children, vec![Uuid::from_u128(1), Uuid::from_u128(2)]);
+    }
+
+    #[test]
+    fn neighbors_is_unsupported() {
+        let adapter = sample_adapter();
+        assert_eq!(
+            adapter.neighbors(Uuid::from_u128(1)),
+            Err(ErrorCode::Unsupported)
+        );
+    }
+}

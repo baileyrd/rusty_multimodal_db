@@ -17,6 +17,19 @@
   Consequences for why this pass records that gap rather than silently
   repeating it.
 
+## Acceptance and implementation
+
+`SERVER-001` (`docs/specifications/server/SERVER-001-query-layer.md`) records the real implementation: `src/server/**`, gated behind a new `server` Cargo feature kept deliberately separate from `research` (this is new, additive capability, not a benchmarked alternative). Implements the accepted design essentially as proposed — `Request`/`Response` over length-prefixed `bincode` framing, thread-per-connection, a `ConnectionStore` trait `dispatch` is generic over — with the small, necessary completions `src/server/protocol.rs`'s own doc comment lists (`ScanValue::Str`, `Response::Id`/`ScanValues`, a named `ErrorCode` enum in place of a bare `u8`), none of which reopen any decision this ADR recorded.
+
+Validated against both domains this ADR's Decision drivers named: `server::dog::DogConnectionStore` wraps `ProductionStore` (exercising `Neighbors`, `Dog`'s real symmetric relation); `server::order::OrderConnectionStore` (behind `research`, since `order_customer` itself is) wraps `GenericProductionStore<OrderProductionStack>` (exercising `Parent`/`Children`, `Order`/`Customer`'s real directed relation) — each domain validates the relation kind it actually has, the other reporting `ErrorCode::Unsupported` rather than a wrong answer. A real client/server round trip over a genuine `TcpListener`/`TcpStream` pair, not just `dispatch`'s in-process logic, is covered by `tests/server_dog_integration.rs`/`tests/server_order_integration.rs`, including a flagship concurrent-client stress test (8 real connections × 200 interleaved requests each against a contended id pool, verified via sequential-replay linearizability).
+
+**Two real issues found and fixed during implementation, neither anticipated by the design, reported honestly rather than silently absorbed:**
+
+- **A Nagle/delayed-ACK interaction**, confirmed directly: a synchronous request/response protocol with `TCP_NODELAY` left at its default cost ~40ms per round trip (a concurrent-client stress test ran in ~36s before the fix, well under a second after). Fixed by setting `TCP_NODELAY` server-side (`handle_connection`) and documenting the same requirement client-side. A real, measured cost of the chosen protocol shape (small, synchronous request/response frames), not a design flaw this ADR's protocol choice needs to be revisited over — the fix is a one-line socket option, not a different protocol.
+- **A test-isolation bug**, not a server bug: two integration tests both deriving their mmap-backed temp-file path from the process id alone raced on the same file when `cargo test` ran them concurrently (its default). Fixed by adding a per-call counter to the test helper's path generation — unrelated to `ConnectionStore`/`dispatch`/framing correctness, which the same tests otherwise confirmed.
+
+No existing source file outside `src/server/**`, `src/bin/dog_server.rs`, and `Cargo.toml`'s `[[bin]]`/`[[test]]`/`[features]` entries was modified — verified by diff, satisfying this ADR's own "additive, not a rewrite" decision driver.
+
 ## Context
 
 This project's own `docs/FUTURE-GROWTH.md` (added last delivery cycle)
@@ -153,21 +166,26 @@ runtime, and field-addressing choices). Summarized:
 
 ## Validation and revisit triggers
 
-- **This pass**: design-only, as `ADR-0009`'s original proposal was. The
-  proposed types were compiled (not executed) in a standalone, dependency-
-  free scratch probe; no benchmark, integration test, or real client/server
-  pair exists yet.
+- **Original proposal validation**: design-only, as `ADR-0009`'s original
+  proposal was — the proposed types compiled (not executed) in a
+  standalone, dependency-free scratch probe.
+- **Real validation, post-acceptance**: `SERVER-001`
+  (`docs/specifications/server/SERVER-001-query-layer.md`), a real
+  implementation (`src/server/**`) validated against both `Dog` and
+  `Order`/`Customer` over a genuine `TcpListener`/`TcpStream` pair,
+  including a flagship concurrent-client stress test — see "Acceptance and
+  implementation" above for the full account, including the two real
+  issues (a Nagle/delayed-ACK cost, a test-isolation bug) found and fixed
+  along the way.
 - Revisit if: a non-Rust or cross-language client becomes a real
   requirement (reconsider gRPC/JSON-HTTP); the thread-per-connection model
   is measured and found to be the actual bottleneck under a real workload
-  (reconsider `tokio`); the project decides to pursue authentication/
-  encryption, at which point this ADR's "no auth" consequence should be
-  superseded rather than silently outdated; or a second domain beyond
-  `Dog`/`Order`-`Customer` surfaces a request shape this protocol can't
-  express (matching this project's own "validate against a genuinely
-  different second domain" discipline before generalizing further).
-- If accepted, the next unit should register a `SERVER-001` specification
-  (per `docs/specifications/SPEC-REGISTRY.md`'s existing `STORAGE-*`
-  pattern) and a corresponding `docs/roadmap/ROADMAP.md` row before any
-  implementation code is written, matching how `STORAGE-012` was
-  registered once `GENERIC-SCHEMA-DESIGN` was accepted.
+  (reconsider `tokio` — still unmeasured, since this round built no
+  throughput benchmark, see `SERVER-001`'s own "Open questions"); the
+  project decides to pursue authentication/encryption, at which point this
+  ADR's "no auth" consequence should be superseded rather than silently
+  outdated; or a third domain beyond `Dog`/`Order`-`Customer` surfaces a
+  request shape this protocol can't express (matching this project's own
+  "validate against a genuinely different second domain" discipline before
+  generalizing further — this round already cleared that bar with the two
+  domains named above).

@@ -22,6 +22,7 @@ Status vocabulary: `Proposed`, `Draft`, `Accepted`, `In Progress`,
 | `GENERIC-SCHEMA-DESIGN` | A generic record/schema/query abstraction (`Record`/`IndexedField`/`ScannableField`/`SymmetricRelation`/`ChildOf` traits, composable store wrapper layers) validated against `Dog` and a second, structurally different domain (`Order`/`Customer` — directed relation, currency-like field, enum categorical field, timestamp field); ADR-0009 (**Accepted** — see `GENERIC-SCHEMA-LIBRARY` below); `docs/design/GENERIC-SCHEMA-DESIGN.md` | `PRODUCTION-DEFAULT` | — (no spec written for the design itself; implementation tracked by `STORAGE-012`) | Four validation spikes (`src/generic_spike/`) resolved every risk this design's §4 named, then `GENERIC-SCHEMA-LIBRARY` promoted it into a real library | Accepted/Implemented | this PR |
 | `GENERIC-SCHEMA-LIBRARY` | Promotes `GENERIC-SCHEMA-DESIGN` into `crate::generic`: promoted traits/query/store (unchanged from four validation spikes), `Order`/`Customer` as the real reference implementation, `GenericMmapStore`/`GenericProductionStore` (generic mmap durability + `RwLock` concurrency — new beyond every spike), a flagship durability+concurrency integration test, a benchmark suite confirming no regression from spike to real code; ADR-0009 moved to Accepted; `STORAGE-012` | `GENERIC-SCHEMA-DESIGN` | `STORAGE-012` | `cargo test` green including the new flagship integration test (run 5× to rule out flakiness); `cargo bench --bench generic_production` completes and is reported in `RESULTS.md` alongside the spike rounds' numbers; no `src/production.rs`/`src/store/**`/`src/durability/**`/`src/concurrency/**` changes | Implemented | this PR |
 | `SERVER-QUERY-LAYER-DESIGN` | A network server/query layer design in front of `ProductionStore`/`GenericProductionStore`: a `Request`/`Response` protocol (`GetById`/`FilterEq`/`ScanField`/`UpdateField`/`Parent`/`Children`/`Neighbors`), length-prefixed `bincode` framing, thread-per-connection dispatch reusing the existing `RwLock`-shared-store concurrency pattern; ADR-0010 (**Accepted** — owner approved as proposed); `docs/design/SERVER-QUERY-LAYER-DESIGN.md`; explicitly excludes authentication, transport encryption, transactions, and a query language | `GENERIC-SCHEMA-LIBRARY`, `PRODUCTION-DEFAULT` | — (no spec written for the design itself; a `SERVER-001` spec is registered by the implementation unit that follows, matching `GENERIC-SCHEMA-DESIGN`'s own precedent) | Request/response/dispatch shapes compiled in a standalone scratch probe (types only, not executed); owner reviewed and accepted the design and ADR-0010 without requesting changes | Accepted | this PR |
+| `SERVER-QUERY-LAYER` | The real implementation of `SERVER-QUERY-LAYER-DESIGN`: `src/server/**` (`server` Cargo feature, off by default), `Dog`/`Order`-`Customer` domain adapters, a minimal server binary (`dog_server`), real end-to-end tests over a genuine socket including a flagship concurrent-client stress test; `SERVER-001` | `SERVER-QUERY-LAYER-DESIGN` | `SERVER-001` | `cargo test --features server` and `cargo test --features server,research` both green, including the flagship stress test; `cargo test`/`cargo test --all-features` unaffected (the `server` module adds no default-build surface); `cargo fmt`/`clippy`/`check` clean; no `src/production.rs`/`src/generic/**`/`src/store/**`/`src/durability/**`/`src/concurrency/**` changes | Implemented | this PR |
 
 ## Sequencing notes
 
@@ -135,13 +136,30 @@ with no unit in progress. Deliberately staged as design-only, matching
 `GENERIC-SCHEMA-DESIGN`'s own precedent: a network-facing protocol is a
 comparably hard-to-reverse public-surface decision, and this unit stopped
 for owner review before any server implementation code was written. The
-owner reviewed and accepted the design as proposed (ADR-0010, Accepted);
-implementation remains a separate, not-yet-started unit, registering
-`SERVER-001` before any server code lands, matching how `STORAGE-012`
-followed `GENERIC-SCHEMA-DESIGN`'s own acceptance. Its
+owner reviewed and accepted the design as proposed (ADR-0010, Accepted).
+`SERVER-QUERY-LAYER` (below) is the real implementation that followed,
+registering `SERVER-001`, matching how `STORAGE-012` followed
+`GENERIC-SCHEMA-DESIGN`'s own acceptance. Its
 "Depends on" `GENERIC-SCHEMA-LIBRARY`/`PRODUCTION-DEFAULT` reflects that
 both store types it wraps (`ProductionStore`, `GenericProductionStore`)
 need to already exist, not that either is modified by this design.
+
+`SERVER-QUERY-LAYER` follows `SERVER-QUERY-LAYER-DESIGN` once the owner
+accepted it: the real `src/server/**` implementation, behind a new
+`server` Cargo feature kept deliberately separate from `research` (new,
+additive capability, not a benchmarked alternative). Validated against
+both domains the design's own acceptance criteria named — `Dog`
+(`Neighbors`, a real symmetric relation) and `Order`/`Customer`
+(`Parent`/`Children`, a real directed relation) — over a genuine
+`TcpListener`/`TcpStream` pair, not just `dispatch`'s in-process logic.
+Surfaced and fixed two real issues along the way, both documented in
+`docs/PROJECT-STATUS.md`'s own entry for this unit: a Nagle/delayed-ACK
+interaction that made every request/response round trip cost ~40ms until
+`TCP_NODELAY` was set, and a test-isolation bug (two integration tests
+racing on the same mmap-backed temp path) unrelated to the server itself.
+Deliberately does not include a throughput benchmark (`benches/server.rs`)
+— this round's acceptance criteria are correctness, not performance; see
+`SERVER-001`'s own "Open questions."
 
 ## Out of scope for this roadmap (see architecture doc "where this can go
 next")

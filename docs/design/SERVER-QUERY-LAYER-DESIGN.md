@@ -243,29 +243,35 @@ shared across all connection threads.
 
 ## Verification plan
 
-- Not attempted in this design-only pass, per this project's own precedent
-  (`ADR-0009`'s original proposal authorized no implementation either).
-- The `Request`/`Response`/`ConnectionStore`/framing shapes above were
-  compiled (not just asserted) in a standalone, `std`-only scratch probe
-  outside this repository, proving the types and the generic dispatch
-  function type-check — the same "prove signatures compile" discipline
-  `GENERIC-SCHEMA-DESIGN.md` used. This probe used a `u128` `RecordId`
-  stand-in (no `uuid` dependency available in the throwaway probe) and a
-  `DummyStore` implementation; it was not run, only type-checked
-  (`rustc --edition 2021 --crate-type lib`), and is not part of this
-  repository.
-- Real implementation and benchmarking (throughput, connection-count
-  ceiling for the thread-per-connection model, and the flagship
-  concurrent-client stress test above) is scoped to a future implementation
-  unit, contingent on this proposal's acceptance.
+- **Original proposal**: the `Request`/`Response`/`ConnectionStore`/framing
+  shapes above were compiled (not just asserted) in a standalone, `std`-only
+  scratch probe outside this repository, proving the types and the generic
+  dispatch function type-check — the same "prove signatures compile"
+  discipline `GENERIC-SCHEMA-DESIGN.md` used. This probe used a `u128`
+  `RecordId` stand-in (no `uuid` dependency available in the throwaway
+  probe) and a `DummyStore` implementation; it was not run, only
+  type-checked (`rustc --edition 2021 --crate-type lib`), and is not part
+  of this repository.
+- **Real implementation, post-acceptance**: `SERVER-001`
+  (`docs/specifications/server/SERVER-001-query-layer.md`) — real,
+  compiled, tested code (`src/server/**`) against both `Dog` and
+  `Order`/`Customer`, over a genuine `TcpListener`/`TcpStream` pair,
+  including the flagship concurrent-client stress test named in
+  "Acceptance criteria" above. See `docs/decisions/ADR-0010-server-query-layer-proposal.md`'s
+  "Acceptance and implementation" section for the full account, including
+  two real issues found and fixed along the way (a Nagle/delayed-ACK
+  interaction, a test-isolation bug unrelated to the server itself).
+  Throughput benchmarking (the "connection-count ceiling for the
+  thread-per-connection model" question below) was not attempted this
+  round — see `SERVER-001`'s own "Open questions."
 
 ## Traceability
 
-No spec ID is registered for this design-only pass, matching
-`GENERIC-SCHEMA-DESIGN`'s own precedent (`docs/roadmap/ROADMAP.md`'s
-`GENERIC-SCHEMA-DESIGN` row: "no spec written for the design itself;
-implementation tracked by `STORAGE-012`"). A `SERVER-001` spec would be
-registered at acceptance/implementation time, not here.
+`SERVER-001` (`docs/specifications/server/SERVER-001-query-layer.md`)
+implements this design, registered once the design was accepted —
+matching `GENERIC-SCHEMA-DESIGN`'s own precedent (no spec for the design
+document itself; implementation tracked by `STORAGE-012`, here by
+`SERVER-001`).
 
 ## Open questions
 
