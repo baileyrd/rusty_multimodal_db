@@ -209,6 +209,9 @@ at the right file:
     server/query layer (now Accepted and implemented)
   - `ADR-0014` — native transport encryption (TLS), via `rusty_tls`, for
     the server/query layer (now Accepted and implemented)
+  - `ADR-0015` — benchmarking `ProductionStore` against real external
+    databases (SQLite, Postgres, DuckDB) on the same three fixed access
+    patterns already used in-repo (now Accepted and implemented)
 - **`docs/specifications/SPEC-REGISTRY.md`** + **`docs/specifications/storage/`**/**`docs/specifications/server/`**
   — the `STORAGE-0xx`/`SERVER-0xx` requirement/spec tree each round implemented against.
 - **`docs/roadmap/ROADMAP.md`** — status vocabulary and what's next.

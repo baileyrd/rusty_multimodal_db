@@ -30,6 +30,7 @@ Status vocabulary: `Proposed`, `Draft`, `Accepted`, `In Progress`,
 | `SERVER-TRANSACTION-BENCHMARK` | Bounded, additive extension of `SERVER-QUERY-LAYER`'s own throughput/latency benchmark (`benches/server.rs`, FR-014) to cover `Request::Transaction`: a directly-comparable `{domain}-txn` row set (`measure_transaction_latency`/`run_transaction_throughput`/`bench_transaction_domain`), same environment/pool/thread-count sweep as the existing `GetById` measurement; `SERVER-001` v0.8.0 (`SERVER-001-FR-018`); no ADR — completes already-accepted FR-014 scope, not a new decision | `SERVER-TRANSACTION` | `SERVER-001` | `cargo bench --features server,research --bench server` completes without panics, prints `{domain}-txn` rows for all three domains alongside the existing `GetById` rows, numbers in `RESULTS.md`'s `## Server / query layer` section; `cargo test --all-features`/`cargo test` both unaffected (bench-only change); `cargo fmt`/`clippy`/`check`/`doc` clean; finding: no meaningful latency or throughput cost relative to `GetById` at this benchmark's scale, on this session's shared container | Implemented | PR #59 |
 | `SERVER-TLS-DESIGN` | A design for native transport encryption on the server/query layer: TLS termination inside this crate's own server process via `rusty_tls` (`Rusty-Mill/rusty_mill`, this owner's own ecosystem-wide `rustls` wrapper — not a direct `rustls` dependency, not an external proxy/tunnel), an opt-in `TlsConfig` mirroring `AuthConfig`'s own shape, a per-connection stream abstraction (`rusty_tls::TlsServerStream`) so `handle_connection`/`send_response` work uniformly whether or not TLS is active — `src/server/framing.rs` needs zero changes, already generic over `Read`/`Write`; ADR-0014 (**Accepted** — owner approved as revised); `docs/design/SERVER-TLS-DESIGN.md`; explicitly does not add mTLS (client identity remains `AuthConfig`'s existing token scheme) | `SERVER-AUTH`, `SERVER-TRANSACTION-BENCHMARK` | — (no spec written for the design itself; `SERVER-TLS` below registers the implementation against `SERVER-001`, matching `SERVER-AUTH-DESIGN`'s own precedent) | Design document and ADR written, incremental additions to `SERVER-001`'s already-compiling `protocol.rs`/`mod.rs` shapes (no standalone scratch probe built — see ADR-0014's own "Validation and revisit triggers" for why); owner reviewed and accepted the design and ADR-0014 as revised, no further changes requested | Accepted | PR #61, #62, #63 |
 | `SERVER-TLS` | The real implementation of `SERVER-TLS-DESIGN`: `TlsConfig`/`TlsConfigError` (`src/server/mod.rs`), a new `ReadHalf`/`WriteHalf` enum pair (`Plain`'s existing `TcpStream::try_clone` split unchanged; `Tls` shares one `Rc<RefCell<rusty_tls::TlsServerStream<TcpStream>>>` between both halves — a real implementation-time finding, since `rustls`' connection state can't be split the way a raw socket can), a small hand-written PEM/base64 decoder (`src/server/pem.rs`, new, not a new dependency), `serve`'s new `tls: Option<TlsConfig>` parameter; `SERVER-001` v0.9.0 | `SERVER-TLS-DESIGN` | `SERVER-001` | `cargo test --features server` green including `tests/server_tls_integration.rs`'s five tests (a full round trip over TLS; `TlsConfig` composed with `AuthConfig`; a plain connection to a TLS-configured server never getting a valid response; `TlsConfig: None` reproducing plaintext behavior; the `Authenticate` token verifiably absent from the raw bytes sent on the wire, via a byte-recording stream wrapper) and `src/server/pem.rs`'s ten new unit tests; `cargo test`/`cargo test --all-features` unaffected; `cargo fmt`/`clippy`/`check`/`doc` clean; every `SERVER-TLS-DESIGN.md` functional acceptance criterion verified over a real socket; no `src/store/**`/`src/durability/**`/`src/concurrency/**` changes, and every pre-existing plaintext test passes unmodified (verifying the `Plain` half of the new stream abstraction introduced no behavior change) | Implemented | this PR |
+| `EXTERNAL-DB-BENCHMARK` | The first external (not this-crate-implemented) comparison point: `ProductionStore` benchmarked against real SQLite (`rusqlite`), Postgres (`postgres`, local server), and DuckDB (`duckdb`) on the same three access-pattern shapes already benchmarked in-repo — `get`, `scan_ages`, one-hop `littermate_of` traversal (depth-bounded recursive CTE over an adjacency table). New `benches/external_db.rs`, gated behind a new `external-db-bench` Cargo feature; ADR-0015 (Accepted); `STORAGE-013` v0.1.0. Stays inside `docs/FUTURE-GROWTH.md`'s existing "Path to SQLite/DuckDB parity" scope line — no SQL parser/planner/arbitrary joins built or implied | `SERVER-TLS` (most recent prior round; no functional dependency) | `STORAGE-013` | `cargo check --bench external_db --features research,external-db-bench` clean; a real `cargo bench --features research,external-db-bench --bench external_db` run against a local Postgres instance, all three workload groups × three sizes × four systems, no panics; `RESULTS.md`'s `## External database comparison` section states real numbers and a verdict per workload, including any workload where `ProductionStore` loses; `cargo fmt`/`clippy --all-targets --all-features`/`check`/`doc` clean; no `src/` changes | Implemented | this PR |
 
 ## Sequencing notes
 
@@ -440,6 +441,30 @@ the real bytes a TLS client sends on the wire (a byte-recording
 `TcpStream` wrapper) and asserts the plaintext `Authenticate` token is
 genuinely absent — the direct evidence the design's whole purpose
 depends on, not an assumption.
+
+`EXTERNAL-DB-BENCHMARK` is a different kind of round from everything
+before it in this roadmap: not a new backend, durability variant,
+concurrency strategy, or server capability this crate itself implements,
+but the first comparison against real, external, general-purpose
+databases — SQLite, Postgres, DuckDB — on the same three access-pattern
+shapes (`get`, `scan_ages`, one-hop `littermate_of` traversal) this
+project has always benchmarked. ADR-0015 (Accepted) and `STORAGE-013`
+record the decision; `RESULTS.md`'s `## External database comparison`
+section has the numbers. `ProductionStore` wins every cell — expected,
+since it is a purpose-built in-memory store with none of a general-purpose
+engine's parsing/planning/serialization overhead to pay — but the more
+interesting finding is where each external engine gets *close*: DuckDB
+closes to within 3.3× of `ProductionStore` on `scan_ages` at 1M records
+(exactly the columnar-scan strength the task predicted), while being the
+*worst* of the three external engines on both `get` and graph traversal
+at every size — a narrow, not general, strength. A real methodology bug
+was found and fixed mid-round, not glossed over: Postgres's graph-traversal
+numbers initially showed a ~1,400× cliff between 1K and 100K records,
+traced to a missing `ANALYZE` after the bulk `COPY` load driving Postgres's
+recursive-CTE cost estimate high enough to trigger LLVM JIT compilation on
+every execution — confirmed directly via `EXPLAIN ANALYZE` (53 ms before
+the fix, 0.196 ms after, same query, same data). See `RESULTS.md` for the
+full investigation and the corrected numbers it produced.
 
 ## Out of scope for this roadmap (see architecture doc "where this can go
 next")
