@@ -43,6 +43,18 @@ not deferred again by default." This ADR is that evaluation.
 transport encryption as the single remaining piece of the most-repeated
 open gap in this project's own documentation.
 
+**Revised during review**: the owner asked whether this owner's own
+`rusty_*`/`Rusty-Mill` ecosystem already had a hand-rolled or wrapped
+solution for the dependency this ADR was about to recommend, before it
+was accepted. It does — `Rusty-Mill/rusty_mill`'s `crates/rusty_tls`, a
+crate that exists specifically so no consumer in this ecosystem depends
+on `rustls` directly, with a server-side `TlsAcceptor`/`TlsServerStream`
+API that is close to a direct fit for this proposal's own needs. This
+ADR and its design document are revised accordingly, in place, as part
+of the same review pass — not superseded, not a second proposal. See
+`docs/design/SERVER-TLS-DESIGN.md`'s own "Ecosystem check" section for
+the full finding.
+
 ## Decision drivers
 
 - **Close the last remaining half of the most-repeated named gap**,
@@ -55,6 +67,15 @@ open gap in this project's own documentation.
   changes the calculus that led to the original rejection — this driver
   requires actually checking that, not reflexively repeating the earlier
   conclusion.
+- **Prefer this owner's own ecosystem over a fresh third-party
+  dependency when an equivalent already exists there.** Not a driver
+  this ADR started with — added mid-review once the owner asked the
+  question directly (see "Context" above) — but a real one going
+  forward for any dependency this project takes on: `rusty_tls` is
+  already tested, fuzzed, and maintained by the same owner specifically
+  to prevent every consumer in their ecosystem from separately
+  evaluating and depending on `rustls` (or a competing TLS crate) on its
+  own.
 - **Preserve the "additive, not a rewrite" bar** every prior server-layer
   round has held itself to (ADR-0010's original implementation, `SERVER-AUTH`,
   `SERVER-TRANSACTION`). A design that would force changes throughout
@@ -75,14 +96,24 @@ interfaces" section for the full reasoning. Summarized:
    the *sole* answer this time, but named as remaining available, not
    removed) vs. `native-tls`/system TLS bindings (rejected — same
    platform-dependent-behavior reasoning ADR-0012 already gave) vs.
-   **native TLS via `rustls`, terminated inside this crate's own server
-   process** (**chosen** — `rustls` ships a synchronous, `Read`/`Write`-
-   compatible API that composes with the existing thread-per-connection
-   model with zero changes to `framing.rs`, undercutting ADR-0012's
-   original objection once the implicit async-runtime assumption is
-   separated out; also closes a gap an external proxy structurally
-   cannot, since this crate can never verify from inside its own process
-   that a proxy is actually in front of it).
+   depending on `rustls` directly (this ADR's own original choice —
+   rejected on revision, see below) vs. **native TLS via `rusty_tls`
+   (`Rusty-Mill/rusty_mill`, this owner's own ecosystem-wide wrapper
+   around `rustls`), terminated inside this crate's own server process**
+   (**chosen** — its sync API composes with the existing
+   thread-per-connection model with zero changes to `framing.rs`,
+   undercutting ADR-0012's original objection once the implicit
+   async-runtime assumption is separated out; also closes a gap an
+   external proxy structurally cannot, since this crate can never verify
+   from inside its own process that a proxy is actually in front of it;
+   and, on top of that, `rusty_tls` exists specifically so no consumer in
+   this owner's ecosystem depends on `rustls` — or picks its own
+   crypto-provider crate, cipher policy, or trust-anchor handling —
+   independently, so depending on `rustls` directly would have quietly
+   reintroduced the exact fragmentation `rusty_tls` exists to prevent,
+   for no benefit: `rusty_tls`'s server-side `TlsAcceptor`/
+   `TlsServerStream` already matches this proposal's own needs almost
+   exactly, tested and fuzzed already).
 2. **Stream abstraction for the existing concrete-`TcpStream` call
    sites** (`handle_connection`/`send_response`): a generic
    `handle_connection<S: Read + Write>` (considered — cleanest typing,
@@ -104,11 +135,13 @@ interfaces" section for the full reasoning. Summarized:
 - `docs/design/SERVER-TLS-DESIGN.md` records the full proposed design:
   an opt-in `TlsConfig` (certificate chain + private key, PEM,
   operator-supplied file paths) accepted alongside the existing
-  `AuthConfig`; a per-connection TLS handshake via `rustls::ServerConnection`
-  completed before any framed `Request`/`Response` traffic (including
-  `Authenticate`) is ever read or written; `src/server/framing.rs`
-  requires zero changes, since `read_message`/`write_message` are
-  already generic over `Read`/`Write`.
+  `AuthConfig`; a per-connection TLS handshake via
+  `rusty_tls::TlsAcceptor::accept` completed before any framed
+  `Request`/`Response` traffic (including `Authenticate`) is ever read
+  or written; `src/server/framing.rs` requires zero changes, since
+  `read_message`/`write_message` are already generic over `Read`/`Write`
+  and `rusty_tls::TlsServerStream<S>` is already exactly the
+  `Read`/`Write`-implementing wrapper this needs.
 - **Client identity is unchanged by this proposal.** TLS gives the
   server a real certificate to authenticate itself with, and encrypts
   every byte on the wire (including `AuthConfig`'s tokens); it does not
@@ -118,11 +151,21 @@ interfaces" section for the full reasoning. Summarized:
 - A server with no `TlsConfig` configured behaves exactly as today's
   `SERVER-001` — the same backward-compatibility bar `AUTH-FR-007` set
   for authentication, applied here to encryption.
-- One new dependency: `rustls` (plus whatever crypto-provider crate it
-  requires — e.g. `aws-lc-rs` or `ring`, an implementation-time choice
-  between `rustls`'s supported backends, not fixed by this ADR). A real,
-  meaningfully larger dependency addition than `subtle` was for
-  authentication — named plainly, not minimized, in "Consequences" below.
+- One new dependency: a pinned git dependency on `rusty_tls`
+  (`Rusty-Mill/rusty_mill`, `crates/rusty_tls` — this owner's own
+  ecosystem-wide TLS wrapper, matching the pinning convention `rusty_tls`
+  itself already uses for its own sibling dependencies). `rustls` and its
+  crypto provider (`ring`, already `rusty_tls`'s own committed choice —
+  its own `Cargo.toml` explains why over `aws-lc-rs`) remain in the
+  dependency graph transitively, but this crate's own `Cargo.toml` never
+  names `rustls` directly — preserving the "no consumer rolls its own
+  TLS" seam `rusty_tls` exists to establish across this owner's
+  ecosystem. Still a real, meaningfully larger dependency addition than
+  `subtle` was for authentication in terms of transitive graph weight —
+  named plainly, not minimized, in "Consequences" below — but a
+  materially smaller *decision* than evaluating and adopting `rustls`
+  fresh, since the crypto-provider choice, cipher policy, and
+  trust-anchor handling are already made and already tested.
 - **Acceptance of this ADR authorizes the design, not implementation
   code.** No existing source file is modified by this ADR itself. Per
   `SERVER-AUTH`/`SERVER-TRANSACTION`'s own precedent, a real
@@ -149,15 +192,36 @@ interfaces" section for the full reasoning. Summarized:
 - Does not remove the external-proxy option — an operator who prefers
   that model can still use it; this proposal only stops requiring it as
   the sole path to encryption.
+- Depends on an already-tested, already-fuzzed wrapper (`rusty_tls`)
+  rather than evaluating and integrating `rustls` from scratch — this
+  crate inherits `rusty_tls`'s own hermetic rejection-path test suite
+  (wrong hostname, expired cert, untrusted root, a real OS-trust-anchor
+  corpus test) instead of needing to build equivalent coverage itself,
+  and inherits working TLS 1.3 session-ticket resumption for free
+  (`rusty_tls::server`'s own `finish_config` already sets a real ticketer
+  — a detail this ADR would otherwise have had to get right itself).
 
 ### Negative / tradeoffs
 
 - **A real, meaningfully larger dependency addition than any prior
-  server-layer round has taken.** `rustls` plus a crypto-provider crate
-  is a bigger footprint than `subtle` (a small, single-purpose
-  comparison utility) — this project's own minimal-dependency posture
-  means this tradeoff should be weighed by the owner explicitly, not
-  waved through because encryption sounds obviously necessary.
+  server-layer round has taken**, even sourced through `rusty_tls`
+  rather than raw `rustls`. `rustls`, its crypto provider, and
+  `rusty_tls` itself are a bigger transitive footprint than `subtle` (a
+  small, single-purpose comparison utility) — this project's own
+  minimal-dependency posture means this tradeoff should be weighed by
+  the owner explicitly, not waved through because encryption sounds
+  obviously necessary, or because the dependency happens to be a sibling
+  repo rather than a stranger's crate.
+- **A new kind of dependency for this project**: every existing
+  `Cargo.toml` dependency in `rusty_multimodal_db` resolves from
+  crates.io; `rusty_tls` would be this crate's first git dependency, on
+  a sibling repository this owner also maintains. That is a real
+  precedent shift (see `rusty_tls`'s own `docs/versioning.md` for the
+  pinning discipline this pattern requires — a `rev`, never a branch,
+  and awareness that a monorepo path or repository URL can move), not
+  just a footnote — flagged for the owner's own judgment on whether a
+  cross-repo git dependency is a pattern this project should adopt at
+  all, independent of whether `rusty_tls` itself is the right crate.
 - **Still not mTLS.** Client identity remains exactly `AuthConfig`'s
   shared-secret token scheme — a real, named scope limit, not an
   oversight. A sufficiently determined attacker who obtains a valid
@@ -176,10 +240,12 @@ interfaces" section for the full reasoning. Summarized:
   explicit client-side trust configuration** — not a plug-and-play
   upgrade for an existing plaintext client without also updating its own
   connection setup.
-- The exact stream-abstraction shape (`enum Connection` vs. a generic
-  `handle_connection<S: Read + Write>`) is left as an implementation-time
-  decision — a real, if bounded, design choice still ahead of whoever
-  implements this.
+- The exact call-site shape wrapping `rusty_tls::TlsServerStream`
+  (`enum Connection` vs. a generic `handle_connection<S: Read + Write>`)
+  is left as an implementation-time decision — a real, if bounded,
+  design choice still ahead of whoever implements this. The TLS-stream
+  type itself is no longer open, since `rusty_tls::TlsServerStream<S>`
+  already provides it.
 
 ## Validation and revisit triggers
 
@@ -193,12 +259,19 @@ interfaces" section for the full reasoning. Summarized:
   explicitly as a deliberate scope choice, not an oversight.
 - Revisit if: mTLS becomes a real requirement now that this crate owns
   TLS natively — a real, separate future design, not decided here (see
-  `SERVER-TLS-DESIGN.md`'s own "Open questions").
+  `SERVER-TLS-DESIGN.md`'s own "Open questions"). Narrower than it was
+  before this revision: the mechanism (`rusty_tls::TlsAcceptor::new_with_client_auth`)
+  already exists, so that future revisit would mostly be a client-cert
+  distribution/revocation policy design, not an implementation from
+  scratch.
 - Revisit if: certificate rotation without a server restart becomes a
   real operational need — this design's "restart the process with new
   cert/key files" story would need replacing.
-- Revisit if: the owner judges the `rustls`/crypto-provider dependency
-  weight disproportionate on review — the external-proxy path remains
+- Revisit if: the owner judges the `rusty_tls`/`rustls`/crypto-provider
+  dependency weight disproportionate on review, **or** judges a git
+  dependency on a sibling repository the wrong pattern for this project
+  regardless of which crate it names — the external-proxy path remains
   fully available as the alternative, and this ADR would be rejected (or
-  revised to scope the dependency differently) rather than force through
-  regardless.
+  revised to scope the dependency differently, e.g. back to a direct
+  `rustls` dependency if the sibling-repo pattern itself is rejected)
+  rather than force through regardless.
