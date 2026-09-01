@@ -58,11 +58,12 @@ record of the bootstrap-time scope, not rewritten, per this project's own
 and `SERVER-001` for the real implementation. Its explicit,
 deliberately-unresolved security gaps at acceptance time (no
 authentication, no transport encryption) are being revisited, not left
-open indefinitely: ADR-0012 (**Accepted**, design only — no
-implementation yet) closes the authentication/authorization half — see
-that ADR and `docs/design/SERVER-AUTH-DESIGN.md` for the design and what
-it does and does not close (transport encryption remains a separate,
-still-open gap even now that ADR-0012 is accepted).
+open indefinitely: ADR-0012 (**Accepted and implemented**) closes the
+authentication/authorization half — see that ADR and
+`docs/design/SERVER-AUTH-DESIGN.md` for the design, and `SERVER-001`
+v0.6.0 for the real code (`AuthConfig`, `Request::Authenticate`).
+Transport encryption remains a separate, still-open gap — ADR-0012
+explicitly does not close it either way.
 
 ## Explicit non-goals
 

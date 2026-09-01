@@ -25,7 +25,7 @@ use rusty_multimodal_db::server::dog::DogConnectionStore;
 use rusty_multimodal_db::server::employee::EmployeeConnectionStore;
 use rusty_multimodal_db::server::order::OrderConnectionStore;
 use rusty_multimodal_db::server::protocol::{ParentLookup, ScanValue};
-use rusty_multimodal_db::server::serve;
+use rusty_multimodal_db::server::{serve, AuthConfig};
 use rusty_multimodal_db::ProductionStore;
 use std::net::{SocketAddr, TcpListener};
 use std::sync::Arc;
@@ -54,7 +54,7 @@ fn start_dog_server() -> SocketAddr {
     let connection_store = Arc::new(DogConnectionStore::new(store));
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
-    thread::spawn(move || serve(listener, connection_store));
+    thread::spawn(move || serve(listener, connection_store, AuthConfig::default()));
     addr
 }
 
@@ -86,7 +86,7 @@ fn start_order_server() -> SocketAddr {
     )));
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
-    thread::spawn(move || serve(listener, connection_store));
+    thread::spawn(move || serve(listener, connection_store, AuthConfig::default()));
     addr
 }
 
@@ -117,7 +117,7 @@ fn start_employee_server() -> SocketAddr {
     )));
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
-    thread::spawn(move || serve(listener, connection_store));
+    thread::spawn(move || serve(listener, connection_store, AuthConfig::default()));
     addr
 }
 

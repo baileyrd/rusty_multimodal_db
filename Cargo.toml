@@ -120,6 +120,10 @@ required-features = ["server", "research"]
 name = "server_schema_driven_client"
 required-features = ["server", "research"]
 
+[[test]]
+name = "server_auth_integration"
+required-features = ["server"]
+
 # Same treatment, same reason.
 [[example]]
 name = "memory_footprint"
@@ -193,6 +197,13 @@ redb = "2"
 # without a real concurrent map would just be a worse version of variant 1 or 2. The de facto
 # standard crate for this in the Rust ecosystem.
 dashmap = "6"
+# New as of the server auth work (ADR-0012, `SERVER-AUTH-DESIGN.md`): constant-time byte
+# comparison for token checking (`src/server/mod.rs`'s `AuthConfig::check`). Deliberately not
+# hand-rolled — a DIY constant-time loop is a well-known place timing side-channel bugs hide
+# silently (a compiler optimization can reintroduce early-exit behavior the source never wrote).
+# Only exercised behind the `server` feature, but left unconditional (matching `dashmap`'s own
+# treatment above, `research`-only) rather than `dep:`-gated — it's tiny and dependency-free.
+subtle = "2"
 
 [dependencies.rand]
 # Seeded, reproducible RNG for dataset generation (StdRng::seed_from_u64) and for benchmark

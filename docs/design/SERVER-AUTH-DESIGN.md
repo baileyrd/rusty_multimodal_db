@@ -434,3 +434,10 @@ of this design-only pass.
 - 2026-09-01: Accepted as proposed, no changes requested. Implementation
   is a separate, not-yet-started unit — see ADR-0012's own "Decision"
   section.
+- 2026-09-01: Implemented as `SERVER-001` v0.6.0 (`SERVER-001-FR-016`) —
+  see ADR-0012's own "Acceptance and implementation" section for the full
+  account, including the two implementation-time decisions this document
+  left open (environment variable names, `AuthConfig::new`/`::from_env`
+  split) and why the timing-measurement acceptance criterion is verified
+  against `AuthConfig::check` directly rather than over a real TCP round
+  trip.

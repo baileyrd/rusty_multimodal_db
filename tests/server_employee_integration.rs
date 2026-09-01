@@ -17,7 +17,7 @@ use rusty_multimodal_db::server::employee::{
 };
 use rusty_multimodal_db::server::framing::{read_message, write_message};
 use rusty_multimodal_db::server::protocol::{Request, Response, ScanValue};
-use rusty_multimodal_db::server::serve;
+use rusty_multimodal_db::server::{serve, AuthConfig};
 use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
 use std::thread;
@@ -77,7 +77,7 @@ fn start_server() -> std::net::SocketAddr {
 
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
-    thread::spawn(move || serve(listener, connection_store));
+    thread::spawn(move || serve(listener, connection_store, AuthConfig::default()));
     addr
 }
 

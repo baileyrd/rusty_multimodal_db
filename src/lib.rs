@@ -77,8 +77,11 @@
 //! [`server::client::SchemaDrivenClient`] is a real, reusable client
 //! built exactly this way: every request addressed by discovered field
 //! name, capability checks run client-side first, no domain-specific
-//! `FIELD_*` constant imported anywhere in it. **No authentication, no
-//! authorization, no transport encryption, no transaction semantics, no
+//! `FIELD_*` constant imported anywhere in it. Authentication/authorization
+//! is real and implemented ([`server::AuthConfig`]/`Request::Authenticate`,
+//! `docs/design/SERVER-AUTH-DESIGN.md`, ADR-0012, Accepted) but purely
+//! opt-in — a server started with no configured tokens behaves exactly as
+//! before. **No transport encryption, no transaction semantics, no
 //! query language beyond fixed field-tag addressing** — see [`server`]'s
 //! own module docs and `docs/decisions/ADR-0010-server-query-layer-proposal.md`
 //! (Accepted) before using it; this is new, parallel capability, same as
@@ -152,11 +155,12 @@ pub mod record;
 /// `docs/design/SERVER-QUERY-LAYER-DESIGN.md`, ADR-0010 (Accepted). Off by
 /// default behind the `server` Cargo feature, distinct from `research`:
 /// this is new, real, additive capability, not a benchmarked-alternative
-/// or historical-spike module, but it introduces a real
-/// network-listening binary surface with **no authentication, no
-/// authorization, and no transport encryption** — see this module's own
-/// doc comment and ADR-0010's Consequences before enabling it, and never
-/// expose a server built from it beyond a trusted, localhost/development
+/// or historical-spike module, and it introduces a real
+/// network-listening binary surface. Authentication/authorization is
+/// implemented and purely opt-in (`AuthConfig`, ADR-0012, Accepted); **no
+/// transport encryption** either way — see this module's own doc comment
+/// and ADR-0010's Consequences before enabling it, and never expose a
+/// server built from it beyond a trusted, localhost/development
 /// network.
 #[cfg(feature = "server")]
 pub mod server;

@@ -13,7 +13,7 @@
 
 use rusty_multimodal_db::record::DogRecord;
 use rusty_multimodal_db::server::dog::DogConnectionStore;
-use rusty_multimodal_db::server::serve;
+use rusty_multimodal_db::server::{serve, AuthConfig};
 use rusty_multimodal_db::ProductionStore;
 use std::net::TcpListener;
 use std::sync::Arc;
@@ -49,5 +49,5 @@ fn main() {
         "dog_server listening on {addr} (no auth, no encryption — trusted/localhost use only, see ADR-0010)"
     );
 
-    serve(listener, connection_store);
+    serve(listener, connection_store, AuthConfig::from_env());
 }
