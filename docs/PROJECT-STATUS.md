@@ -130,7 +130,7 @@ Evidence: `cargo test --all-features` / `cargo bench` output referenced in `RESU
 
   `SERVER-001`'s "Open questions" updated: the connection-count-ceiling item moves to resolved (with the peak-throughput surprise above named as a new, narrower open sub-question). No existing source file outside `benches/server.rs` and docs (`RESULTS.md`, `SERVER-001-query-layer.md`, this file) was touched — verified by diff. No new dependency, no spec version bump (matching `STORAGE-010`'s own precedent: retuning a bench's thread-count sweep for a new environment doesn't itself change the spec's implemented capability).
 
-  Merged via PR `<recorded at merge>` (`<recorded at merge>` → merge commit `<recorded at merge>`).
+  Merged via PR #43 (`de2b1ad` → merge commit `23995ca`).
 
 ## In progress
 
