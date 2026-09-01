@@ -1,6 +1,10 @@
-# `ProductionStore` File Portability Design (Proposed)
+# `ProductionStore` File Portability Design (Accepted)
 
-- Status: **Proposed**. Awaiting owner review — see
+- Status: **Accepted** (promoted from Proposed on 2026-09-01 — the owner
+  approved the design as proposed, no changes requested). Acceptance
+  authorizes the design; implementation still requires its own unit
+  (registering `STORAGE-014` and a planning packet) before any code is
+  written — see ADR-0016's "Decision" section. See
   `ADR-0016-production-store-file-portability-proposal.md` for the
   decision record this document backs.
 - Date: 2026-09-01

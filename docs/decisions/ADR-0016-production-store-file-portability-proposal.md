@@ -1,6 +1,6 @@
 # ADR-0016: Add file portability to `ProductionStore` — persist `breed`/edges alongside the existing `age`-only mmap file
 
-- Status: **Proposed**
+- Status: **Accepted** (promoted from Proposed on 2026-09-01 — the owner approved the design as proposed, no changes requested)
 - Date: 2026-09-01
 - Deciders: baileyrd
 - Related: `docs/design/PRODUCTION-STORE-PORTABILITY-DESIGN.md` (the full
