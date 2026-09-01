@@ -1,21 +1,24 @@
 //! Compares [`ProductionStore`] against three real external databases —
 //! SQLite (`rusqlite`), Postgres (`postgres`, against a locally-run
-//! server), and DuckDB (`duckdb`) — on the same four access-pattern
-//! shapes `benches/workloads.rs` already benchmarks in-repo: `get` (full-
-//! record read by UUID), `scan_ages` (a whole-table aggregate),
-//! `neighbors_one_hop`, and `neighbors_two_hop` (`littermate_of` graph
-//! traversal, one and two hops deep). See
+//! server), and DuckDB (`duckdb`) — on `get` (full-record read by UUID),
+//! `scan_ages` (a whole-table aggregate), and `littermate_of` graph
+//! traversal at one, two, and three hops deep. `get`/`scan_ages`/
+//! `neighbors_one_hop`/`neighbors_two_hop` mirror `benches/workloads.rs`'s
+//! own in-repo groups exactly; `neighbors_three_hop` (`STORAGE-013`
+//! v0.3.0) does not — no in-repo three-hop group exists (`bench_support`
+//! only composes up to two hops, see ADR-0004) — so this one benchmark's
+//! own `three_hop_neighbors` below is the only place that exact shape is
+//! measured at all, external or in-repo. See
 //! `docs/decisions/ADR-0015-external-database-benchmark.md` for why these
 //! three engines, why these query shapes, and what this comparison does
 //! and does not claim to answer — most importantly, this is *not* the
 //! full-SQL-parity comparison `docs/FUTURE-GROWTH.md` already scoped out;
 //! it is the same fixed access patterns this crate has always
-//! benchmarked, aimed at three more (external, general-purpose) targets.
-//! `neighbors_two_hop` is a later addition (`STORAGE-013` v0.2.0) — the
-//! original round (v0.1.0) deliberately depth-bounded every graph query
-//! to one hop, matching how `benches/workloads.rs`'s own
-//! `neighbors_two_hop` group was itself a separate, later addition to
-//! `STORAGE-006`'s one-hop original.
+//! benchmarked (plus this one external-only extra hop), aimed at three
+//! more (external, general-purpose) targets. `neighbors_two_hop` and
+//! `neighbors_three_hop` are later additions (`STORAGE-013` v0.2.0 and
+//! v0.3.0) — the original round (v0.1.0) deliberately depth-bounded every
+//! graph query to one hop.
 //!
 //! Each dataset is built once per size via
 //! [`rusty_multimodal_db::bench_support::build_dataset`] — the exact same
@@ -48,8 +51,26 @@ use rusty_multimodal_db::{DogStore, ProductionStore};
 use duckdb::Connection as DuckConn;
 use postgres::{Client as PgClient, NoTls};
 use rusqlite::Connection as SqliteConn;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use uuid::Uuid;
+
+/// A third hop composed the same way `bench_support::two_hop_neighbors` composes its own two —
+/// generically, via repeated `DogStore::neighbors` calls, no trait method (see ADR-0004): the
+/// deduplicated union of `neighbors(n)` for every `n` in `two_hop_neighbors(id)`. Lives here,
+/// private to this bench target, rather than in `bench_support` alongside `two_hop_neighbors` —
+/// this benchmark is (so far) its only call site, and this project's own convention is not to
+/// generalize before a second real one exists (see `docs/PROJECT-STATUS.md`'s repeated
+/// "no abstraction before two real call sites" reasoning).
+fn three_hop_neighbors<S: DogStore>(store: &S, id: Uuid) -> Vec<Uuid> {
+    let mut seen = HashSet::new();
+    for two_hop in two_hop_neighbors(store, id) {
+        for three_hop in store.neighbors(two_hop) {
+            seen.insert(three_hop);
+        }
+    }
+    seen.into_iter().collect()
+}
 
 /// Connection string for the locally-run Postgres server this benchmark
 /// expects but does not manage — see the ADR's "Setup" section for how to
@@ -218,6 +239,42 @@ fn run_neighbors_two_hop_sqlite(
     });
 }
 
+fn run_neighbors_three_hop_sqlite(
+    group: &mut BenchmarkGroup<'_, WallTime>,
+    n: usize,
+    dataset: &Dataset,
+) {
+    let conn = sqlite_load(dataset, n);
+    // Same recursive shape, extended one hop deeper again: `depth < 3` lets the recursive term
+    // fire once more, from the depth-2 rows, producing depth-3 rows; the final `WHERE depth = 3`
+    // keeps only those, matching this file's own `three_hop_neighbors` (the deduplicated union
+    // of `neighbors(n)` for every `n` in `two_hop_neighbors(id)`).
+    let mut stmt = conn
+        .prepare(
+            "WITH RECURSIVE hop(id, depth) AS (
+                 SELECT littermate_id, 1 FROM littermates WHERE dog_id = ?1
+                 UNION
+                 SELECT l.littermate_id, hop.depth + 1
+                 FROM littermates l JOIN hop ON l.dog_id = hop.id
+                 WHERE hop.depth < 3
+             )
+             SELECT id FROM hop WHERE depth = 3",
+        )
+        .expect("preparing SQLite three-hop neighbors query failed");
+    let mut cursor = RoundRobin::new(dataset.sample_ids.len());
+    group.bench_with_input(BenchmarkId::new("sqlite", n), &n, |b, _| {
+        b.iter(|| {
+            let id = dataset.sample_ids[cursor.advance()];
+            let rows: Vec<String> = stmt
+                .query_map(rusqlite::params![id.to_string()], |row| row.get(0))
+                .expect("SQLite three-hop neighbors query failed")
+                .collect::<Result<_, _>>()
+                .expect("SQLite three-hop neighbors row decode failed");
+            black_box(rows)
+        });
+    });
+}
+
 // ---------------------------------------------------------------------
 // DuckDB
 // ---------------------------------------------------------------------
@@ -350,6 +407,38 @@ fn run_neighbors_two_hop_duckdb(
                 .expect("DuckDB two-hop neighbors query failed")
                 .collect::<Result<_, _>>()
                 .expect("DuckDB two-hop neighbors row decode failed");
+            black_box(rows)
+        });
+    });
+}
+
+fn run_neighbors_three_hop_duckdb(
+    group: &mut BenchmarkGroup<'_, WallTime>,
+    n: usize,
+    dataset: &Dataset,
+) {
+    let conn = duckdb_load(dataset, n);
+    let mut stmt = conn
+        .prepare(
+            "WITH RECURSIVE hop(id, depth) AS (
+                 SELECT littermate_id, 1 FROM littermates WHERE dog_id = ?1
+                 UNION
+                 SELECT l.littermate_id, hop.depth + 1
+                 FROM littermates l JOIN hop ON l.dog_id = hop.id
+                 WHERE hop.depth < 3
+             )
+             SELECT id FROM hop WHERE depth = 3",
+        )
+        .expect("preparing DuckDB three-hop neighbors query failed");
+    let mut cursor = RoundRobin::new(dataset.sample_ids.len());
+    group.bench_with_input(BenchmarkId::new("duckdb", n), &n, |b, _| {
+        b.iter(|| {
+            let id = dataset.sample_ids[cursor.advance()];
+            let rows: Vec<String> = stmt
+                .query_map(duckdb::params![id.to_string()], |row| row.get(0))
+                .expect("DuckDB three-hop neighbors query failed")
+                .collect::<Result<_, _>>()
+                .expect("DuckDB three-hop neighbors row decode failed");
             black_box(rows)
         });
     });
@@ -524,6 +613,40 @@ fn run_neighbors_two_hop_postgres(
     });
 }
 
+fn run_neighbors_three_hop_postgres(
+    group: &mut BenchmarkGroup<'_, WallTime>,
+    n: usize,
+    dataset: &Dataset,
+) {
+    let mut client = postgres_load(dataset, n);
+    let stmt = client
+        .prepare(
+            "WITH RECURSIVE hop(id, depth) AS (
+                 SELECT littermate_id, 1 FROM littermates WHERE dog_id = $1
+                 UNION
+                 SELECT l.littermate_id, hop.depth + 1
+                 FROM littermates l JOIN hop ON l.dog_id = hop.id
+                 WHERE hop.depth < 3
+             )
+             SELECT id FROM hop WHERE depth = 3",
+        )
+        .expect("preparing Postgres three-hop neighbors query failed");
+    let mut cursor = RoundRobin::new(dataset.sample_ids.len());
+    group.bench_with_input(BenchmarkId::new("postgres", n), &n, |b, _| {
+        b.iter(|| {
+            let id = dataset.sample_ids[cursor.advance()];
+            let rows = client
+                .query(&stmt, &[&id])
+                .expect("Postgres three-hop neighbors query failed");
+            black_box(
+                rows.iter()
+                    .map(|row| row.get::<_, Uuid>(0))
+                    .collect::<Vec<_>>(),
+            )
+        });
+    });
+}
+
 // ---------------------------------------------------------------------
 // ProductionStore (re-run fresh here, same process/session as the
 // external engines above, so the comparison isn't stitched together from
@@ -570,6 +693,21 @@ fn run_neighbors_two_hop_production(
         b.iter(|| {
             let id = dataset.sample_ids[cursor.advance()];
             black_box(two_hop_neighbors(&store, black_box(id)))
+        });
+    });
+}
+
+fn run_neighbors_three_hop_production(
+    group: &mut BenchmarkGroup<'_, WallTime>,
+    n: usize,
+    dataset: &Dataset,
+) {
+    let store = ProductionStore::from((dataset.records.clone(), dataset.edges.clone()));
+    let mut cursor = RoundRobin::new(dataset.sample_ids.len());
+    group.bench_with_input(BenchmarkId::new("production", n), &n, |b, _| {
+        b.iter(|| {
+            let id = dataset.sample_ids[cursor.advance()];
+            black_box(three_hop_neighbors(&store, black_box(id)))
         });
     });
 }
@@ -627,11 +765,24 @@ fn bench_neighbors_two_hop(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_neighbors_three_hop(c: &mut Criterion) {
+    let mut group = c.benchmark_group("neighbors_three_hop_vs_external_db");
+    for &n in &SIZES {
+        let dataset = build_dataset(n);
+        run_neighbors_three_hop_production(&mut group, n, &dataset);
+        run_neighbors_three_hop_sqlite(&mut group, n, &dataset);
+        run_neighbors_three_hop_postgres(&mut group, n, &dataset);
+        run_neighbors_three_hop_duckdb(&mut group, n, &dataset);
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_get,
     bench_scan_ages,
     bench_neighbors_one_hop,
-    bench_neighbors_two_hop
+    bench_neighbors_two_hop,
+    bench_neighbors_three_hop
 );
 criterion_main!(benches);
