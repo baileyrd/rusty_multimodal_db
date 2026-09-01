@@ -81,16 +81,25 @@
 //! is real and implemented ([`server::AuthConfig`]/`Request::Authenticate`,
 //! `docs/design/SERVER-AUTH-DESIGN.md`, ADR-0012, Accepted) but purely
 //! opt-in — a server started with no configured tokens behaves exactly as
-//! before. **No transport encryption, no transaction semantics, no
-//! query language beyond fixed field-tag addressing** — see [`server`]'s
+//! before. Atomic multi-operation transactions are real and implemented
+//! too (`Request::Transaction`, `docs/design/SERVER-TRANSACTION-DESIGN.md`,
+//! ADR-0013, Accepted): a batch of writes applied all-or-nothing, isolated
+//! from concurrent connections — explicitly not crash-atomic and not a
+//! multi-round-trip interactive session, see that design's own
+//! "Non-goals". **No transport encryption, no query language beyond
+//! fixed field-tag addressing** — see [`server`]'s
 //! own module docs and `docs/decisions/ADR-0010-server-query-layer-proposal.md`
 //! (Accepted) before using it; this is new, parallel capability, same as
-//! `generic` above. One exception to "nothing in `production`/
+//! `generic` above. Two exceptions to "nothing in `production`/
 //! `generic::production` changed to build it": validating `Employee`
 //! surfaced a real gap in `generic::store`/`generic::production`
 //! (`Reversed` never forwarded `Neighbors`) — fixed there directly, see
 //! `docs/decisions/ADR-0009-generic-schema-design-proposal.md`'s
-//! "Acceptance and implementation" addendum.
+//! "Acceptance and implementation" addendum; and `Request::Transaction`'s
+//! atomicity guarantee needed a new critical-section primitive on both
+//! [`production::ProductionStore`] (`production::TransactionalStore`) and
+//! [`generic::production::GenericProductionStore`] (`with_exclusive`) —
+//! purely additive, no existing method's behavior changed.
 //!
 //! # Everything else: benchmarked alternatives, behind `research`
 //!

@@ -21,13 +21,14 @@
 //!
 //! # What this does not provide
 //!
-//! No transport encryption, no transaction semantics, no query language
-//! beyond fixed field-tag addressing — all explicit non-goals of the
-//! accepted design(s). **Do not expose a server built from this module
-//! beyond a trusted, localhost/development network** — see ADR-0010's
-//! Consequences; accepting and implementing ADR-0012 (below) closes the
-//! authentication/authorization half of that gap, not the transport-
-//! encryption half.
+//! No transport encryption, no query language beyond fixed field-tag
+//! addressing — explicit non-goals of the accepted design(s). **Do not
+//! expose a server built from this module beyond a trusted, localhost/
+//! development network** — see ADR-0010's Consequences; accepting and
+//! implementing ADR-0012 (below) closes the authentication/authorization
+//! half of that gap, not the transport-encryption half. ADR-0010's third
+//! named gap, "no transaction semantics," is now partly closed too — see
+//! "Atomic transactions" below for exactly which slice.
 //!
 //! # Authentication/authorization (`AuthConfig`), ADR-0012
 //!
@@ -37,11 +38,29 @@
 //! accepts and the [`TokenClass`] (`ReadOnly`/`ReadWrite`) each grants.
 //! `Request::Authenticate` establishes a connection's class; every other
 //! request kind is rejected with `ErrorCode::Unauthenticated` until it
-//! does, and `ReadOnly` is further rejected from `Request::UpdateField`
-//! with `ErrorCode::Unauthorized`. `AuthConfig::default()` (no tokens
-//! configured) reproduces exactly the pre-ADR-0012 unauthenticated
-//! behavior (`AUTH-FR-007`) — this is purely opt-in. See this module's
-//! own `handle_connection` for the full gating logic.
+//! does, and `ReadOnly` is further rejected from `Request::UpdateField`/
+//! `Request::Transaction` with `ErrorCode::Unauthorized`.
+//! `AuthConfig::default()` (no tokens configured) reproduces exactly the
+//! pre-ADR-0012 unauthenticated behavior (`AUTH-FR-007`) — this is purely
+//! opt-in. See this module's own `handle_connection` for the full gating
+//! logic.
+//!
+//! # Atomic transactions, ADR-0013
+//!
+//! `docs/design/SERVER-TRANSACTION-DESIGN.md` closes one bounded slice of
+//! ADR-0010's "no transaction semantics" gap: `Request::Transaction { updates }`
+//! batches several `UpdateField`-shaped writes and applies them
+//! all-or-nothing — every operation's precondition is checked before any
+//! write happens, isolated from concurrent connections by holding the
+//! wrapped store's existing lock for the whole batch (no new lock; see
+//! `crate::production::TransactionalStore`/
+//! `crate::generic::production::GenericProductionStore::with_exclusive`).
+//! **Deliberately not a multi-round-trip interactive session** (no
+//! `Begin`/`Commit`, transaction state held open across several
+//! requests — a real, unaccepted-elsewhere liveness risk) **and not
+//! crash-atomic** (a process crash mid-batch can leave a partial batch
+//! durably applied) — see that design document's own "Non-goals" for the
+//! full account.
 //!
 //! # A real, schema-driven client
 //!
@@ -63,6 +82,7 @@ pub mod protocol;
 
 use protocol::{
     DomainSchema, ErrorCode, FieldRef, ParentLookup, RecordId, Request, Response, ScanValue,
+    TransactionOp,
 };
 use std::io::{BufReader, BufWriter};
 use std::net::{TcpListener, TcpStream};
@@ -128,26 +148,45 @@ pub trait ConnectionStore: Send + Sync {
     /// knows its own field/relation shape unconditionally, no store access
     /// needed.
     fn describe(&self) -> DomainSchema;
+
+    /// Apply every operation in `updates` atomically: every precondition
+    /// (id exists, field known and updatable, value type matches) is
+    /// checked before any write is applied; either every write in
+    /// `updates` is applied, or none are. `Err((index, code))` names the
+    /// first operation that failed its precondition check — see
+    /// `docs/design/SERVER-TRANSACTION-DESIGN.md`, ADR-0013,
+    /// `TXN-FR-002`/`TXN-FR-003`.
+    fn apply_transaction(&self, updates: &[TransactionOp]) -> Result<(), (usize, ErrorCode)>;
 }
 
-fn err_response(code: ErrorCode) -> Response {
-    let message = match code {
+/// One message per [`ErrorCode`] variant — shared by [`err_response`] (a
+/// single request's failure) and `dispatch`'s `Request::Transaction` arm
+/// (a batch operation's failure, `Response::TransactionFailed`), so both
+/// paths report the same wording for the same code.
+fn error_message(code: ErrorCode) -> &'static str {
+    match code {
         ErrorCode::UnknownField => "unrecognized field tag for this domain",
         ErrorCode::Unsupported => "this operation is not available for this field/domain",
         ErrorCode::Malformed => "the supplied value does not match this field's type",
         ErrorCode::Unauthenticated => "this connection has not presented a recognized token",
         ErrorCode::Unauthorized => "this connection's token does not permit this operation",
-    };
+        ErrorCode::RecordNotFound => "this operation's id has no record",
+    }
+}
+
+fn err_response(code: ErrorCode) -> Response {
     Response::Err {
         code,
-        message: message.to_string(),
+        message: error_message(code).to_string(),
     }
 }
 
 /// The two static permission classes a configured token can grant — see
 /// `docs/design/SERVER-AUTH-DESIGN.md`, ADR-0012. Deliberately coarse:
-/// `ReadOnly` is blocked only from [`Request::UpdateField`]; both classes
-/// can do everything else, including `DescribeSchema` (`AUTH-FR-003`).
+/// `ReadOnly` is blocked only from [`Request::UpdateField`] and
+/// [`Request::Transaction`] (`TXN-FR-004` extends `AUTH-FR-003`'s rule to
+/// the latter); both classes can do everything else, including
+/// `DescribeSchema` (`AUTH-FR-003`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TokenClass {
     ReadOnly,
@@ -268,6 +307,14 @@ pub fn dispatch<S: ConnectionStore + ?Sized>(store: &S, req: Request) -> Respons
         // in the real dispatch loop; kept exhaustive rather than `_ =>`
         // so a future `Request` variant can't silently skip this decision.
         Request::Authenticate { .. } => err_response(ErrorCode::Unsupported),
+        Request::Transaction { updates } => match store.apply_transaction(&updates) {
+            Ok(()) => Response::Ok,
+            Err((index, code)) => Response::TransactionFailed {
+                index,
+                code,
+                message: error_message(code).to_string(),
+            },
+        },
     }
 }
 
@@ -300,7 +347,8 @@ fn send_response(writer: &mut BufWriter<TcpStream>, resp: &Response) -> bool {
 /// starts unauthenticated: every request except `Authenticate` is
 /// rejected with `ErrorCode::Unauthenticated` (including `DescribeSchema`
 /// — `AUTH-FR-002`) until a recognized token is presented, after which its
-/// [`TokenClass`] gates only `Request::UpdateField` (`AUTH-FR-003`).
+/// [`TokenClass`] gates `Request::UpdateField` and `Request::Transaction`
+/// (`AUTH-FR-003`, `TXN-FR-004`).
 fn handle_connection<S: ConnectionStore + ?Sized>(stream: TcpStream, store: &S, auth: &AuthConfig) {
     // This is a synchronous request/response protocol: each side writes a
     // small frame, then blocks reading the other side's small frame back.
@@ -359,7 +407,12 @@ fn handle_connection<S: ConnectionStore + ?Sized>(stream: TcpStream, store: &S, 
             }
         };
 
-        if class == TokenClass::ReadOnly && matches!(req, Request::UpdateField { .. }) {
+        if class == TokenClass::ReadOnly
+            && matches!(
+                req,
+                Request::UpdateField { .. } | Request::Transaction { .. }
+            )
+        {
             if !send_response(&mut writer, &err_response(ErrorCode::Unauthorized)) {
                 return;
             }
@@ -479,6 +532,24 @@ mod tests {
                     neighbors: false,
                 },
             }
+        }
+        fn apply_transaction(&self, updates: &[TransactionOp]) -> Result<(), (usize, ErrorCode)> {
+            // Same validate-then-apply shape a real adapter uses, against
+            // this fixture's own single-record, non-mutating "store" —
+            // exercises dispatch's Request::Transaction arm without
+            // needing a real domain adapter.
+            for (i, op) in updates.iter().enumerate() {
+                match (op.field, &op.value) {
+                    (FIELD_A, ScanValue::U32(_)) => {
+                        if op.id != RecordId::from_u128(1) {
+                            return Err((i, ErrorCode::RecordNotFound));
+                        }
+                    }
+                    (FIELD_A, _) => return Err((i, ErrorCode::Malformed)),
+                    _ => return Err((i, ErrorCode::UnknownField)),
+                }
+            }
+            Ok(())
         }
     }
 
@@ -600,6 +671,65 @@ mod tests {
                 }
             ),
             err_response(ErrorCode::Unsupported)
+        );
+    }
+
+    #[test]
+    fn transaction_all_pass_reports_ok() {
+        let store = FixtureStore;
+        assert_eq!(
+            dispatch(
+                &store,
+                Request::Transaction {
+                    updates: vec![
+                        TransactionOp {
+                            id: RecordId::from_u128(1),
+                            field: FIELD_A,
+                            value: ScanValue::U32(9),
+                        },
+                        TransactionOp {
+                            id: RecordId::from_u128(1),
+                            field: FIELD_A,
+                            value: ScanValue::U32(10),
+                        },
+                    ]
+                }
+            ),
+            Response::Ok
+        );
+    }
+
+    #[test]
+    fn transaction_reports_the_first_failing_operations_index_and_code() {
+        let store = FixtureStore;
+        assert_eq!(
+            dispatch(
+                &store,
+                Request::Transaction {
+                    updates: vec![
+                        TransactionOp {
+                            id: RecordId::from_u128(1),
+                            field: FIELD_A,
+                            value: ScanValue::U32(9),
+                        },
+                        TransactionOp {
+                            id: RecordId::from_u128(99),
+                            field: FIELD_A,
+                            value: ScanValue::U32(9),
+                        },
+                        TransactionOp {
+                            id: RecordId::from_u128(1),
+                            field: FIELD_A,
+                            value: ScanValue::U32(11),
+                        },
+                    ]
+                }
+            ),
+            Response::TransactionFailed {
+                index: 1,
+                code: ErrorCode::RecordNotFound,
+                message: error_message(ErrorCode::RecordNotFound).to_string(),
+            }
         );
     }
 

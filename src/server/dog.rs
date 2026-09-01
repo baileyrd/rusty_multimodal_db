@@ -6,10 +6,11 @@
 
 use super::protocol::{
     DomainSchema, ErrorCode, FieldCapabilities, FieldDescriptor, FieldRef, ParentLookup, RecordId,
-    RelationCapabilities, ScanValue, ValueKind,
+    RelationCapabilities, ScanValue, TransactionOp, ValueKind,
 };
 use super::ConnectionStore;
 use crate::concurrency::{ConcurrencyError, ConcurrentStore};
+use crate::production::TransactionalStore;
 use crate::store::{DogStore, StoreError};
 
 /// `Dog::breed` — read-only over this protocol: no `ScannableField`/
@@ -36,7 +37,9 @@ impl<S> DogConnectionStore<S> {
     }
 }
 
-impl<S: DogStore + ConcurrentStore + Send + Sync> ConnectionStore for DogConnectionStore<S> {
+impl<S: DogStore + ConcurrentStore + TransactionalStore + Send + Sync> ConnectionStore
+    for DogConnectionStore<S>
+{
     fn get(&self, id: RecordId) -> Option<Vec<(FieldRef, ScanValue)>> {
         DogStore::get(&self.store, id).map(|record| {
             vec![
@@ -132,6 +135,39 @@ impl<S: DogStore + ConcurrentStore + Send + Sync> ConnectionStore for DogConnect
                 neighbors: true,
             },
         }
+    }
+
+    fn apply_transaction(&self, updates: &[TransactionOp]) -> Result<(), (usize, ErrorCode)> {
+        self.store.with_exclusive(|inner| {
+            // Validate every operation's precondition before applying any
+            // write — `Dog`'s only mutable field is `age`; existence is
+            // the only thing that can vary at runtime (field/type
+            // validity is a pure match against the request itself, same
+            // as `update_field`'s own arms). Safe under one continuously
+            // held lock: this crate never deletes a record at runtime, so
+            // an id checked here stays valid for the apply phase below —
+            // see `docs/design/SERVER-TRANSACTION-DESIGN.md`'s own
+            // "no runtime deletion" invariant.
+            for (i, op) in updates.iter().enumerate() {
+                match (op.field, &op.value) {
+                    (FIELD_AGE, ScanValue::U32(_)) => {
+                        if DogStore::get(inner, op.id).is_none() {
+                            return Err((i, ErrorCode::RecordNotFound));
+                        }
+                    }
+                    (FIELD_AGE, _) => return Err((i, ErrorCode::Malformed)),
+                    (FIELD_BREED, _) => return Err((i, ErrorCode::Unsupported)),
+                    _ => return Err((i, ErrorCode::UnknownField)),
+                }
+            }
+            for op in updates {
+                if let ScanValue::U32(age) = op.value {
+                    DogStore::update_age(inner, op.id, age)
+                        .expect("already validated under the same lock acquisition above");
+                }
+            }
+            Ok(())
+        })
     }
 }
 

@@ -201,6 +201,41 @@ impl ProductionStore {
     }
 }
 
+/// A store that can hold one exclusive-access critical section spanning
+/// multiple logical operations — the real mechanism behind the server
+/// layer's `Request::Transaction` atomicity guarantee
+/// (`docs/design/SERVER-TRANSACTION-DESIGN.md`, ADR-0013,
+/// `TXN-FR-002`/`TXN-FR-006`). Implemented by [`ProductionStore`] only —
+/// not every [`ConcurrentStore`] implementor: the other
+/// `src/concurrency/**` variants are benchmarked historical alternatives,
+/// never wrapped by `server::dog::DogConnectionStore` in practice (every
+/// real call site uses `ProductionStore`), so extending this capability
+/// to them would be speculative generality with no real caller.
+pub trait TransactionalStore {
+    /// The type [`TransactionalStore::with_exclusive`]'s closure gets
+    /// exclusive access to.
+    type Exclusive: DogStore;
+
+    /// Runs `f` with exclusive write access held for `f`'s entire
+    /// duration — the same internal lock every other `&self`/
+    /// [`ConcurrentStore`] method on this store already acquires and
+    /// releases per call, exposed here as one continuous critical section
+    /// instead of many short ones.
+    fn with_exclusive<R>(&self, f: impl FnOnce(&mut Self::Exclusive) -> R) -> R;
+}
+
+impl TransactionalStore for ProductionStore {
+    type Exclusive = MmapAgeStore;
+
+    /// # Panics
+    ///
+    /// Panics if the lock is poisoned — see `LOCK_POISONED`.
+    fn with_exclusive<R>(&self, f: impl FnOnce(&mut MmapAgeStore) -> R) -> R {
+        let mut guard = self.inner.write().expect(LOCK_POISONED);
+        f(&mut guard)
+    }
+}
+
 impl DogStore for ProductionStore {
     fn get(&self, id: Uuid) -> Option<DogRecord> {
         self.inner.read().expect(LOCK_POISONED).get(id)
