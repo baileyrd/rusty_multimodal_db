@@ -73,7 +73,11 @@
 //! `Request::DescribeSchema` first to discover its fields, types, and
 //! supported operations at runtime (see
 //! `docs/decisions/ADR-0011-server-schema-discovery.md`, Accepted) —
-//! field *tags* stay the wire addressing scheme either way. **No authentication, no
+//! field *tags* stay the wire addressing scheme either way.
+//! [`server::client::SchemaDrivenClient`] is a real, reusable client
+//! built exactly this way: every request addressed by discovered field
+//! name, capability checks run client-side first, no domain-specific
+//! `FIELD_*` constant imported anywhere in it. **No authentication, no
 //! authorization, no transport encryption, no transaction semantics, no
 //! query language beyond fixed field-tag addressing** — see [`server`]'s
 //! own module docs and `docs/decisions/ADR-0010-server-query-layer-proposal.md`

@@ -104,7 +104,10 @@ A client that doesn't know a domain at compile time can send
 names every field, its wire type, and which operations it supports (see
 `ADR-0011`), so it can drive `GetById`/`FilterEq`/`ScanField`/
 `UpdateField`/`Parent`/`Children`/`Neighbors` from discovered field tags
-instead of hardcoded ones.
+instead of hardcoded ones. `server::client::SchemaDrivenClient` is a
+real, reusable client built exactly this way — addresses every field by
+name, never a domain's own `FIELD_*` constant, and checks capabilities
+client-side before sending.
 
 Three domain adapters validate the protocol: `Dog` (`Neighbors` only),
 `Order`/`Customer` (`Parent`/`Children` only), and `Employee` — the third,

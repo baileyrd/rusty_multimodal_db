@@ -26,7 +26,17 @@
 //! addressing — all explicit non-goals of the accepted design. **Do not
 //! expose a server built from this module beyond a trusted, localhost/
 //! development network** — see ADR-0010's Consequences.
+//!
+//! # A real, schema-driven client
+//!
+//! [`client::SchemaDrivenClient`] is the client half of ADR-0011's schema
+//! discovery: a real, reusable client that never imports a domain's own
+//! `FIELD_*` constants, driving every request purely from what
+//! `Request::DescribeSchema` reports at connect time. Unconditional under
+//! `server` (not `research`-gated) — it has no domain-specific code at
+//! all, only `Request`/`Response`/framing.
 
+pub mod client;
 pub mod dog;
 #[cfg(feature = "research")]
 pub mod employee;
