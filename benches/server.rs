@@ -47,34 +47,34 @@
 //! `GetById`'s already-known in-process cost under a much larger, mostly
 //! irrelevant fixed setup cost.
 //!
-//! # Thread counts: 1/4/24/48, the owner's Windows dev machine (`Beast`)
+//! # Thread counts: 1/4/32/64, `baileyai` itself
 //!
 //! The original container pass swept 1/4/8/16 unconditionally on a 4-core
 //! container, so 8 and 16 were honest but oversubscribed data points, not
 //! genuine added parallelism — `SERVER-001`'s own "Open questions" named
 //! the thread-per-connection model's real connection-count ceiling as
-//! unmeasured because of it. This pass runs directly on the owner's
-//! Windows dev machine (`Beast`, confirmed via `hostname`/`whoami`/`nproc`
-//! — real dedicated hardware, not a shared cloud container), the same
-//! machine `benches/concurrency.rs`'s own second history entry already
-//! used as a `baileyai`-unreachable substitute. `Beast` reports 24 logical
-//! processors via both `nproc` and `std::thread::available_parallelism()`
-//! (12 physical cores, AMD Ryzen 9 7900X3D) — so the swept counts are
-//! changed to match, using the exact same `[1, 4, 24, 48]` array
-//! `benches/concurrency.rs` already established for this machine: `1`
-//! (serial baseline), `4` (kept, directly comparable to the container's
-//! own non-oversubscribed 4-thread row), `24` (this machine's actual core
-//! count — the first genuinely non-oversubscribed high-thread-count data
-//! point this environment can produce), and `48` (2x cores, deliberate
-//! oversubscription, matching the "2x cores" pattern `concurrency.rs`
-//! already established). 8/16 are dropped since neither is at or past
-//! this machine's real headroom. A `baileyai` (32-core) follow-up would
-//! still be a genuine third data point, matching `concurrency.rs`'s own
-//! three-machine history, but is not required to answer this pass's own
-//! question: does the thread-per-connection model's throughput keep
-//! scaling past 4 threads on real, non-oversubscribed hardware, or does
-//! it plateau — see `RESULTS.md`'s `## Server / query layer` section for
-//! the answer this pass found.
+//! unmeasured because of it. A second pass substituted the owner's Windows
+//! dev machine (`Beast`, 24 logical / 12 physical cores) because `baileyai`
+//! was unreachable over SSH from that session, and swept `[1, 4, 24, 48]`
+//! to match. This third pass runs directly on `baileyai` itself — this
+//! session executes on that machine (confirmed via `hostname`/`whoami`/
+//! `nproc`), so no SSH substitution is needed. `baileyai` reports 32
+//! logical processors via both `nproc` and
+//! `std::thread::available_parallelism()` (16 physical cores, AMD Ryzen AI
+//! MAX+ 395, SMT enabled) — the same machine, and the same
+//! `[1, 4, 32, 64]` array, `benches/concurrency.rs`'s own third history
+//! entry already established: `1` (serial baseline), `4` (kept, directly
+//! comparable to both the container's and `Beast`'s own non-oversubscribed
+//! 4-thread rows), `32` (this machine's actual core count — the first
+//! genuinely non-oversubscribed high-thread-count data point this
+//! environment can produce), and `64` (2x cores, deliberate
+//! oversubscription, matching the "2x cores" pattern every prior pass in
+//! this history already established). 8/16/24/48 are dropped since none is
+//! at or past this machine's real headroom. See `RESULTS.md`'s
+//! `## Server / query layer` section for the answer this pass found: does
+//! the thread-per-connection model's throughput keep scaling past 4
+//! threads on real, non-oversubscribed hardware, or does it plateau — and
+//! if so, at what count relative to real core count.
 //!
 //! # One request kind (`GetById`), all three domains
 //!
@@ -115,8 +115,8 @@ use uuid::Uuid;
 /// contended-pool size — see this module's own doc comment.
 const POOL_SIZE: usize = 20;
 /// See this module's own doc comment — matches `benches/concurrency.rs`'s
-/// own `Beast`-specific (owner's Windows dev machine) sweep.
-const THREAD_COUNTS: [usize; 4] = [1, 4, 24, 48];
+/// own `baileyai`-specific sweep.
+const THREAD_COUNTS: [usize; 4] = [1, 4, 32, 64];
 /// Real-socket round trips are far more expensive per-op than the
 /// in-process operations `benches/concurrency.rs` sweeps (`OPS_PER_THREAD
 /// = 10_000` there), so this is lower to keep the full domain × thread-count
@@ -302,10 +302,10 @@ fn main() {
         .unwrap_or(0);
     println!("std::thread::available_parallelism() reports: {available_parallelism}");
     println!(
-        "(thread counts below are swept at 1/4/24/48 — this machine's real core \
+        "(thread counts below are swept at 1/4/32/64 — this machine's real core \
          count and a deliberate 2x-oversubscription point, matching \
-         benches/concurrency.rs's own Beast sweep; see this module's own doc \
-         comment for the container-vs-real-hardware history)"
+         benches/concurrency.rs's own baileyai sweep; see this module's own doc \
+         comment for the container-then-Beast-then-baileyai history)"
     );
     println!();
     println!(
