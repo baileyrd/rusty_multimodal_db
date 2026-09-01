@@ -1,7 +1,10 @@
-# Server Transport Encryption Design (Proposed)
+# Server Transport Encryption Design (Accepted)
 
-- Status: **Proposed** — awaiting owner review. Does not authorize any
-  implementation; see ADR-0014's own "Decision" section.
+- Status: **Accepted** (promoted from Proposed on 2026-09-01 — the owner
+  approved the design as revised, no further changes requested).
+  Acceptance authorizes the design; implementation follows as its own
+  unit — see ADR-0014's own "Acceptance and implementation" section
+  once it lands.
 - Date: 2026-09-01
 - Related: `docs/specifications/server/SERVER-001-query-layer.md` (the
   spec this design would extend, once accepted), `docs/decisions/ADR-0010-server-query-layer-proposal.md`
@@ -508,3 +511,7 @@ after this design is explicitly accepted.
   "Ecosystem check" above for the full finding. Still Proposed, not yet
   accepted — this revision is part of the same review pass, not a
   separate proposal.
+- 2026-09-01: Accepted as revised, no further changes requested. ADR-0014
+  and this document are now Accepted. Implementation follows as its own
+  unit — see ADR-0014's own "Acceptance and implementation" section once
+  it lands.

@@ -129,11 +129,11 @@ server instance accepts and the `ReadOnly`/`ReadWrite` class each grants;
 unauthenticated behavior exactly, so this is purely opt-in. It closes the
 "anyone who can open a TCP connection can do anything" gap, not the
 transport-encryption one — tokens and every record value are still
-plaintext on the wire. (A design proposal to close the transport-
+plaintext on the wire. (An accepted design to close the transport-
 encryption gap natively, via `rusty_tls` — this owner's own
 ecosystem-wide wrapper around `rustls`, `Rusty-Mill/rusty_mill` —
-exists: `docs/design/SERVER-TLS-DESIGN.md`, ADR-0014 — but it's
-**Proposed, not implemented**; this paragraph still describes the
+exists: `docs/design/SERVER-TLS-DESIGN.md`, ADR-0014, **Accepted** — but
+it's **not implemented yet**; this paragraph still describes the
 current, real state.)
 **Atomic multi-operation transactions are now implemented** — `docs/design/SERVER-TRANSACTION-DESIGN.md`, ADR-0013,
 Accepted — `Request::Transaction { updates }` batches several
@@ -184,12 +184,13 @@ at the right file:
   multi-operation transactions on the server/query layer, now **Accepted
   and implemented** (`Request::Transaction`, `server` feature, `SERVER-001`
   v0.7.0).
-- **`docs/design/SERVER-TLS-DESIGN.md`** — a design proposal for native
+- **`docs/design/SERVER-TLS-DESIGN.md`** — the design for native
   transport encryption (TLS via `rusty_tls`, this owner's own
-  ecosystem-wide `rustls` wrapper) on the server/query layer,
-  **Proposed, not yet accepted** — no implementation exists yet.
-- **`docs/decisions/`** — mostly accepted architectural decisions, one
-  proposal still pending review, in order:
+  ecosystem-wide `rustls` wrapper) on the server/query layer, now
+  **Accepted** — no implementation exists yet, tracked as a separate,
+  not-yet-started unit.
+- **`docs/decisions/`** — one ADR per accepted architectural decision, in
+  order:
   - `ADR-0001` — the three-backend (AoS/SoA/canonical) empirical comparison
   - `ADR-0002` — cache-miss instrumentation platform
   - `ADR-0003` — eager write-through cache invalidation
@@ -205,8 +206,9 @@ at the right file:
     (now Accepted and implemented)
   - `ADR-0013` — atomic multi-operation transactions for the
     server/query layer (now Accepted and implemented)
-  - `ADR-0014` — native transport encryption (TLS) for the server/query
-    layer (**Proposed**, awaiting review — no implementation yet)
+  - `ADR-0014` — native transport encryption (TLS), via `rusty_tls`, for
+    the server/query layer (now **Accepted** — no implementation yet, a
+    separate, not-yet-started unit)
 - **`docs/specifications/SPEC-REGISTRY.md`** + **`docs/specifications/storage/`**/**`docs/specifications/server/`**
   — the `STORAGE-0xx`/`SERVER-0xx` requirement/spec tree each round implemented against.
 - **`docs/roadmap/ROADMAP.md`** — status vocabulary and what's next.
