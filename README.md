@@ -129,7 +129,12 @@ server instance accepts and the `ReadOnly`/`ReadWrite` class each grants;
 unauthenticated behavior exactly, so this is purely opt-in. It closes the
 "anyone who can open a TCP connection can do anything" gap, not the
 transport-encryption one — tokens and every record value are still
-plaintext on the wire.
+plaintext on the wire. **A design for atomic multi-operation
+transactions is proposed, not yet accepted or implemented** —
+`docs/design/SERVER-TRANSACTION-DESIGN.md`, ADR-0013, Proposed — see that
+document for what it would and wouldn't deliver (atomicity/isolation
+with respect to concurrent access, explicitly not crash-atomicity or a
+multi-round-trip interactive session) before assuming any of it exists.
 
 ```sh
 cargo bench --features server,research --bench server   # real-socket round-trip latency + thread-per-connection throughput sweep, all three domains
@@ -167,6 +172,9 @@ at the right file:
 - **`docs/design/SERVER-AUTH-DESIGN.md`** — the design for
   authentication/authorization on the server/query layer, now **Accepted
   and implemented** (`AuthConfig`, `server` feature, `SERVER-001` v0.6.0).
+- **`docs/design/SERVER-TRANSACTION-DESIGN.md`** — the design for atomic
+  multi-operation transactions on the server/query layer, **Proposed**,
+  not yet reviewed or accepted — no implementation exists.
 - **`docs/decisions/`** — one ADR per accepted architectural decision, in
   order:
   - `ADR-0001` — the three-backend (AoS/SoA/canonical) empirical comparison
@@ -182,6 +190,9 @@ at the right file:
   - `ADR-0011` — schema discovery for the server/query layer (now Accepted)
   - `ADR-0012` — authentication/authorization for the server/query layer
     (now Accepted and implemented)
+  - `ADR-0013` — atomic multi-operation transactions for the
+    server/query layer (**Proposed** — awaiting owner review, no
+    implementation yet)
 - **`docs/specifications/SPEC-REGISTRY.md`** + **`docs/specifications/storage/`**/**`docs/specifications/server/`**
   — the `STORAGE-0xx`/`SERVER-0xx` requirement/spec tree each round implemented against.
 - **`docs/roadmap/ROADMAP.md`** — status vocabulary and what's next.
