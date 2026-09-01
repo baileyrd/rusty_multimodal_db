@@ -88,6 +88,23 @@
 //! benchmark's own question is what the network/dispatch layer adds on
 //! top, which one representative request kind answers without tripling
 //! this benchmark's own already-large thread-count/domain matrix.
+//!
+//! # `Request::Transaction`, added alongside `SERVER-001` v0.7.0
+//!
+//! `SERVER-001` shipped `Request::Transaction` (ADR-0013) without a
+//! throughput/latency characterization the way `GetById` got here at
+//! v0.4.0 — this is that follow-up, using the same latency-baseline-then-
+//! throughput-sweep shape. Each domain's transaction touches two distinct
+//! ids from the same `POOL_SIZE` pool, both set to the same new value —
+//! matching `tests/server_transaction_integration.rs`'s own flagship
+//! stress test's request shape, the smallest batch that's still a real,
+//! representative multi-operation transaction rather than a single
+//! `UpdateField` in disguise. Reported as its own `{domain}-txn` row set,
+//! directly comparable to that domain's plain `GetById` rows above it
+//! (same pool, same thread counts, same iteration counts) — the
+//! difference between the two is exactly the cost `Request::Transaction`'s
+//! validate-then-apply, longer-held-lock mechanism adds over a single
+//! read.
 
 use rusty_multimodal_db::bench_support::{fresh_temp_dir, RoundRobin};
 use rusty_multimodal_db::generic::order_customer::{
@@ -99,11 +116,13 @@ use rusty_multimodal_db::generic_spike::employee_impl::{
 };
 use rusty_multimodal_db::production::ProductionStore;
 use rusty_multimodal_db::record::DogRecord;
-use rusty_multimodal_db::server::dog::DogConnectionStore;
-use rusty_multimodal_db::server::employee::EmployeeConnectionStore;
+use rusty_multimodal_db::server::dog::{DogConnectionStore, FIELD_AGE};
+use rusty_multimodal_db::server::employee::{EmployeeConnectionStore, FIELD_SALARY};
 use rusty_multimodal_db::server::framing::{read_message, write_message};
-use rusty_multimodal_db::server::order::OrderConnectionStore;
-use rusty_multimodal_db::server::protocol::{Request, Response};
+use rusty_multimodal_db::server::order::{OrderConnectionStore, FIELD_AMOUNT};
+use rusty_multimodal_db::server::protocol::{
+    FieldRef, Request, Response, ScanValue, TransactionOp,
+};
 use rusty_multimodal_db::server::{serve, AuthConfig};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::{Arc, Barrier};
@@ -296,6 +315,129 @@ fn bench_domain(name: &str, addr: SocketAddr, ids: Vec<Uuid>) {
     }
 }
 
+/// Single-connection, zero-contention `Request::Transaction` round-trip
+/// latency — the transaction analogue of [`measure_latency`]: a
+/// two-operation batch touching two distinct ids from the pool each round
+/// trip, both set to `value_at(i)`. Reuses [`LATENCY_ITERATIONS`] for
+/// direct comparability with the single-operation baseline.
+fn measure_transaction_latency(
+    addr: SocketAddr,
+    ids: &[Uuid],
+    field: FieldRef,
+    value_at: impl Fn(usize) -> ScanValue,
+) -> Duration {
+    let mut client = connect(addr);
+    let mut cursor = RoundRobin::new(ids.len());
+    let start = Instant::now();
+    for i in 0..LATENCY_ITERATIONS {
+        let id_a = ids[cursor.advance()];
+        let id_b = ids[cursor.advance()];
+        let resp = roundtrip(
+            &mut client,
+            &Request::Transaction {
+                updates: vec![
+                    TransactionOp {
+                        id: id_a,
+                        field,
+                        value: value_at(i),
+                    },
+                    TransactionOp {
+                        id: id_b,
+                        field,
+                        value: value_at(i),
+                    },
+                ],
+            },
+        );
+        debug_assert_eq!(resp, Response::Ok);
+    }
+    start.elapsed() / LATENCY_ITERATIONS as u32
+}
+
+/// `threads` real client connections, each firing [`OPS_PER_THREAD`]
+/// sequential two-operation `Request::Transaction` batches against a
+/// shared, contended id pool — the transaction analogue of
+/// [`run_throughput`], same `Barrier`-synchronized, slowest-thread-wins
+/// measurement.
+fn run_transaction_throughput(
+    addr: SocketAddr,
+    ids: &Arc<Vec<Uuid>>,
+    threads: usize,
+    field: FieldRef,
+    value_at: impl Fn(usize) -> ScanValue + Send + Sync + Copy + 'static,
+) -> f64 {
+    let barrier = Arc::new(Barrier::new(threads));
+    let mut handles = Vec::with_capacity(threads);
+    for thread_index in 0..threads {
+        let ids = Arc::clone(ids);
+        let barrier = Arc::clone(&barrier);
+        handles.push(thread::spawn(move || {
+            let mut client = connect(addr);
+            let mut cursor = RoundRobin::new(ids.len());
+            for _ in 0..thread_index {
+                cursor.advance();
+            }
+            barrier.wait();
+            let start = Instant::now();
+            for i in 0..OPS_PER_THREAD {
+                let id_a = ids[cursor.advance()];
+                let id_b = ids[cursor.advance()];
+                let resp = roundtrip(
+                    &mut client,
+                    &Request::Transaction {
+                        updates: vec![
+                            TransactionOp {
+                                id: id_a,
+                                field,
+                                value: value_at(i),
+                            },
+                            TransactionOp {
+                                id: id_b,
+                                field,
+                                value: value_at(i),
+                            },
+                        ],
+                    },
+                );
+                debug_assert_eq!(resp, Response::Ok);
+            }
+            start.elapsed()
+        }));
+    }
+
+    let mut slowest = Duration::ZERO;
+    for handle in handles {
+        if let Ok(elapsed) = handle.join() {
+            slowest = slowest.max(elapsed);
+        }
+    }
+
+    let total_ops = (threads * OPS_PER_THREAD) as f64;
+    total_ops / slowest.as_secs_f64()
+}
+
+fn bench_transaction_domain(
+    name: &str,
+    addr: SocketAddr,
+    ids: Vec<Uuid>,
+    field: FieldRef,
+    value_at: impl Fn(usize) -> ScanValue + Send + Sync + Copy + 'static,
+) {
+    let txn_name = format!("{name}-txn");
+    let latency = measure_transaction_latency(addr, &ids, field, value_at);
+    println!(
+        "{txn_name:<10} {:>10} {:>14.1}",
+        "latency",
+        latency.as_secs_f64() * 1_000_000.0
+    );
+
+    let ids = Arc::new(ids);
+    for &threads in &THREAD_COUNTS {
+        let ops_per_sec = run_transaction_throughput(addr, &ids, threads, field, value_at);
+        println!("{txn_name:<10} {threads:>10} {ops_per_sec:>14.0}");
+    }
+}
+
 fn main() {
     let available_parallelism = std::thread::available_parallelism()
         .map(|n| n.get())
@@ -316,11 +458,20 @@ fn main() {
     println!("{:<10} {:>10} {:>14}", "domain", "threads", "value");
 
     let (addr, ids) = start_dog_server();
-    bench_domain("dog", addr, ids);
+    bench_domain("dog", addr, ids.clone());
+    bench_transaction_domain("dog", addr, ids, FIELD_AGE, |i| {
+        ScanValue::U32((i % 1_000) as u32)
+    });
 
     let (addr, ids) = start_order_server();
-    bench_domain("order", addr, ids);
+    bench_domain("order", addr, ids.clone());
+    bench_transaction_domain("order", addr, ids, FIELD_AMOUNT, |i| {
+        ScanValue::I64(1_000 + i as i64)
+    });
 
     let (addr, ids) = start_employee_server();
-    bench_domain("employee", addr, ids);
+    bench_domain("employee", addr, ids.clone());
+    bench_transaction_domain("employee", addr, ids, FIELD_SALARY, |i| {
+        ScanValue::I64(100_000 + i as i64)
+    });
 }

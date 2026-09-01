@@ -840,6 +840,43 @@ Markedly lower than both prior environments (container ~37–39 µs, `Beast` ~29
 
 **This resolves the `Beast` pass's own open sub-question: `baileyai`'s peak throughput (1.17M–1.33M ops/sec at 32 threads) is far higher than both the container's plateau (160K–310K ops/sec) and `Beast`'s own peak (147K–192K ops/sec) — roughly 4–8× the container and 7–9× `Beast`.** That ordering — dedicated Linux hardware fastest, shared Linux container second, Windows desktop slowest — lines up directly with the latency table above (`baileyai` ~8–13 µs vs. the container's ~37–39 µs vs. `Beast`'s ~29–42 µs), and single-thread throughput on both machines still agrees with each machine's own latency (`baileyai` run 2: 1/12.9 µs ≈ 77,500/sec, measured 75,367–77,673/sec). **Verdict: `Beast`'s own peak-throughput number was the anomaly, not the container's — a real Windows loopback-TCP/scheduling cost, now confirmed by a same-OS-as-container, real-hardware comparison point rather than left as an unverified guess.**
 
+### `Request::Transaction` follow-up: this session's container
+
+**Added alongside `SERVER-001` v0.7.0** (ADR-0013, Accepted): `Request::Transaction` batches two `UpdateField`-shaped writes into one all-or-nothing operation, isolated from concurrent connections via `TransactionalStore::with_exclusive`/`GenericProductionStore::with_exclusive` (a longer-held lock, not a new one — see that design doc's own "Architecture" section). The one open question this addition raises for the benchmark: what does holding the lock across two validated writes, instead of one, cost relative to the plain single-field `GetById` numbers already measured above? `benches/server.rs` was extended with a directly-comparable `{domain}-txn` row set: same environment, same `THREAD_COUNTS`/`LATENCY_ITERATIONS`/`OPS_PER_THREAD`, same 20-id pool, the only difference being each request is now a two-op `Request::Transaction` (touching two distinct ids from the pool, both set to the same new value) instead of one `GetById`.
+
+**Environment**: same shared container as the original `## Server / query layer` pass above — `std::thread::available_parallelism() == 4` — so `THREAD_COUNTS` stays `[1, 4, 32, 64]`, unchanged from this repo's current default (tuned for `baileyai`; this container remains oversubscribed past 4 threads, same caveat as every container pass in this document).
+
+**Single-connection, zero-contention round-trip latency** (µs/op, average of 5,000 sequential requests, one client connection, two runs):
+
+| Domain | `GetById` (run 1 / run 2) | `Transaction` (run 1 / run 2) |
+|---|---:|---:|
+| `Dog` | 70.2 / 68.7 | 67.6 / 73.2 |
+| `Order`/`Customer` | 67.0 / 69.1 | 73.1 / 76.6 |
+| `Employee` | 69.3 / 67.0 | 69.2 / 67.4 |
+
+**No consistent latency penalty is visible.** `Transaction`'s two-op batch touches two records and holds the lock slightly longer than a single `GetById`, but the difference (a few µs either direction, well inside this container's own run-to-run noise band already documented above) is swamped by the same dominant cost the original pass identified: loopback TCP round-trip/framing overhead, not in-process work. This is consistent with the design doc's own prediction — the validate-then-apply pass over two records is still tens to low-hundreds of nanoseconds of in-process work, two to three orders of magnitude below one network round trip.
+
+**Aggregate throughput vs. concurrent client connections** (ops/sec, thread-per-connection, two runs):
+
+| Domain | 1 thread | 4 threads | 32 threads | 64 threads |
+|---|---:|---:|---:|---:|
+| `Dog` (`GetById`, run 1) | 14,488 | 122,969 | 180,841 | 177,371 |
+| `Dog` (`GetById`, run 2) | 14,618 | 94,892 | 186,144 | 190,962 |
+| `Dog` (`Transaction`, run 1) | 15,298 | 107,480 | 186,846 | 179,080 |
+| `Dog` (`Transaction`, run 2) | 15,474 | 106,223 | 171,756 | 176,777 |
+| `Order`/`Customer` (`GetById`, run 1) | 13,080 | 136,122 | 161,368 | 153,396 |
+| `Order`/`Customer` (`GetById`, run 2) | 14,236 | 117,786 | 180,244 | 170,429 |
+| `Order`/`Customer` (`Transaction`, run 1) | 13,583 | 159,284 | 175,755 | 166,347 |
+| `Order`/`Customer` (`Transaction`, run 2) | 13,845 | 153,498 | 173,595 | 167,219 |
+| `Employee` (`GetById`, run 1) | 14,538 | 200,736 | 179,935 | 175,987 |
+| `Employee` (`GetById`, run 2) | 14,508 | 176,351 | 164,005 | 162,823 |
+| `Employee` (`Transaction`, run 1) | 13,847 | 68,549 | 157,833 | 170,678 |
+| `Employee` (`Transaction`, run 2) | 11,269 | 110,399 | 172,007 | 175,513 |
+
+**Reading these numbers: `Transaction`'s throughput sits in the same rough band as plain `GetById`'s at every thread count, for every domain, once past the noisiest single cell.** At 32 and 64 threads — this container's own oversubscribed-but-saturated regime, same as the original pass — `Transaction` and `GetById` are within run-to-run noise of each other for all three domains (e.g. `Dog` at 32 threads: 180,841–186,144 for `GetById` vs. 171,756–186,846 for `Transaction`). At 1 thread the two are also close (within ~2K ops/sec except `Employee`, discussed below). The one outlier is `Employee` at 4 threads, run 1: `Transaction` reports 68,549 ops/sec against `GetById`'s 200,736 — a real gap, not matched by run 2 (110,399 vs. 176,351, a smaller but still-visible gap) or by either other domain's 4-thread row. This container's 4-thread cell is already this benchmark's noisiest across every prior pass in this document (e.g. `Order`/`Customer`'s original 282K-vs-161K swing at 4 threads); `Employee`'s `Transaction` row being the low end of that same noise, rather than a new domain-specific cost, is the more likely reading, but a `baileyai`-class real-hardware follow-up (unscheduled, same as the original pass's own open question) would be needed to confirm it isn't a genuine `Employee`-specific contention effect worth naming as a finding.
+
+**Verdict: no meaningful throughput or latency cost was found for `Request::Transaction` relative to `GetById` at this benchmark's scale (a two-op batch, a 20-id pool).** The longer-held lock the design accepted as a known, named cost (see `SERVER-TRANSACTION-DESIGN.md`'s own "Architecture" section) is real in principle but not visible against this benchmark's own network-round-trip-dominated noise floor — consistent with the original `## Server / query layer` pass's own headline finding that the network/framing layer, not the in-process operation behind it, dominates these numbers at this record-count scale.
+
 ## Open questions
 
 - **Cache-miss counts on real hardware**: done this pass — see the cache-miss section above. Resolved the `scan_ages` question the prior diagnostic session left open: Canonical+cache does have a real structural cache-miss advantage over SoA at 1M (not just noise), even though it doesn't show up in wall-clock time at that size.
