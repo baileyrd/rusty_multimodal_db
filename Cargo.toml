@@ -78,6 +78,15 @@ name = "server"
 harness = false
 required-features = ["server", "research"]
 
+# Compares ProductionStore against real SQLite, Postgres, and DuckDB on the same three
+# access-pattern shapes already benchmarked above (ADR-0015) — Dog domain only, matching the rest
+# of this file's own workload benchmarks. Needs `research` for `bench_support`'s dataset builder,
+# same as `workloads` above, plus `external-db-bench` for the three external-engine client crates.
+[[bench]]
+name = "external_db"
+harness = false
+required-features = ["research", "external-db-bench"]
+
 # Every integration test below reaches into the same "internal/research"
 # bucket (a cross-backend comparison, a durability/concurrency variant, or
 # the `Order`/`Customer` reference domain) — same `required-features`
@@ -224,6 +233,31 @@ subtle = "2"
 # specific commit rather than tracking `main`, matching `rusty_tls`'s own sibling-pinning
 # convention (`rustils`' `docs/versioning.md` §3: a bare SHA carries the same guarantee as a tag).
 rusty_tls = { git = "https://github.com/Rusty-Mill/rusty_mill", rev = "9fd2e27c9cfd5d1b21a5e58b55e368258a0a2779", optional = true }
+# External-database comparison benchmark (benches/external_db.rs, ADR-0015) — never used by this
+# crate's own library code, only by that one bench target, but declared here rather than under
+# `[dev-dependencies]` specifically because Cargo does not support optional dev-dependencies:
+# an unconditional (non-optional) dev-dependency is pulled into a plain `cargo build`/`cargo
+# test`/`cargo check` regardless of which features are enabled or which specific target actually
+# needs it (confirmed directly — an earlier version of this entry lived under
+# `[dev-dependencies]` without `optional = true`, and a default-feature `cargo test` still
+# compiled all three, including DuckDB's full bundled build, defeating the entire point of
+# gating this behind `external-db-bench`). `optional = true` here plus the `dep:` feature entries
+# below is the only mechanism that actually keeps a bench-only dependency out of a default build
+# — the same reason `rusty_tls` above lives in `[dependencies]` rather than `[dev-dependencies]`
+# despite `server`-feature code being the only real consumer.
+rusqlite = { version = "0.32", features = ["bundled"], optional = true }
+# "bundled" here compiles DuckDB's own (large, C++) amalgamation from source — a real, one-time
+# build-time cost, called out explicitly rather than glossed over (see
+# `docs/decisions/ADR-0015-external-database-benchmark.md`), accepted for the same
+# reproducibility reason as rusqlite's "bundled" above. Paid only when `external-db-bench` is
+# explicitly enabled — never by a default `cargo build`/`cargo test`/`cargo check`.
+duckdb = { version = "1", features = ["bundled"], optional = true }
+# The only one of the three that isn't embedded: a real client talking over a real socket to a
+# locally-run `postgres` server process the benchmark does not manage itself (see that ADR's
+# "Setup" section) — this is a deliberate, honestly-reported part of what Postgres costs, not an
+# oversight. `with-uuid-1` implements `ToSql`/`FromSql` for `uuid::Uuid` directly (this crate's
+# own record identity type) rather than round-tripping through a string column.
+postgres = { version = "0.19", features = ["with-uuid-1"], optional = true }
 
 [dependencies.rand]
 # Seeded, reproducible RNG for dataset generation (StdRng::seed_from_u64) and for benchmark
@@ -277,6 +311,14 @@ research = []
 # deployment that doesn't configure it.
 server = ["dep:rusty_tls"]
 perf-events = ["dep:criterion-perf-events", "dep:perfcnt"]
+# The external-database comparison benchmark (benches/external_db.rs, ADR-0015) — SQLite/DuckDB
+# (embedded) and Postgres (a real client against a locally-run server this benchmark does not
+# manage). Same reasoning as `perf-events`: real, environment-specific cost (a running Postgres
+# instance; DuckDB's bundled build), not something every `cargo test`/`cargo build` should pay
+# for by default — confirmed directly that `optional = true` + `dep:` (not just this bench
+# target's own `required-features`) is required to actually keep that promise, see the
+# `rusqlite`/`duckdb`/`postgres` dependency comments above.
+external-db-bench = ["dep:rusqlite", "dep:duckdb", "dep:postgres"]
 
 [profile.bench]
 opt-level = 3
