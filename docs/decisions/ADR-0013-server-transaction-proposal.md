@@ -1,9 +1,9 @@
 # ADR-0013: Add atomic multi-operation transactions to the server/query layer
 
-- Status: **Proposed** — awaiting owner review. Not accepted; nothing in
-  this ADR or its linked design document authorizes implementation.
-- Date: 2026-09-01
-- Deciders: baileyrd (pending)
+- Status: **Accepted** (promoted from Proposed on 2026-09-01 — the owner
+  approved the design as proposed, no changes requested)
+- Date: 2026-09-01 (proposed and accepted same day)
+- Deciders: baileyrd
 - Related: `docs/design/SERVER-TRANSACTION-DESIGN.md` (the full design
   document this ADR summarizes), `docs/decisions/ADR-0010-server-query-layer-proposal.md`
   (names "no transaction semantics" directly in its own Consequences),
