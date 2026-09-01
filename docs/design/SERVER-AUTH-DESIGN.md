@@ -1,8 +1,12 @@
-# Server Authentication/Authorization Design (Proposed)
+# Server Authentication/Authorization Design (Accepted)
 
-- Status: **Proposed** (not accepted — design only, no implementation
-  authorized). See `docs/decisions/ADR-0012-server-authentication-proposal.md`
-  for the decision record this document backs.
+- Status: **Accepted** (promoted from Proposed on 2026-09-01 — the owner
+  approved the design as proposed, no changes requested). Acceptance
+  authorizes the design; implementation still requires its own unit
+  (extending `SERVER-001` with new FRs, or registering a dedicated spec)
+  before any server code is written — see ADR-0012's "Decision" section.
+  See `docs/decisions/ADR-0012-server-authentication-proposal.md` for the
+  decision record this document backs.
 - Date: 2026-09-01
 - Related: `docs/specifications/server/SERVER-001-query-layer.md` (the
   spec this design would extend, once accepted), ADR-0010 (the
@@ -427,3 +431,6 @@ of this design-only pass.
   authentication/encryption as one of three next directions (alongside
   the schema-driven client library, done, and session/transaction
   semantics, still pending its own design).
+- 2026-09-01: Accepted as proposed, no changes requested. Implementation
+  is a separate, not-yet-started unit — see ADR-0012's own "Decision"
+  section.

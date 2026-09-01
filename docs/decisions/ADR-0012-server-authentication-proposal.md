@@ -1,7 +1,7 @@
 # ADR-0012: Add authentication and coarse read/write authorization to the server/query layer
 
-- Status: **Proposed** (not accepted — design only, no implementation authorized)
-- Date: 2026-09-01
+- Status: **Accepted** (promoted from Proposed on 2026-09-01 — the owner approved the design as proposed; no changes requested)
+- Date: 2026-09-01 (proposed and accepted same day)
 - Deciders: baileyrd
 - Related: `docs/design/SERVER-AUTH-DESIGN.md` (the full design document this
   ADR summarizes), `docs/decisions/ADR-0010-server-query-layer-proposal.md`
@@ -108,7 +108,7 @@ interfaces" section for the full reasoning. Summarized:
 
 ## Decision
 
-- `docs/design/SERVER-AUTH-DESIGN.md` records the full proposed design:
+- `docs/design/SERVER-AUTH-DESIGN.md` records the full accepted design:
   `Request::Authenticate { token: String }`; per-connection authenticated
   state (unauthenticated connections get a typed rejection —
   `ErrorCode::Unauthenticated` — for every other request kind, including
