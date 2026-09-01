@@ -129,8 +129,11 @@ server instance accepts and the `ReadOnly`/`ReadWrite` class each grants;
 unauthenticated behavior exactly, so this is purely opt-in. It closes the
 "anyone who can open a TCP connection can do anything" gap, not the
 transport-encryption one — tokens and every record value are still
-plaintext on the wire. **Atomic multi-operation transactions are now
-implemented** — `docs/design/SERVER-TRANSACTION-DESIGN.md`, ADR-0013,
+plaintext on the wire. (A design proposal to close the transport-
+encryption gap natively, via `rustls`, exists —
+`docs/design/SERVER-TLS-DESIGN.md`, ADR-0014 — but it's **Proposed, not
+implemented**; this paragraph still describes the current, real state.)
+**Atomic multi-operation transactions are now implemented** — `docs/design/SERVER-TRANSACTION-DESIGN.md`, ADR-0013,
 Accepted — `Request::Transaction { updates }` batches several
 `UpdateField`-shaped writes into one all-or-nothing operation, backed by
 a critical-section primitive on `ProductionStore`/`GenericProductionStore`
@@ -179,8 +182,11 @@ at the right file:
   multi-operation transactions on the server/query layer, now **Accepted
   and implemented** (`Request::Transaction`, `server` feature, `SERVER-001`
   v0.7.0).
-- **`docs/decisions/`** — one ADR per accepted architectural decision, in
-  order:
+- **`docs/design/SERVER-TLS-DESIGN.md`** — a design proposal for native
+  transport encryption (TLS via `rustls`) on the server/query layer,
+  **Proposed, not yet accepted** — no implementation exists yet.
+- **`docs/decisions/`** — mostly accepted architectural decisions, one
+  proposal still pending review, in order:
   - `ADR-0001` — the three-backend (AoS/SoA/canonical) empirical comparison
   - `ADR-0002` — cache-miss instrumentation platform
   - `ADR-0003` — eager write-through cache invalidation
@@ -196,6 +202,8 @@ at the right file:
     (now Accepted and implemented)
   - `ADR-0013` — atomic multi-operation transactions for the
     server/query layer (now Accepted and implemented)
+  - `ADR-0014` — native transport encryption (TLS) for the server/query
+    layer (**Proposed**, awaiting review — no implementation yet)
 - **`docs/specifications/SPEC-REGISTRY.md`** + **`docs/specifications/storage/`**/**`docs/specifications/server/`**
   — the `STORAGE-0xx`/`SERVER-0xx` requirement/spec tree each round implemented against.
 - **`docs/roadmap/ROADMAP.md`** — status vocabulary and what's next.

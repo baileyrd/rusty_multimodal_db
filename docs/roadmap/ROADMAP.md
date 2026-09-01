@@ -28,6 +28,7 @@ Status vocabulary: `Proposed`, `Draft`, `Accepted`, `In Progress`,
 | `SERVER-TRANSACTION-DESIGN` | A design for atomic multi-operation transactions on the server/query layer: a new `Request::Transaction { updates }` request batching `UpdateField`-shaped writes, validate-then-apply atomicity (all-or-nothing, no undo log needed given this crate's own "no runtime deletion" invariant), isolation from concurrent access via a new minimal storage-layer critical-section primitive reusing each store's existing lock (no new lock at the server layer), and explicit non-goals (a multi-round-trip interactive session, crash-atomicity across a batch — both named directly, not left implicit); ADR-0013 (**Accepted** — owner approved as proposed); `docs/design/SERVER-TRANSACTION-DESIGN.md`; explicitly does not deliver ACID transactions — atomicity/isolation with respect to concurrent access only, not crash-atomicity | `SERVER-AUTH` | — (no spec written for the design itself; `SERVER-TRANSACTION` below registers the implementation against `SERVER-001`/`STORAGE-011`/`STORAGE-012`, matching `SERVER-AUTH-DESIGN`'s own precedent) | Design document and ADR written, incremental protocol additions to `SERVER-001`'s already-compiling shapes plus one new, real storage-layer primitive (flagged honestly as a bigger footprint than `SERVER-AUTH`'s purely server-layer-additive implementation); owner reviewed and accepted the design and ADR-0013 without requesting changes | Accepted | PR #54, #55, #56 |
 | `SERVER-TRANSACTION` | The real implementation of `SERVER-TRANSACTION-DESIGN`: `Request::Transaction`/`TransactionOp`/`Response::TransactionFailed`/`ErrorCode::RecordNotFound` (`src/server/protocol.rs`), `ConnectionStore::apply_transaction` (`src/server/mod.rs`, plus a per-adapter implementation in `dog.rs`/`order.rs`/`employee.rs`), and the storage-layer critical-section primitive it depends on — `crate::production::TransactionalStore` (`STORAGE-011` v0.2.0) and `crate::generic::production::GenericProductionStore::with_exclusive` (`STORAGE-012` v0.3.0); `SERVER-001` v0.7.0 | `SERVER-TRANSACTION-DESIGN` | `SERVER-001`, `STORAGE-011`, `STORAGE-012` | `cargo test --features server` green including `tests/server_transaction_integration.rs`'s six tests (full success, failure at each position, malformed value, `ReadOnly` rejection, flagship concurrent stress test) and `src/server/mod.rs`'s new dispatch/protocol unit tests; `cargo test`/`cargo test --all-features` unaffected; `cargo fmt`/`clippy`/`check`/`doc` clean; every `SERVER-TRANSACTION-DESIGN.md` functional acceptance criterion verified over a real socket; no `src/store/**`/`src/durability/**`/`src/concurrency/**` changes, `src/production.rs`/`src/generic/production.rs` changes limited to the one new critical-section primitive each | Implemented | this PR |
 | `SERVER-TRANSACTION-BENCHMARK` | Bounded, additive extension of `SERVER-QUERY-LAYER`'s own throughput/latency benchmark (`benches/server.rs`, FR-014) to cover `Request::Transaction`: a directly-comparable `{domain}-txn` row set (`measure_transaction_latency`/`run_transaction_throughput`/`bench_transaction_domain`), same environment/pool/thread-count sweep as the existing `GetById` measurement; `SERVER-001` v0.8.0 (`SERVER-001-FR-018`); no ADR — completes already-accepted FR-014 scope, not a new decision | `SERVER-TRANSACTION` | `SERVER-001` | `cargo bench --features server,research --bench server` completes without panics, prints `{domain}-txn` rows for all three domains alongside the existing `GetById` rows, numbers in `RESULTS.md`'s `## Server / query layer` section; `cargo test --all-features`/`cargo test` both unaffected (bench-only change); `cargo fmt`/`clippy`/`check`/`doc` clean; finding: no meaningful latency or throughput cost relative to `GetById` at this benchmark's scale, on this session's shared container | Implemented | PR #59 |
+| `SERVER-TLS-DESIGN` | A design proposal for native transport encryption on the server/query layer: TLS termination inside this crate's own server process via `rustls` (not an external proxy/tunnel), an opt-in `TlsConfig` mirroring `AuthConfig`'s own shape, a per-connection stream abstraction so `handle_connection`/`send_response` work uniformly whether or not TLS is active — `src/server/framing.rs` needs zero changes, already generic over `Read`/`Write`; ADR-0014 (**Proposed**, not yet accepted); `docs/design/SERVER-TLS-DESIGN.md`; explicitly does not add mTLS (client identity remains `AuthConfig`'s existing token scheme) | `SERVER-AUTH`, `SERVER-TRANSACTION-BENCHMARK` | — (no spec written for the design itself; a follow-up unit registers the implementation, extending `SERVER-001`, matching `SERVER-AUTH-DESIGN`'s own precedent, only once this design is accepted) | Design document and ADR written, incremental additions to `SERVER-001`'s already-compiling `protocol.rs`/`mod.rs` shapes (no standalone scratch probe built — see ADR-0014's own "Validation and revisit triggers" for why); owner review pending | Proposed | this PR |
 
 ## Sequencing notes
 
@@ -386,6 +387,30 @@ network/framing cost `SERVER-QUERY-LAYER`'s own original benchmark pass
 already identified as this whole harness's dominant cost at this
 record-count scale. See `RESULTS.md`'s `## Server / query layer`,
 `### \`Request::Transaction\` follow-up` subsection for the full numbers.
+
+`SERVER-TLS-DESIGN` picks up the second of the two options the owner
+selected alongside the transaction benchmark — transport encryption —
+and, matching `SERVER-AUTH-DESIGN`/`SERVER-TRANSACTION-DESIGN`'s own
+precedent, does not ship straight to implementation: this is the last
+remaining half of the "no auth, no encryption" gap ADR-0010 named at
+acceptance, and ADR-0012's own "Validation and revisit triggers" named
+exactly this proposal as the condition for revisiting native TLS rather
+than deferring it again by default. ADR-0014 (Proposed) and
+`docs/design/SERVER-TLS-DESIGN.md` propose native TLS via `rustls`,
+terminated inside this crate's own server process, rather than
+continuing to require an external TLS-terminating proxy/tunnel —
+reversing ADR-0012's original rejection of native TLS once the
+dependency-weight objection is checked on its actual merits: `rustls`
+ships a synchronous, `Read`/`Write`-compatible API that composes with
+the existing thread-per-connection model with **zero** changes to
+`src/server/framing.rs` (already generic over `Read`/`Write`, a verified
+finding, not an assumption), undercutting the earlier "disproportionate
+dependency" framing that had implicitly bundled TLS together with an
+async-runtime shift. **Explicitly does not add mTLS** — client identity
+remains exactly `AuthConfig`'s existing shared-secret token scheme, now
+traveling encrypted. No implementation is authorized yet — this is a
+design proposal only, awaiting the owner's review before any code is
+written or any dependency actually added to `Cargo.toml`.
 
 ## Out of scope for this roadmap (see architecture doc "where this can go
 next")

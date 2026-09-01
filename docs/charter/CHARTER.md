@@ -63,7 +63,10 @@ authentication/authorization half — see that ADR and
 `docs/design/SERVER-AUTH-DESIGN.md` for the design, and `SERVER-001`
 v0.6.0 for the real code (`AuthConfig`, `Request::Authenticate`).
 Transport encryption remains a separate, still-open gap — ADR-0012
-explicitly does not close it either way. ADR-0010's other named gap,
+explicitly does not close it either way. A design proposal to close it
+natively now exists — ADR-0014 (**Proposed**, not yet accepted) and
+`docs/design/SERVER-TLS-DESIGN.md` — but no implementation exists yet;
+this line still describes the current, real state. ADR-0010's other named gap,
 "no transaction semantics," now has a design **Accepted and
 implemented** too — ADR-0013 (**Accepted and implemented**) closes one
 bounded slice of it — see that ADR and
