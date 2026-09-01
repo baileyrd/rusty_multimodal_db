@@ -1,6 +1,9 @@
 # ADR-0014: Add native transport encryption (TLS) to the server/query layer
 
-- Status: **Proposed** — awaiting owner review.
+- Status: **Accepted** (promoted from Proposed on 2026-09-01 — the owner
+  approved the design as revised, no further changes requested.
+  Implementation is a separate, immediately-following unit — see
+  "Acceptance and implementation" below once it lands.)
 - Date: 2026-09-01
 - Deciders: baileyrd
 - Related: `docs/design/SERVER-TLS-DESIGN.md` (the full design document
@@ -249,14 +252,17 @@ interfaces" section for the full reasoning. Summarized:
 
 ## Validation and revisit triggers
 
-- **This proposal is design-only, matching ADR-0012's/ADR-0013's own
-  precedent** — no implementation, no test suite, no dependency actually
-  added yet. No standalone scratch-crate compile probe was built for this
-  one either, matching ADR-0012's own reasoning: the proposed additions
-  (one new optional config struct, a per-connection stream wrapper) are
+- **This ADR was design-only at proposal time, matching ADR-0012's/
+  ADR-0013's own precedent** — no implementation, no test suite, no
+  dependency actually added, at the point it was accepted. No
+  standalone scratch-crate compile probe was built for this one either,
+  matching ADR-0012's own reasoning: the proposed additions (one new
+  optional config struct, a per-connection stream wrapper) are
   incremental extensions of `SERVER-001`'s existing, already-compiling
   shapes, not a genuinely new type-system structure. Flagged here
-  explicitly as a deliberate scope choice, not an oversight.
+  explicitly as a deliberate scope choice, not an oversight. A real
+  implementation followed acceptance as its own unit — see "Acceptance
+  and implementation" above once it lands.
 - Revisit if: mTLS becomes a real requirement now that this crate owns
   TLS natively — a real, separate future design, not decided here (see
   `SERVER-TLS-DESIGN.md`'s own "Open questions"). Narrower than it was
