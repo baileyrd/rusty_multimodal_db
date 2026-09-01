@@ -21,14 +21,18 @@
 //!
 //! # What this does not provide
 //!
-//! No transport encryption, no query language beyond fixed field-tag
-//! addressing — explicit non-goals of the accepted design(s). **Do not
-//! expose a server built from this module beyond a trusted, localhost/
-//! development network** — see ADR-0010's Consequences; accepting and
-//! implementing ADR-0012 (below) closes the authentication/authorization
-//! half of that gap, not the transport-encryption half. ADR-0010's third
-//! named gap, "no transaction semantics," is now partly closed too — see
-//! "Atomic transactions" below for exactly which slice.
+//! No query language beyond fixed field-tag addressing — an explicit
+//! non-goal of the accepted design(s). **Do not expose a server built
+//! from this module beyond a trusted, localhost/development network
+//! unless both `AuthConfig` and `TlsConfig` (below) are configured** —
+//! see ADR-0010's Consequences; ADR-0012 closed the authentication/
+//! authorization half of that gap, ADR-0014 closes the transport-
+//! encryption half, but neither alone is the whole story (a
+//! `TlsConfig`-only server still lets anyone who can connect do
+//! anything; an `AuthConfig`-only server still puts tokens and every
+//! record value in plaintext on the wire). ADR-0010's third named gap,
+//! "no transaction semantics," is now partly closed too — see "Atomic
+//! transactions" below for exactly which slice.
 //!
 //! # Authentication/authorization (`AuthConfig`), ADR-0012
 //!
@@ -70,6 +74,24 @@
 //! `Request::DescribeSchema` reports at connect time. Unconditional under
 //! `server` (not `research`-gated) — it has no domain-specific code at
 //! all, only `Request`/`Response`/framing.
+//!
+//! # Native transport encryption (`TlsConfig`), ADR-0014
+//!
+//! `docs/design/SERVER-TLS-DESIGN.md` closes the transport-encryption half
+//! of ADR-0010's gap that ADR-0012 explicitly left open: [`serve`] takes
+//! an optional [`TlsConfig`] (`None` reproduces today's plaintext behavior
+//! exactly, `TLS-FR-008`). When configured, every accepted connection
+//! performs a TLS server handshake — via
+//! [`rusty_tls::TlsAcceptor`](https://github.com/Rusty-Mill/rusty_mill/tree/main/crates/rusty_tls),
+//! this owner's own ecosystem-wide `rustls` wrapper, not a direct
+//! `rustls` dependency (see that design's own "Ecosystem check" for why)
+//! — before any framed `Request`/`Response` traffic, including
+//! `Authenticate`, is ever read or written. `dispatch`/`ConnectionStore`
+//! remain completely unaware transport encryption exists, and
+//! `src/server/framing.rs` needed zero changes, since its functions were
+//! already generic over `Read`/`Write`. Explicitly not mTLS — client
+//! identity remains exactly [`AuthConfig`]'s existing shared-secret token
+//! scheme, now traveling encrypted rather than plaintext.
 
 pub mod client;
 pub mod dog;
@@ -78,14 +100,18 @@ pub mod employee;
 pub mod framing;
 #[cfg(feature = "research")]
 pub mod order;
+mod pem;
 pub mod protocol;
 
 use protocol::{
     DomainSchema, ErrorCode, FieldRef, ParentLookup, RecordId, Request, Response, ScanValue,
     TransactionOp,
 };
-use std::io::{BufReader, BufWriter};
+use std::cell::RefCell;
+use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::path::Path;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::thread;
 
@@ -261,6 +287,163 @@ impl AuthConfig {
     }
 }
 
+/// Native TLS configuration for [`serve`] (ADR-0014,
+/// `docs/design/SERVER-TLS-DESIGN.md`). Wraps a `rusty_tls::TlsAcceptor`
+/// — this owner's own ecosystem-wide `rustls` wrapper, not a direct
+/// `rustls` dependency, see that design's own "Ecosystem check" for why —
+/// built once at server startup and shared across every connection
+/// thread [`serve`] spawns, the same lifecycle [`AuthConfig`] already
+/// uses for its own configured tokens. `serve` with `tls: None` behaves
+/// exactly as it did before this feature existed (`TLS-FR-008`) — this is
+/// purely opt-in.
+pub struct TlsConfig {
+    acceptor: rusty_tls::TlsAcceptor,
+}
+
+/// Everything that can go wrong building a [`TlsConfig`].
+#[derive(Debug)]
+pub enum TlsConfigError {
+    /// Reading a certificate/key file failed (missing file, permission
+    /// denied, ...).
+    Io(io::Error),
+    /// A certificate/key file's contents weren't valid PEM.
+    Pem(pem::PemError),
+    /// `rusty_tls` rejected the decoded certificate chain or private key.
+    Tls(rusty_tls::Error),
+}
+
+impl std::fmt::Display for TlsConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TlsConfigError::Io(e) => write!(f, "reading TLS certificate/key file: {e}"),
+            TlsConfigError::Pem(e) => write!(f, "parsing TLS certificate/key PEM: {e}"),
+            TlsConfigError::Tls(e) => write!(f, "building TLS config: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for TlsConfigError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            TlsConfigError::Io(e) => Some(e),
+            TlsConfigError::Pem(e) => Some(e),
+            TlsConfigError::Tls(e) => Some(e),
+        }
+    }
+}
+
+impl TlsConfig {
+    /// Build directly from DER-encoded certificate chain + private key —
+    /// `cert_chain_der` is the leaf certificate followed by any
+    /// intermediates, each DER-encoded, leaf first; `private_key_der` is
+    /// the leaf's private key, DER-encoded (PKCS#8, PKCS#1, or SEC1,
+    /// auto-detected — see `rusty_tls::TlsAcceptor::new`'s own doc
+    /// comment). Use this directly when the caller already has DER bytes;
+    /// see [`TlsConfig::from_pem_files`] for the common PEM-file case.
+    pub fn new(
+        cert_chain_der: Vec<Vec<u8>>,
+        private_key_der: Vec<u8>,
+    ) -> Result<Self, TlsConfigError> {
+        let acceptor = rusty_tls::TlsAcceptor::new(cert_chain_der, private_key_der)
+            .map_err(TlsConfigError::Tls)?;
+        Ok(Self { acceptor })
+    }
+
+    /// Build from PEM-encoded certificate chain + private key files
+    /// (`TLS-FR-006`) — the common operator-facing format (`openssl`,
+    /// `mkcert`, a CA). `rusty_tls::TlsAcceptor::new` itself takes DER
+    /// bytes directly (`rusty_tls` deliberately keeps its own public seam
+    /// narrow and doesn't re-expose a PEM parser — see
+    /// `docs/design/SERVER-TLS-DESIGN.md`'s "Ecosystem check"), so this
+    /// decodes PEM into DER first (see the `pem` module — a small,
+    /// hand-written decoder, not a new dependency). `cert_chain_path` may
+    /// contain more than one `-----BEGIN CERTIFICATE-----` block (the
+    /// leaf followed by any intermediates, leaf first); `private_key_path`
+    /// must contain exactly one block.
+    pub fn from_pem_files(
+        cert_chain_path: impl AsRef<Path>,
+        private_key_path: impl AsRef<Path>,
+    ) -> Result<Self, TlsConfigError> {
+        let cert_chain_pem =
+            std::fs::read_to_string(cert_chain_path).map_err(TlsConfigError::Io)?;
+        let private_key_pem =
+            std::fs::read_to_string(private_key_path).map_err(TlsConfigError::Io)?;
+        let cert_chain_der = pem::decode_blocks(&cert_chain_pem).map_err(TlsConfigError::Pem)?;
+        let private_key_blocks =
+            pem::decode_blocks(&private_key_pem).map_err(TlsConfigError::Pem)?;
+        let [private_key_der] = <[Vec<u8>; 1]>::try_from(private_key_blocks)
+            .map_err(|_| TlsConfigError::Pem(pem::PemError::UnterminatedBlock))?;
+        Self::new(cert_chain_der, private_key_der)
+    }
+
+    /// Build from `SERVER_TLS_CERT_CHAIN_PATH`/`SERVER_TLS_PRIVATE_KEY_PATH`
+    /// at process startup, mirroring [`AuthConfig::from_env`]'s own
+    /// pattern — `None` (rather than an error) if either variable is
+    /// unset, so a caller can treat "TLS not configured" and "TLS
+    /// misconfigured" differently: the former is `serve(..., None)`'s
+    /// ordinary opt-out, the latter is a real startup error a caller
+    /// should surface (`Some(Err(..))`).
+    pub fn from_env() -> Option<Result<Self, TlsConfigError>> {
+        let cert_chain_path = std::env::var("SERVER_TLS_CERT_CHAIN_PATH").ok()?;
+        let private_key_path = std::env::var("SERVER_TLS_PRIVATE_KEY_PATH").ok()?;
+        Some(Self::from_pem_files(cert_chain_path, private_key_path))
+    }
+}
+
+/// Which raw stream a connection is speaking — a plain, unencrypted
+/// `TcpStream`, or one wrapped in TLS (ADR-0014,
+/// `docs/design/SERVER-TLS-DESIGN.md`). `dispatch`/`ConnectionStore`
+/// never see this distinction; it's resolved once per connection in
+/// [`handle_connection`]. `framing::read_message`/`write_message` work
+/// unchanged either way, since both are already generic over
+/// `Read`/`Write`.
+///
+/// Read and write are split into two owned halves the same way the plain
+/// path already did (`TcpStream::try_clone`, two independent socket
+/// handles) — but a `rusty_tls::TlsServerStream` can't be split that way:
+/// its `rustls::ServerConnection` state is shared, single-owner data that
+/// both a read and a write need to reach through the same object.
+/// `Rc<RefCell<_>>` gives the TLS path the same two-owned-halves shape.
+/// Single-threaded is enough — each connection is served by exactly one
+/// OS thread (see [`serve`]), so a `RefCell`'s runtime borrow check is
+/// sufficient; no `Mutex`/`Arc` needed for this, unlike `AuthConfig`/
+/// `TlsConfig` themselves, which really are shared *across* connection
+/// threads.
+enum ReadHalf {
+    Plain(TcpStream),
+    Tls(Rc<RefCell<rusty_tls::TlsServerStream<TcpStream>>>),
+}
+
+enum WriteHalf {
+    Plain(TcpStream),
+    Tls(Rc<RefCell<rusty_tls::TlsServerStream<TcpStream>>>),
+}
+
+impl Read for ReadHalf {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match self {
+            ReadHalf::Plain(s) => s.read(buf),
+            ReadHalf::Tls(s) => s.borrow_mut().read(buf),
+        }
+    }
+}
+
+impl Write for WriteHalf {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match self {
+            WriteHalf::Plain(s) => s.write(buf),
+            WriteHalf::Tls(s) => s.borrow_mut().write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match self {
+            WriteHalf::Plain(s) => s.flush(),
+            WriteHalf::Tls(s) => s.borrow_mut().flush(),
+        }
+    }
+}
+
 /// Translate one [`Request`] into a [`Response`] against `store` — the
 /// entire request-handling logic, independent of framing or sockets, kept
 /// separate so it can be tested (see this module's tests) without a real
@@ -323,11 +506,10 @@ pub fn dispatch<S: ConnectionStore + ?Sized>(store: &S, req: Request) -> Respons
 /// response path in [`handle_connection`] needs (there are now several,
 /// since auth gating adds early-return response paths that don't go
 /// through [`dispatch`]).
-fn send_response(writer: &mut BufWriter<TcpStream>, resp: &Response) -> bool {
+fn send_response(writer: &mut BufWriter<WriteHalf>, resp: &Response) -> bool {
     if framing::write_message(writer, resp).is_err() {
         return false;
     }
-    use std::io::Write;
     writer.flush().is_ok()
 }
 
@@ -335,6 +517,18 @@ fn send_response(writer: &mut BufWriter<TcpStream>, resp: &Response) -> bool {
 /// framing error occurs. Never panics on a bad client: a malformed or
 /// oversized frame ends the connection after (when possible) one
 /// [`Response::Err`], never the process — `SERVER-FR-004`.
+///
+/// # Transport encryption (`TLS-FR-002`/`TLS-FR-003`), ADR-0014
+///
+/// When `tls` is configured, the raw `stream` is wrapped in a TLS server
+/// connection (`rusty_tls::TlsAcceptor::accept`) before anything else
+/// happens — `dispatch`/`ConnectionStore` never see this. `accept` itself
+/// performs no I/O; the handshake runs lazily, driven by the very first
+/// `framing::read_message` call below, so a connection that fails the
+/// handshake surfaces there as an ordinary I/O error and ends the
+/// connection cleanly — the same "return on the first framing error, no
+/// panic" path a malformed plaintext frame already takes, satisfying
+/// `TLS-FR-003` with no special-casing needed.
 ///
 /// # Authentication gating (`AUTH-FR-001`/`AUTH-FR-002`/`AUTH-FR-003`/`AUTH-FR-007`)
 ///
@@ -348,8 +542,16 @@ fn send_response(writer: &mut BufWriter<TcpStream>, resp: &Response) -> bool {
 /// rejected with `ErrorCode::Unauthenticated` (including `DescribeSchema`
 /// — `AUTH-FR-002`) until a recognized token is presented, after which its
 /// [`TokenClass`] gates `Request::UpdateField` and `Request::Transaction`
-/// (`AUTH-FR-003`, `TXN-FR-004`).
-fn handle_connection<S: ConnectionStore + ?Sized>(stream: TcpStream, store: &S, auth: &AuthConfig) {
+/// (`AUTH-FR-003`, `TXN-FR-004`). With `tls` also configured,
+/// `Authenticate`'s token now travels over the encrypted channel rather
+/// than plaintext (`TLS-FR-007`) — the handshake above always completes
+/// before this loop ever reads a frame, so there's no ordering hazard.
+fn handle_connection<S: ConnectionStore + ?Sized>(
+    stream: TcpStream,
+    store: &S,
+    auth: &AuthConfig,
+    tls: &Option<TlsConfig>,
+) {
     // This is a synchronous request/response protocol: each side writes a
     // small frame, then blocks reading the other side's small frame back.
     // Left at its default, Nagle's algorithm delays a small write hoping
@@ -360,12 +562,30 @@ fn handle_connection<S: ConnectionStore + ?Sized>(stream: TcpStream, store: &S, 
     // directly (a concurrent-client integration test went from ~36s to
     // well under a second after this one call).
     let _ = stream.set_nodelay(true);
-    let peer_stream = match stream.try_clone() {
-        Ok(s) => s,
-        Err(_) => return,
+
+    let (mut reader, mut writer): (BufReader<ReadHalf>, BufWriter<WriteHalf>) = match tls {
+        None => {
+            let peer_stream = match stream.try_clone() {
+                Ok(s) => s,
+                Err(_) => return,
+            };
+            (
+                BufReader::new(ReadHalf::Plain(stream)),
+                BufWriter::new(WriteHalf::Plain(peer_stream)),
+            )
+        }
+        Some(tls) => {
+            let tls_stream = match tls.acceptor.accept(stream) {
+                Ok(s) => s,
+                Err(_) => return, // config/setup error building the connection object — drop cleanly, no panic
+            };
+            let shared = Rc::new(RefCell::new(tls_stream));
+            (
+                BufReader::new(ReadHalf::Tls(Rc::clone(&shared))),
+                BufWriter::new(WriteHalf::Tls(shared)),
+            )
+        }
     };
-    let mut reader = BufReader::new(stream);
-    let mut writer = BufWriter::new(peer_stream);
 
     let mut authenticated: Option<TokenClass> = if auth.is_configured() {
         None
@@ -430,14 +650,23 @@ fn handle_connection<S: ConnectionStore + ?Sized>(stream: TcpStream, store: &S, 
 /// thread against the same shared `store` — the thread-per-connection
 /// model ADR-0010 chose over an async runtime. Every connection thread
 /// takes only `&S`; all coordination is whatever locking `store` already
-/// does internally (see this module's own doc comment). `auth` is shared
-/// (`Arc`) across every connection thread the same way `store` is — see
-/// this module's own `handle_connection` for the gating it performs. Runs until
+/// does internally (see this module's own doc comment). `auth` and `tls`
+/// are each shared (`Arc`) across every connection thread the same way
+/// `store` is — see this module's own `handle_connection` for the gating/
+/// handshake each performs. `tls: None` reproduces plaintext behavior
+/// exactly (`TLS-FR-008`); `tls: Some(..)` requires every connection to
+/// complete a TLS handshake before any request is served. Runs until
 /// `listener` itself errors (e.g. the socket is closed) or forever
 /// otherwise — a real deployment's shutdown/drain story is an explicit
 /// non-goal of the accepted design, not solved here.
-pub fn serve<S: ConnectionStore + 'static>(listener: TcpListener, store: Arc<S>, auth: AuthConfig) {
+pub fn serve<S: ConnectionStore + 'static>(
+    listener: TcpListener,
+    store: Arc<S>,
+    auth: AuthConfig,
+    tls: Option<TlsConfig>,
+) {
     let auth = Arc::new(auth);
+    let tls = Arc::new(tls);
     for incoming in listener.incoming() {
         let stream = match incoming {
             Ok(s) => s,
@@ -445,7 +674,10 @@ pub fn serve<S: ConnectionStore + 'static>(listener: TcpListener, store: Arc<S>,
         };
         let store = Arc::clone(&store);
         let auth = Arc::clone(&auth);
-        thread::spawn(move || handle_connection(stream, store.as_ref(), auth.as_ref()));
+        let tls = Arc::clone(&tls);
+        thread::spawn(move || {
+            handle_connection(stream, store.as_ref(), auth.as_ref(), tls.as_ref())
+        });
     }
 }
 

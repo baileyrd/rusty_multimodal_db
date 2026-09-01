@@ -169,7 +169,7 @@ fn start_dog_server() -> (SocketAddr, Vec<Uuid>) {
     let connection_store = Arc::new(DogConnectionStore::new(store));
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
-    thread::spawn(move || serve(listener, connection_store, AuthConfig::default()));
+    thread::spawn(move || serve(listener, connection_store, AuthConfig::default(), None));
     (addr, ids)
 }
 
@@ -198,7 +198,7 @@ fn start_order_server() -> (SocketAddr, Vec<Uuid>) {
     )));
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
-    thread::spawn(move || serve(listener, connection_store, AuthConfig::default()));
+    thread::spawn(move || serve(listener, connection_store, AuthConfig::default(), None));
     (addr, ids)
 }
 
@@ -236,7 +236,7 @@ fn start_employee_server() -> (SocketAddr, Vec<Uuid>) {
     )));
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
-    thread::spawn(move || serve(listener, connection_store, AuthConfig::default()));
+    thread::spawn(move || serve(listener, connection_store, AuthConfig::default(), None));
     (addr, ids)
 }
 

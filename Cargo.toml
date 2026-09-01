@@ -128,6 +128,10 @@ required-features = ["server"]
 name = "server_transaction_integration"
 required-features = ["server"]
 
+[[test]]
+name = "server_tls_integration"
+required-features = ["server"]
+
 # Same treatment, same reason.
 [[example]]
 name = "memory_footprint"
@@ -208,6 +212,18 @@ dashmap = "6"
 # Only exercised behind the `server` feature, but left unconditional (matching `dashmap`'s own
 # treatment above, `research`-only) rather than `dep:`-gated — it's tiny and dependency-free.
 subtle = "2"
+# New as of the server transport-encryption work (ADR-0014, `SERVER-TLS-DESIGN.md`): native TLS
+# for `serve`'s optional `TlsConfig`. This crate's first git dependency — a pinned git dependency
+# on `rusty_tls`, this owner's own ecosystem-wide `rustls` wrapper (`Rusty-Mill/rusty_mill`,
+# `crates/rusty_tls`), rather than depending on `rustls` directly: `rusty_tls` exists specifically
+# so no consumer in this owner's ecosystem depends on `rustls` (or picks its own crypto-provider
+# crate, cipher policy, or trust-anchor handling) independently, and its server-side
+# `TlsAcceptor`/`TlsServerStream` is a close-to-drop-in fit for this crate's own thread-per-
+# connection, sync-`Read`/`Write` model — see `docs/design/SERVER-TLS-DESIGN.md`'s "Ecosystem
+# check" for the full reasoning. `dep:`-gated (only the `server` feature needs it), pinned to a
+# specific commit rather than tracking `main`, matching `rusty_tls`'s own sibling-pinning
+# convention (`rustils`' `docs/versioning.md` §3: a bare SHA carries the same guarantee as a tag).
+rusty_tls = { git = "https://github.com/Rusty-Mill/rusty_mill", rev = "9fd2e27c9cfd5d1b21a5e58b55e368258a0a2779", optional = true }
 
 [dependencies.rand]
 # Seeded, reproducible RNG for dataset generation (StdRng::seed_from_u64) and for benchmark
@@ -219,6 +235,15 @@ version = "0.8"
 # Benchmark harness. Pinned to 0.5 (not the latest 0.8) so it resolves to the same major
 # version criterion-perf-events 0.4 depends on, avoiding two copies of criterion in the graph.
 criterion = "0.5"
+# New as of the server transport-encryption work (ADR-0014, `SERVER-TLS-DESIGN.md`): generates a
+# throwaway self-signed certificate + private key for `tests/server_tls_integration.rs`'s own
+# hermetic tests. Dev-only, never shipped — matches `rusty_tls`'s own precedent exactly (it takes
+# the identical `rcgen` dev-dependency for the identical reason, its own rejection-path test
+# suite). Considered and rejected: shelling out to the `openssl` CLI at test time avoids a new
+# dependency entirely, but depends on a tool's presence/behavior in every environment `cargo test`
+# runs in (this repo's own CI happens to have it, but a contributor's machine might not) — a
+# pure-Rust dev-dependency is more hermetic and portable for a test the whole suite depends on.
+rcgen = "0.13"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Wraps Linux perf_event_open for hardware cache-miss counters; Linux-only by construction.
@@ -240,14 +265,17 @@ perfcnt = { version = "0.8", optional = true }
 research = []
 # The network server/query layer (`src/server/`) — off by default, distinct
 # from `research`: this is new, real, additive capability (ADR-0010,
-# Accepted), not a benchmarked-alternative or historical-spike module. No
-# new dependency (reuses `bincode`/`serde`/`uuid`, all already present).
+# Accepted), not a benchmarked-alternative or historical-spike module.
 # Validating it against the `Order`/`Customer` domain additionally needs
 # `research` (see `src/server/order.rs`'s own module docs) since
 # `order_customer` itself is research-gated reference material; the `Dog`
 # side needs `server` alone. See `src/server/mod.rs`'s own doc comment for
-# what this does and does not provide before enabling it.
-server = []
+# what this does and does not provide before enabling it. Pulls in
+# `rusty_tls` (ADR-0014, `SERVER-TLS-DESIGN.md`) for `serve`'s optional
+# native-TLS support — `TlsConfig` is `None` unless an operator opts in, so
+# this dependency compiles in but adds no behavior change for an existing
+# deployment that doesn't configure it.
+server = ["dep:rusty_tls"]
 perf-events = ["dep:criterion-perf-events", "dep:perfcnt"]
 
 [profile.bench]

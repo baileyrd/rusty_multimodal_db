@@ -6,14 +6,20 @@
 //!
 //! # This is a local development tool, not a deployable service
 //!
-//! No authentication, no authorization, no transport encryption — per
-//! ADR-0010 (Accepted), do not expose this beyond a trusted, localhost/
-//! development network. Usage: `dog_server [host:port]` (defaults to
-//! `127.0.0.1:7878`).
+//! Authentication/authorization (`AuthConfig::from_env`, ADR-0012) and
+//! native transport encryption (`TlsConfig::from_env`, ADR-0014) are both
+//! real and opt-in via the process environment
+//! (`SERVER_AUTH_READ_ONLY_TOKEN`/`SERVER_AUTH_READ_WRITE_TOKEN`,
+//! `SERVER_TLS_CERT_CHAIN_PATH`/`SERVER_TLS_PRIVATE_KEY_PATH`) — with
+//! none of them set, this behaves exactly as it did before either
+//! feature existed: no auth, no encryption. Do not expose this beyond a
+//! trusted, localhost/development network unless both are configured —
+//! see ADR-0010's Consequences. Usage: `dog_server [host:port]` (defaults
+//! to `127.0.0.1:7878`).
 
 use rusty_multimodal_db::record::DogRecord;
 use rusty_multimodal_db::server::dog::DogConnectionStore;
-use rusty_multimodal_db::server::{serve, AuthConfig};
+use rusty_multimodal_db::server::{serve, AuthConfig, TlsConfig};
 use rusty_multimodal_db::ProductionStore;
 use std::net::TcpListener;
 use std::sync::Arc;
@@ -45,9 +51,20 @@ fn main() {
     let connection_store = Arc::new(DogConnectionStore::new(store));
 
     let listener = TcpListener::bind(&addr).unwrap_or_else(|e| panic!("binding {addr}: {e}"));
+
+    let auth = AuthConfig::from_env();
+    let tls = match TlsConfig::from_env() {
+        None => None,
+        Some(Ok(tls)) => Some(tls),
+        Some(Err(e)) => panic!(
+            "SERVER_TLS_CERT_CHAIN_PATH/SERVER_TLS_PRIVATE_KEY_PATH configured but invalid: {e}"
+        ),
+    };
     eprintln!(
-        "dog_server listening on {addr} (no auth, no encryption — trusted/localhost use only, see ADR-0010)"
+        "dog_server listening on {addr} (auth: {}, TLS: {} — see ADR-0012/ADR-0014; do not expose beyond a trusted network unless both are configured)",
+        if auth.is_configured() { "configured" } else { "NOT configured" },
+        if tls.is_some() { "configured" } else { "NOT configured" },
     );
 
-    serve(listener, connection_store, AuthConfig::from_env());
+    serve(listener, connection_store, auth, tls);
 }

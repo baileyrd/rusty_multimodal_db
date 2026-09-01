@@ -44,7 +44,7 @@ fn start_server(records: Vec<DogRecord>, auth: AuthConfig) -> std::net::SocketAd
 
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
-    thread::spawn(move || serve(listener, connection_store, auth));
+    thread::spawn(move || serve(listener, connection_store, auth, None));
     addr
 }
 

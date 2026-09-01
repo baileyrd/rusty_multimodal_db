@@ -49,7 +49,7 @@ fn start_server() -> std::net::SocketAddr {
 
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
-    thread::spawn(move || serve(listener, connection_store, AuthConfig::default()));
+    thread::spawn(move || serve(listener, connection_store, AuthConfig::default(), None));
     addr
 }
 
@@ -276,7 +276,7 @@ fn concurrent_clients_over_the_wire_match_a_sequential_replay() {
     let connection_store = Arc::new(DogConnectionStore::new(store));
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
-    thread::spawn(move || serve(listener, connection_store, AuthConfig::default()));
+    thread::spawn(move || serve(listener, connection_store, AuthConfig::default(), None));
 
     const THREADS: usize = 8;
     const ITERATIONS: usize = 200;

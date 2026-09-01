@@ -116,25 +116,26 @@ record type (`reports_to`/`ChildOf`, `collaborates_with`/
 `SymmetricRelation`), the first domain where every relation-kind request
 is a real operation, none `Unsupported`.
 
-**No transport encryption, no transaction semantics, no query language
+**No transaction semantics beyond a single batch, no query language
 beyond fixed field-tag addressing** — see `src/server`'s own module docs
 and `docs/decisions/ADR-0010-server-query-layer-proposal.md` (Accepted)
-before using it. Do not expose a server built from this module beyond a
-trusted, localhost/development network unless paired with an external
-TLS-terminating proxy/tunnel. **Authentication/authorization is now
-implemented** — `docs/design/SERVER-AUTH-DESIGN.md`, ADR-0012, Accepted —
-`server::serve` takes an `AuthConfig` naming which token(s), if any, a
-server instance accepts and the `ReadOnly`/`ReadWrite` class each grants;
+before using it. **Authentication/authorization is now implemented** —
+`docs/design/SERVER-AUTH-DESIGN.md`, ADR-0012, Accepted — `server::serve`
+takes an `AuthConfig` naming which token(s), if any, a server instance
+accepts and the `ReadOnly`/`ReadWrite` class each grants;
 `AuthConfig::default()` (no tokens configured) reproduces today's
-unauthenticated behavior exactly, so this is purely opt-in. It closes the
-"anyone who can open a TCP connection can do anything" gap, not the
-transport-encryption one — tokens and every record value are still
-plaintext on the wire. (An accepted design to close the transport-
-encryption gap natively, via `rusty_tls` — this owner's own
-ecosystem-wide wrapper around `rustls`, `Rusty-Mill/rusty_mill` —
-exists: `docs/design/SERVER-TLS-DESIGN.md`, ADR-0014, **Accepted** — but
-it's **not implemented yet**; this paragraph still describes the
-current, real state.)
+unauthenticated behavior exactly, so this is purely opt-in. **Native
+transport encryption is now implemented too** — `docs/design/SERVER-TLS-DESIGN.md`,
+ADR-0014, Accepted — `server::serve` also takes a `TlsConfig`, native TLS
+via `rusty_tls` (this owner's own ecosystem-wide `rustls` wrapper,
+`Rusty-Mill/rusty_mill` — not a direct `rustls` dependency); `tls: None`
+reproduces today's plaintext behavior exactly, so this is purely opt-in
+too. **Do not expose a server built from this module beyond a trusted,
+localhost/development network unless both `AuthConfig` and `TlsConfig`
+are configured together** — either alone still leaves the other half of
+the original gap open (a `TlsConfig`-only server still lets anyone who
+can connect do anything; an `AuthConfig`-only server still puts tokens
+and every record value in plaintext on the wire).
 **Atomic multi-operation transactions are now implemented** — `docs/design/SERVER-TRANSACTION-DESIGN.md`, ADR-0013,
 Accepted — `Request::Transaction { updates }` batches several
 `UpdateField`-shaped writes into one all-or-nothing operation, backed by
@@ -187,8 +188,8 @@ at the right file:
 - **`docs/design/SERVER-TLS-DESIGN.md`** — the design for native
   transport encryption (TLS via `rusty_tls`, this owner's own
   ecosystem-wide `rustls` wrapper) on the server/query layer, now
-  **Accepted** — no implementation exists yet, tracked as a separate,
-  not-yet-started unit.
+  **Accepted and implemented** (`TlsConfig`, `server` feature, `SERVER-001`
+  v0.9.0).
 - **`docs/decisions/`** — one ADR per accepted architectural decision, in
   order:
   - `ADR-0001` — the three-backend (AoS/SoA/canonical) empirical comparison
@@ -207,8 +208,7 @@ at the right file:
   - `ADR-0013` — atomic multi-operation transactions for the
     server/query layer (now Accepted and implemented)
   - `ADR-0014` — native transport encryption (TLS), via `rusty_tls`, for
-    the server/query layer (now **Accepted** — no implementation yet, a
-    separate, not-yet-started unit)
+    the server/query layer (now Accepted and implemented)
 - **`docs/specifications/SPEC-REGISTRY.md`** + **`docs/specifications/storage/`**/**`docs/specifications/server/`**
   — the `STORAGE-0xx`/`SERVER-0xx` requirement/spec tree each round implemented against.
 - **`docs/roadmap/ROADMAP.md`** — status vocabulary and what's next.
