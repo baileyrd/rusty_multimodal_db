@@ -1,9 +1,13 @@
-# Server Transaction Design (Proposed)
+# Server Transaction Design (Accepted)
 
-- Status: **Proposed** — not yet reviewed or accepted. Nothing in this
-  document authorizes implementation; see
-  `docs/decisions/ADR-0013-server-transaction-proposal.md`'s own
-  "Decision" section.
+- Status: **Accepted** (promoted from Proposed on 2026-09-01 — the owner
+  approved the design as proposed, no changes requested). Acceptance
+  authorizes the design; implementation still requires its own unit
+  (extending `SERVER-001` and `STORAGE-011`/`STORAGE-012` with new FRs,
+  or registering a dedicated spec) before any server or storage-layer
+  code is written — see ADR-0013's own "Decision" section. See
+  `docs/decisions/ADR-0013-server-transaction-proposal.md` for the
+  decision record this document backs.
 - Date: 2026-09-01
 - Related: `docs/decisions/ADR-0013-server-transaction-proposal.md` (the
   decision record this document backs), `docs/decisions/ADR-0010-server-query-layer-proposal.md`
@@ -516,3 +520,6 @@ v0.2.0 with an ADR-0009 addendum rather than being folded silently into
   session/transaction semantics as the third of three next directions
   (alongside the schema-driven client library, done, and auth/
   authorization, done).
+- 2026-09-01: Accepted as proposed, no changes requested. Implementation
+  is a separate, not-yet-started unit — see ADR-0013's own "Decision"
+  section.
