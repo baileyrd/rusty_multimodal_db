@@ -146,6 +146,16 @@ pub enum ErrorCode {
     /// The field tag is recognized and the operation is supported, but the
     /// supplied [`ScanValue`] variant doesn't match the field's real type.
     Malformed,
+    /// The connection has not presented a recognized token yet — every
+    /// request kind except [`Request::Authenticate`] is rejected this way
+    /// until it does. Deliberately indistinguishable from "presented a
+    /// wrong token": `AUTH-FR-001`/`AUTH-FR-002`,
+    /// `docs/design/SERVER-AUTH-DESIGN.md`, ADR-0012.
+    Unauthenticated,
+    /// The connection authenticated, but its token's class doesn't permit
+    /// this request kind (only `ReadOnly` vs. `UpdateField` today —
+    /// `AUTH-FR-003`).
+    Unauthorized,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -183,6 +193,15 @@ pub enum Request {
     /// Discover this server's domain schema at runtime — see this
     /// module's own "Schema discovery" doc section, ADR-0011.
     DescribeSchema,
+    /// Authenticate this connection against a configured token — see
+    /// `docs/design/SERVER-AUTH-DESIGN.md`, ADR-0012, `AUTH-FR-001`. Only
+    /// meaningful before any other request on a connection; the server's
+    /// own `handle_connection` intercepts it directly rather than routing
+    /// it through [`super::dispatch`] (which has no store-level notion of
+    /// "this connection", so it can't record the outcome).
+    Authenticate {
+        token: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -244,5 +263,28 @@ mod tests {
         let bytes = bincode::serialize(&resp).unwrap();
         let decoded: Response = bincode::deserialize(&bytes).unwrap();
         assert_eq!(decoded, resp);
+    }
+
+    /// `AUTH-FR-001`/`AUTH-FR-004`: the new `Authenticate` request and the
+    /// two new `ErrorCode` variants round-trip through `bincode` the same
+    /// way every existing variant already does.
+    #[test]
+    fn authenticate_request_and_new_error_codes_round_trip_through_bincode() {
+        let req = Request::Authenticate {
+            token: "s3cr3t".into(),
+        };
+        let bytes = bincode::serialize(&req).unwrap();
+        let decoded: Request = bincode::deserialize(&bytes).unwrap();
+        assert!(matches!(decoded, Request::Authenticate { token } if token == "s3cr3t"));
+
+        for code in [ErrorCode::Unauthenticated, ErrorCode::Unauthorized] {
+            let resp = Response::Err {
+                code,
+                message: "irrelevant".into(),
+            };
+            let bytes = bincode::serialize(&resp).unwrap();
+            let decoded: Response = bincode::deserialize(&bytes).unwrap();
+            assert_eq!(decoded, resp);
+        }
     }
 }

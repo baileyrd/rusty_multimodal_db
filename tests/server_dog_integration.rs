@@ -13,7 +13,7 @@ use rusty_multimodal_db::record::DogRecord;
 use rusty_multimodal_db::server::dog::{DogConnectionStore, FIELD_AGE, FIELD_BREED};
 use rusty_multimodal_db::server::framing::{read_message, write_message};
 use rusty_multimodal_db::server::protocol::{Request, Response, ScanValue};
-use rusty_multimodal_db::server::serve;
+use rusty_multimodal_db::server::{serve, AuthConfig};
 use rusty_multimodal_db::ProductionStore;
 use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
@@ -49,7 +49,7 @@ fn start_server() -> std::net::SocketAddr {
 
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
-    thread::spawn(move || serve(listener, connection_store));
+    thread::spawn(move || serve(listener, connection_store, AuthConfig::default()));
     addr
 }
 
@@ -276,7 +276,7 @@ fn concurrent_clients_over_the_wire_match_a_sequential_replay() {
     let connection_store = Arc::new(DogConnectionStore::new(store));
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
-    thread::spawn(move || serve(listener, connection_store));
+    thread::spawn(move || serve(listener, connection_store, AuthConfig::default()));
 
     const THREADS: usize = 8;
     const ITERATIONS: usize = 200;

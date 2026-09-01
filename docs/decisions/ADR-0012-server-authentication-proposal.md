@@ -1,6 +1,6 @@
 # ADR-0012: Add authentication and coarse read/write authorization to the server/query layer
 
-- Status: **Accepted** (promoted from Proposed on 2026-09-01 — the owner approved the design as proposed; no changes requested)
+- Status: **Accepted and implemented** (promoted from Proposed on 2026-09-01 — the owner approved the design as proposed; no changes requested. Implemented the same day — see "Acceptance and implementation" below.)
 - Date: 2026-09-01 (proposed and accepted same day)
 - Deciders: baileyrd
 - Related: `docs/design/SERVER-AUTH-DESIGN.md` (the full design document this
@@ -14,6 +14,18 @@
 - Supersedes/Superseded by: none. Extends (does not supersede) ADR-0010's
   "no authentication, authorization, or transport encryption" consequence
   — this ADR is the revisit ADR-0010 itself named as a trigger.
+
+## Acceptance and implementation
+
+`SERVER-001` v0.6.0 (`docs/specifications/server/SERVER-001-query-layer.md`, `SERVER-001-FR-016`) records the real implementation: `AuthConfig`/`TokenClass` (`src/server/mod.rs`), `Request::Authenticate`/`ErrorCode::{Unauthenticated,Unauthorized}` (`src/server/protocol.rs`). Implements the accepted design essentially as proposed — one new `Request` variant, two new `ErrorCode` variants, per-connection authentication state checked in `handle_connection`'s own request loop before `dispatch` is ever reached for anything but `Authenticate`, constant-time comparison via `subtle`. No completion beyond the design's own sketch was needed this time (unlike ADR-0010's implementation round) — the design's `Proposed shape` compiled essentially unchanged.
+
+`AuthConfig::new`/`AuthConfig::from_env` split the "already have tokens" and "read tokens from the process environment" cases the design left as an implementation-time decision; `SERVER_AUTH_READ_ONLY_TOKEN`/`SERVER_AUTH_READ_WRITE_TOKEN` are the two environment variable names chosen (`src/bin/dog_server.rs` is the one caller that uses `from_env`; every test and benchmark uses `AuthConfig::new`/`::default()` directly, since `cargo test` runs many tests in parallel within one process and real environment variables would race). `AuthConfig::default()` (no tokens configured) required zero changes to any pre-existing call site's behavior — verified directly: `tests/server_{dog,order,employee}_integration.rs`, `tests/server_schema_driven_client.rs`, and `benches/server.rs` all pass unmodified in substance (only the `serve` call itself gained one new, unconditionally-default argument) — the exact backward-compatibility bar `AUTH-FR-007` set.
+
+`tests/server_auth_integration.rs` (new, `required-features = ["server"]`) covers every functional acceptance criterion `SERVER-AUTH-DESIGN.md` names over a real socket. The timing-measurement acceptance criterion (`AUTH-FR-006`) is covered by a unit test measuring `AuthConfig::check` directly (`server::tests::token_comparison_time_does_not_depend_on_where_the_mismatch_is`) rather than over a real TCP round trip — a deliberate choice, not a scope-narrowing: network jitter (microseconds to milliseconds) would completely swamp the signal this specific claim is about (a difference on the order of one byte comparison in a same-length byte string), so measuring at the network layer would produce a test that always passes regardless of whether the underlying comparison is actually constant-time — no real evidence at all. Measuring `AuthConfig::check` directly is the more meaningful test of the actual claim.
+
+One new dependency landed exactly as the design specified: `subtle = "2"` (`Cargo.toml`), used only by `AuthConfig::check`.
+
+No existing source file outside `src/server/{mod,protocol}.rs`, every `serve` call site (a one-argument addition each), `src/bin/dog_server.rs`, `tests/server_auth_integration.rs` (new), and `Cargo.toml`'s `[dependencies]`/`[[test]]` entries was modified — verified by diff, satisfying this ADR's own "additive, not a rewrite" decision driver, the same bar ADR-0010's own implementation round held itself to.
 
 ## Context
 
