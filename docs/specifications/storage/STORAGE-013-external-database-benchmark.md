@@ -1,6 +1,6 @@
 # STORAGE-013 — External database benchmark comparison (SQLite, Postgres, DuckDB)
 
-- Version: 0.1.0
+- Version: 0.2.0
 - Status: Accepted
 - Owners: baileyrd
 - Depends on: `STORAGE-001`, `STORAGE-002`, `STORAGE-003`, `STORAGE-006`, ADR-0015
@@ -10,13 +10,25 @@
 
 Every benchmark in this crate so far compares `ProductionStore` (and the
 backends it grew from) against other designs *this crate itself
-implements*. This spec adds one external comparison point: the same three
+implements*. This spec adds an external comparison point: the same
 access-pattern shapes already benchmarked in-repo — `get` (full-record
-read by UUID), `scan_ages` (whole-table average-age aggregate), and
-`neighbors_one_hop` (`littermate_of` one-hop traversal) — run against
-three real, general-purpose databases: SQLite, Postgres, and DuckDB. See
-ADR-0015 for why these three engines, why these three shapes, and the
-full accounting of what this comparison does and does not claim.
+read by UUID), `scan_ages` (whole-table average-age aggregate),
+`neighbors_one_hop`, and (since v0.2.0) `neighbors_two_hop` (`littermate_of`
+one- and two-hop traversal) — run against three real, general-purpose
+databases: SQLite, Postgres, and DuckDB. See ADR-0015 for why these three
+engines, why these query shapes, and the full accounting of what this
+comparison does and does not claim.
+
+**v0.2.0 note**: v0.1.0 deliberately depth-bounded every graph query to
+one hop (see the Non-goals this version updates below). `neighbors_two_hop`
+is a later addition, completing this spec's already-accepted benchmark
+scope rather than opening a new decision — the same "one round adds the
+shape, a later round adds the depth" precedent `benches/workloads.rs`'s
+own `neighbors_two_hop` group set for `STORAGE-006`. No new ADR: the
+query idiom (a depth-bounded `WITH RECURSIVE`), the engines, and the
+dataset/methodology are all unchanged from ADR-0015's original decision;
+this just extends the depth bound one hop further, symmetrically across
+all three engines.
 
 ## Non-goals
 
@@ -28,9 +40,10 @@ full accounting of what this comparison does and does not claim.
 - Not a durability or crash-safety comparison across the four systems —
   each external engine runs under its own default durability behavior,
   untuned; see ADR-0015's Consequences.
-- Not two-hop (or deeper) graph traversal against the external engines —
-  the recursive CTEs here are depth-bounded to one hop, matching this
-  round's scope (`neighbors_one_hop`, not `neighbors_two_hop`).
+- Not three-or-more-hop graph traversal against the external engines —
+  the recursive CTEs here are depth-bounded to two hops as of v0.2.0
+  (`neighbors_one_hop` and `neighbors_two_hop`, matching this crate's own
+  two graph-traversal groups; v0.1.0 covered one hop only).
 - Not a new `DogStore` backend and not a change to any existing one — no
   `src/store/**`, `src/production.rs`, or `src/generator.rs` changes.
   Benchmark-harness-only work, same convention `STORAGE-007` (mixed
@@ -75,10 +88,18 @@ full accounting of what this comparison does and does not claim.
   in-repo backend.
 - `STORAGE-013-FR-005`: `get` is `SELECT breed, age FROM dogs WHERE id = ?`
   against an indexed primary key (`dogs.id`); `scan_ages` is
-  `SELECT AVG(age) FROM dogs`; the graph shape is a `WITH RECURSIVE`
-  traversal over `littermates`, depth-bounded to 1 hop, identical in
-  structure across all three engines modulo each engine's own parameter
-  placeholder syntax (`?1` for SQLite/DuckDB, `$1` for Postgres).
+  `SELECT AVG(age) FROM dogs`; the one-hop graph shape is a
+  `WITH RECURSIVE` traversal over `littermates`, depth-bounded to 1 hop,
+  identical in structure across all three engines modulo each engine's own
+  parameter placeholder syntax (`?1` for SQLite/DuckDB, `$1` for
+  Postgres).
+- `STORAGE-013-FR-008` (v0.2.0): the two-hop graph shape is the same
+  `WITH RECURSIVE` traversal, extended one hop deeper (`WHERE hop.depth <
+  2` in the recursive term, `WHERE depth = 2` in the final `SELECT`),
+  matching `bench_support::two_hop_neighbors`'s exact semantics — the
+  deduplicated union of `neighbors(n)` for every `n` in `neighbors(id)` —
+  identical in structure across all three engines, same parameter
+  placeholder convention as FR-005.
 - `STORAGE-013-FR-006`: `ProductionStore` is re-run fresh in the same
   benchmark process as the three external engines (via its existing
   `From<(Vec<DogRecord>, Vec<(Uuid, Uuid)>)>` impl), not read back from an
@@ -142,10 +163,11 @@ not the crate's own network surface.
 - `cargo check --bench external_db --features research,external-db-bench`
   compiles clean.
 - `cargo bench --features research,external-db-bench --bench external_db`
-  runs all three workload groups against all four systems (`production`,
-  `sqlite`, `postgres`, `duckdb`) at all three sizes, completing without
-  panics, given a locally reachable Postgres server per ADR-0015's
-  "Setup" section.
+  runs all four workload groups (`get`, `scan_ages`, `neighbors_one_hop`,
+  `neighbors_two_hop`) against all four systems (`production`, `sqlite`,
+  `postgres`, `duckdb`) at all three sizes, completing without panics,
+  given a locally reachable Postgres server per ADR-0015's "Setup"
+  section.
 - `RESULTS.md` has a new `## External database comparison` section,
   structured like the rest of the file (one table + verdict per
   workload), that reports real numbers from an actual run and states
@@ -179,9 +201,12 @@ comparison` section.
 
 ## Open questions
 
-- Two-hop (or deeper) traversal against the external engines is
-  unmeasured — the recursive CTEs here are depth-bounded to 1 hop on
-  purpose (see ADR-0015's "Considered options").
+- Three-or-more-hop traversal against the external engines is unmeasured
+  — the recursive CTEs here are depth-bounded to 2 hops as of v0.2.0.
+  v0.2.0's own finding (a real, cost-based Postgres join-strategy flip
+  between one and two hops — see `RESULTS.md`'s `### Graph traversal,
+  two-hop` subsection) means depth-3 behavior isn't safely predictable
+  from the depth-1/depth-2 numbers alone.
 - A controlled-for durability comparison (matching fsync/WAL/checkpoint
   behavior across all four systems rather than each engine's own
   defaults) is unmeasured — see ADR-0015's Consequences.
@@ -198,3 +223,11 @@ comparison` section.
 
 - 0.1.0 (2026-09-01): Initial accepted draft, alongside ADR-0015 and the
   real `benches/external_db.rs` implementation and `RESULTS.md` numbers.
+- 0.2.0 (2026-09-01): Added `neighbors_two_hop` (`STORAGE-013-FR-008`) —
+  the depth-1 recursive CTE extended one hop deeper, against
+  `ProductionStore`'s own `bench_support::two_hop_neighbors`. Real numbers
+  in `RESULTS.md`'s new `### Graph traversal, two-hop` subsection; a
+  genuine, investigated finding (a cost-based Postgres join-strategy flip
+  between table sizes, not a benchmark artifact) reported alongside them.
+  No `src/` changes, no new ADR — completes v0.1.0's own already-accepted
+  scope rather than opening a new decision.
