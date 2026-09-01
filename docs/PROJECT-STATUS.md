@@ -124,6 +124,14 @@ Evidence: `cargo test --all-features` / `cargo bench` output referenced in `RESU
 
   Merged via PR #41 (`d5c7d6f` → merge commit `0a07938`).
 
+- `SERVER-001` real-hardware follow-up: the connection-count-ceiling open question closed. The prior round's own "Open, named rather than silently assumed answered" flagged that its 1/4/8/16 sweep was bounded by a 4-core container, not by any structural limit of the thread-per-connection model. This session runs directly on the owner's Windows dev machine (`Beast`, `baileyrd`, confirmed via `hostname`/`whoami`/`nproc` — real dedicated hardware, 12 physical / 24 logical AMD Ryzen 9 7900X3D cores, not a container). `benches/server.rs`'s `THREAD_COUNTS` retuned from `[1, 4, 8, 16]` to `[1, 4, 24, 48]`, the exact array `benches/concurrency.rs` already established for this same machine (real core count, plus a deliberate 2×-cores oversubscription point); module doc comment updated to match.
+
+  **Results** (full tables in `RESULTS.md`'s new real-hardware subsection): latency lands in the same ~29–42 µs band as the container's ~36–39 µs. Throughput genuinely keeps climbing from 4 to 24 threads on real hardware — roughly doubling again, every domain, both runs (e.g. `Dog`: 85,727 → 191,066 ops/sec) — confirming the container's flat 4-through-16 plateau was that environment's own ceiling, not the model's. Past 24 threads, 48 (2× cores) is flat-to-negative and noticeably noisier, not a continuation of the climb — the same oversubscription signature `## Concurrency`'s own real-hardware passes already documented. **Headline finding**: the thread-per-connection model's real ceiling sits at or near this machine's actual core count; pushing past it costs (up to ~40% in the worst observed case) rather than helping. **One honest surprise, not smoothed over**: this real machine's peak throughput (147K–192K ops/sec) is lower than the 4-core container's own plateau (160K–310K ops/sec) — plausibly Windows loopback-TCP/scheduling overhead vs. the container's Linux stack, left as an unverified, separately-flagged open question rather than an asserted explanation.
+
+  `SERVER-001`'s "Open questions" updated: the connection-count-ceiling item moves to resolved (with the peak-throughput surprise above named as a new, narrower open sub-question). No existing source file outside `benches/server.rs` and docs (`RESULTS.md`, `SERVER-001-query-layer.md`, this file) was touched — verified by diff. No new dependency, no spec version bump (matching `STORAGE-010`'s own precedent: retuning a bench's thread-count sweep for a new environment doesn't itself change the spec's implemented capability).
+
+  Merged via PR `<recorded at merge>` (`<recorded at merge>` → merge commit `<recorded at merge>`).
+
 ## In progress
 
 - (none)
