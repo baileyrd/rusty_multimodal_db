@@ -1,15 +1,21 @@
 //! Compares [`ProductionStore`] against three real external databases —
 //! SQLite (`rusqlite`), Postgres (`postgres`, against a locally-run
-//! server), and DuckDB (`duckdb`) — on the same three access-pattern
+//! server), and DuckDB (`duckdb`) — on the same four access-pattern
 //! shapes `benches/workloads.rs` already benchmarks in-repo: `get` (full-
-//! record read by UUID), `scan_ages` (a whole-table aggregate), and
-//! `neighbors_one_hop` (`littermate_of` one-hop graph traversal). See
+//! record read by UUID), `scan_ages` (a whole-table aggregate),
+//! `neighbors_one_hop`, and `neighbors_two_hop` (`littermate_of` graph
+//! traversal, one and two hops deep). See
 //! `docs/decisions/ADR-0015-external-database-benchmark.md` for why these
 //! three engines, why these query shapes, and what this comparison does
 //! and does not claim to answer — most importantly, this is *not* the
 //! full-SQL-parity comparison `docs/FUTURE-GROWTH.md` already scoped out;
-//! it is the same three fixed access patterns this crate has always
+//! it is the same fixed access patterns this crate has always
 //! benchmarked, aimed at three more (external, general-purpose) targets.
+//! `neighbors_two_hop` is a later addition (`STORAGE-013` v0.2.0) — the
+//! original round (v0.1.0) deliberately depth-bounded every graph query
+//! to one hop, matching how `benches/workloads.rs`'s own
+//! `neighbors_two_hop` group was itself a separate, later addition to
+//! `STORAGE-006`'s one-hop original.
 //!
 //! Each dataset is built once per size via
 //! [`rusty_multimodal_db::bench_support::build_dataset`] — the exact same
@@ -34,7 +40,9 @@ use criterion::measurement::WallTime;
 use criterion::{
     black_box, criterion_group, criterion_main, BenchmarkGroup, BenchmarkId, Criterion,
 };
-use rusty_multimodal_db::bench_support::{build_dataset, Dataset, RoundRobin, SIZES};
+use rusty_multimodal_db::bench_support::{
+    build_dataset, two_hop_neighbors, Dataset, RoundRobin, SIZES,
+};
 use rusty_multimodal_db::{DogStore, ProductionStore};
 
 use duckdb::Connection as DuckConn;
@@ -172,6 +180,44 @@ fn run_neighbors_sqlite(group: &mut BenchmarkGroup<'_, WallTime>, n: usize, data
     });
 }
 
+fn run_neighbors_two_hop_sqlite(
+    group: &mut BenchmarkGroup<'_, WallTime>,
+    n: usize,
+    dataset: &Dataset,
+) {
+    let conn = sqlite_load(dataset, n);
+    // Same recursive shape as the one-hop query above, extended one hop deeper: `depth < 2`
+    // lets the recursive term fire once more (from the depth-1 base rows), producing depth-2
+    // rows; the final `WHERE depth = 2` keeps only those, matching
+    // `bench_support::two_hop_neighbors`'s own semantics exactly (the deduplicated union of
+    // `neighbors(n)` for every `n` in `neighbors(id)` — not the 1-hop set itself, unless a
+    // record is also reachable at depth 2, e.g. through a return edge).
+    let mut stmt = conn
+        .prepare(
+            "WITH RECURSIVE hop(id, depth) AS (
+                 SELECT littermate_id, 1 FROM littermates WHERE dog_id = ?1
+                 UNION
+                 SELECT l.littermate_id, hop.depth + 1
+                 FROM littermates l JOIN hop ON l.dog_id = hop.id
+                 WHERE hop.depth < 2
+             )
+             SELECT id FROM hop WHERE depth = 2",
+        )
+        .expect("preparing SQLite two-hop neighbors query failed");
+    let mut cursor = RoundRobin::new(dataset.sample_ids.len());
+    group.bench_with_input(BenchmarkId::new("sqlite", n), &n, |b, _| {
+        b.iter(|| {
+            let id = dataset.sample_ids[cursor.advance()];
+            let rows: Vec<String> = stmt
+                .query_map(rusqlite::params![id.to_string()], |row| row.get(0))
+                .expect("SQLite two-hop neighbors query failed")
+                .collect::<Result<_, _>>()
+                .expect("SQLite two-hop neighbors row decode failed");
+            black_box(rows)
+        });
+    });
+}
+
 // ---------------------------------------------------------------------
 // DuckDB
 // ---------------------------------------------------------------------
@@ -272,6 +318,38 @@ fn run_neighbors_duckdb(group: &mut BenchmarkGroup<'_, WallTime>, n: usize, data
                 .expect("DuckDB neighbors query failed")
                 .collect::<Result<_, _>>()
                 .expect("DuckDB neighbors row decode failed");
+            black_box(rows)
+        });
+    });
+}
+
+fn run_neighbors_two_hop_duckdb(
+    group: &mut BenchmarkGroup<'_, WallTime>,
+    n: usize,
+    dataset: &Dataset,
+) {
+    let conn = duckdb_load(dataset, n);
+    let mut stmt = conn
+        .prepare(
+            "WITH RECURSIVE hop(id, depth) AS (
+                 SELECT littermate_id, 1 FROM littermates WHERE dog_id = ?1
+                 UNION
+                 SELECT l.littermate_id, hop.depth + 1
+                 FROM littermates l JOIN hop ON l.dog_id = hop.id
+                 WHERE hop.depth < 2
+             )
+             SELECT id FROM hop WHERE depth = 2",
+        )
+        .expect("preparing DuckDB two-hop neighbors query failed");
+    let mut cursor = RoundRobin::new(dataset.sample_ids.len());
+    group.bench_with_input(BenchmarkId::new("duckdb", n), &n, |b, _| {
+        b.iter(|| {
+            let id = dataset.sample_ids[cursor.advance()];
+            let rows: Vec<String> = stmt
+                .query_map(duckdb::params![id.to_string()], |row| row.get(0))
+                .expect("DuckDB two-hop neighbors query failed")
+                .collect::<Result<_, _>>()
+                .expect("DuckDB two-hop neighbors row decode failed");
             black_box(rows)
         });
     });
@@ -412,6 +490,40 @@ fn run_neighbors_postgres(group: &mut BenchmarkGroup<'_, WallTime>, n: usize, da
     });
 }
 
+fn run_neighbors_two_hop_postgres(
+    group: &mut BenchmarkGroup<'_, WallTime>,
+    n: usize,
+    dataset: &Dataset,
+) {
+    let mut client = postgres_load(dataset, n);
+    let stmt = client
+        .prepare(
+            "WITH RECURSIVE hop(id, depth) AS (
+                 SELECT littermate_id, 1 FROM littermates WHERE dog_id = $1
+                 UNION
+                 SELECT l.littermate_id, hop.depth + 1
+                 FROM littermates l JOIN hop ON l.dog_id = hop.id
+                 WHERE hop.depth < 2
+             )
+             SELECT id FROM hop WHERE depth = 2",
+        )
+        .expect("preparing Postgres two-hop neighbors query failed");
+    let mut cursor = RoundRobin::new(dataset.sample_ids.len());
+    group.bench_with_input(BenchmarkId::new("postgres", n), &n, |b, _| {
+        b.iter(|| {
+            let id = dataset.sample_ids[cursor.advance()];
+            let rows = client
+                .query(&stmt, &[&id])
+                .expect("Postgres two-hop neighbors query failed");
+            black_box(
+                rows.iter()
+                    .map(|row| row.get::<_, Uuid>(0))
+                    .collect::<Vec<_>>(),
+            )
+        });
+    });
+}
+
 // ---------------------------------------------------------------------
 // ProductionStore (re-run fresh here, same process/session as the
 // external engines above, so the comparison isn't stitched together from
@@ -443,6 +555,21 @@ fn run_neighbors_production(group: &mut BenchmarkGroup<'_, WallTime>, n: usize, 
         b.iter(|| {
             let id = dataset.sample_ids[cursor.advance()];
             black_box(store.neighbors(black_box(id)))
+        });
+    });
+}
+
+fn run_neighbors_two_hop_production(
+    group: &mut BenchmarkGroup<'_, WallTime>,
+    n: usize,
+    dataset: &Dataset,
+) {
+    let store = ProductionStore::from((dataset.records.clone(), dataset.edges.clone()));
+    let mut cursor = RoundRobin::new(dataset.sample_ids.len());
+    group.bench_with_input(BenchmarkId::new("production", n), &n, |b, _| {
+        b.iter(|| {
+            let id = dataset.sample_ids[cursor.advance()];
+            black_box(two_hop_neighbors(&store, black_box(id)))
         });
     });
 }
@@ -488,5 +615,23 @@ fn bench_neighbors_one_hop(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_get, bench_scan_ages, bench_neighbors_one_hop);
+fn bench_neighbors_two_hop(c: &mut Criterion) {
+    let mut group = c.benchmark_group("neighbors_two_hop_vs_external_db");
+    for &n in &SIZES {
+        let dataset = build_dataset(n);
+        run_neighbors_two_hop_production(&mut group, n, &dataset);
+        run_neighbors_two_hop_sqlite(&mut group, n, &dataset);
+        run_neighbors_two_hop_postgres(&mut group, n, &dataset);
+        run_neighbors_two_hop_duckdb(&mut group, n, &dataset);
+    }
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_get,
+    bench_scan_ages,
+    bench_neighbors_one_hop,
+    bench_neighbors_two_hop
+);
 criterion_main!(benches);
