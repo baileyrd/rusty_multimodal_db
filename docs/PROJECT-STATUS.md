@@ -178,7 +178,7 @@ Evidence: `cargo test --all-features` / `cargo bench` output referenced in `RESU
 
   Validation: `cargo fmt --all -- --check`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test --release --all-features` (×3, no flakiness — 251/251 passing, up from 240/240): lib unit tests up from 211 to 217 (+6 new `server::{protocol::tests::authenticate_request_and_new_error_codes_round_trip_through_bincode, tests::auth_config_default_is_unconfigured, tests::auth_config_check_maps_each_token_to_its_own_class, tests::auth_config_works_with_only_one_class_configured, tests::dispatch_never_routes_authenticate_to_a_store, tests::token_comparison_time_does_not_depend_on_where_the_mismatch_is}`) + `tests/server_auth_integration.rs` (new, 5 tests) + every other suite unchanged (7 `cross_backend` + 1 `generic_production_integration` + 4 `mmap_record_identity_keying` + 1 `production_integration` + 4 `server_dog_integration` + 3 `server_employee_integration` + 2 `server_order_integration` + 4 `server_schema_driven_client` + 3 doctests). `cargo test --release` (default features): 63/63, unaffected — confirms `server` still adds no default-build surface. `cargo check --all-targets --all-features`, `cargo doc --all-features --no-deps` (two new "links to a private item" warnings were introduced by an early draft and fixed before merge by dropping the intra-doc link brackets around `handle_connection` references, matching this codebase's existing convention of plain-text references to private items in doc comments) all clean.
 
-  Merged via PR #52 (`<local commit>` → merge commit `<recorded at merge>`).
+  Merged via PR #52 (`65e73a3` → merge commit `<recorded at merge>`).
 
 ## In progress
 
