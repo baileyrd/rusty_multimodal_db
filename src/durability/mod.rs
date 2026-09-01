@@ -149,21 +149,29 @@ pub enum DurabilityError {
     /// data) — the file's first bytes don't match the expected magic
     /// number at all, or the file is too short to even contain a header.
     /// Distinct from [`Self::SchemaVersionMismatch`]: this means "not a
-    /// `GenericMmapStore` file," not "an older version of one." No other
-    /// durability variant currently writes or checks a magic number, so
-    /// this is unreachable from any of them.
-    #[error("not a GenericMmapStore file: magic number mismatch or file too short for a header")]
-    InvalidMagic,
-    /// The file's magic number matches (it *is* a `GenericMmapStore`
-    /// file) but its recorded `SCHEMA_VERSION` doesn't match what this
-    /// build expects — an older (or, in principle, newer) on-disk layout.
-    /// Detection only: this round deliberately doesn't attempt to read or
-    /// migrate the record data once this fires. No other durability
-    /// variant currently writes a schema version, so this is unreachable
-    /// from any of them.
+    /// file this store wrote," not "an older version of one." Shared by
+    /// every mmap-backed variant that checks a magic number — each uses
+    /// its own distinct magic bytes (see each store's own module docs),
+    /// so pointing one store's `open` at another's file still fails here
+    /// rather than being silently misread. As of
+    /// [`crate::durability::mmap_store::MmapAgeStore`]'s own
+    /// record-identity-keying port, that's both mmap-backed variants, not
+    /// just `GenericMmapStore` — no other (non-mmap) durability variant
+    /// writes or checks a magic number at all.
     #[error(
-        "GenericMmapStore schema version mismatch: file has {found}, this build expects {expected}"
+        "not a valid mmap durability file: magic number mismatch or file too short for a header"
     )]
+    InvalidMagic,
+    /// The file's magic number matches (it *is* a file this store wrote)
+    /// but its recorded schema version doesn't match what this build
+    /// expects — an older (or, in principle, newer) on-disk layout.
+    /// Detection only: no attempt is made to read or migrate the record
+    /// data once this fires — see each mmap-backed store's own module
+    /// docs for why. Shared by every mmap-backed variant with a versioned
+    /// header (`GenericMmapStore` and, as of its own record-identity-keying
+    /// port, `MmapAgeStore`) — no other durability variant writes a schema
+    /// version.
+    #[error("mmap durability file schema version mismatch: file has {found}, this build expects {expected}")]
     SchemaVersionMismatch { found: u32, expected: u32 },
 }
 
