@@ -1,9 +1,9 @@
 # ADR-0014: Add native transport encryption (TLS) to the server/query layer
 
-- Status: **Accepted** (promoted from Proposed on 2026-09-01 — the owner
-  approved the design as revised, no further changes requested.
-  Implementation is a separate, immediately-following unit — see
-  "Acceptance and implementation" below once it lands.)
+- Status: **Accepted and implemented** (promoted from Proposed on
+  2026-09-01 — the owner approved the design as revised; no further
+  changes requested. Implemented the same day — see "Acceptance and
+  implementation" below.)
 - Date: 2026-09-01
 - Deciders: baileyrd
 - Related: `docs/design/SERVER-TLS-DESIGN.md` (the full design document
@@ -13,11 +13,88 @@
   (closed the authentication half of that gap; named this proposal's own
   revisit trigger directly — see ADR-0012's "Validation and revisit
   triggers"), `docs/specifications/server/SERVER-001-query-layer.md` (the
-  spec this proposal would extend, not modify, until accepted)
+  spec this proposal extends, `SERVER-001` v0.9.0)
 - Supersedes/Superseded by: none. Extends (does not supersede)
   ADR-0012's own "transport encryption remains a separate, still-open
   gap" consequence — this ADR is the revisit ADR-0012 itself named as a
   trigger.
+
+## Acceptance and implementation
+
+`SERVER-001` v0.9.0 (`docs/specifications/server/SERVER-001-query-layer.md`,
+`SERVER-001-FR-019`) records the real implementation: `TlsConfig`
+(`src/server/mod.rs`), a small hand-written PEM/base64 decoder
+(`src/server/pem.rs`, new). Implements the accepted design essentially
+as revised — `serve` gains a fourth parameter, `tls: Option<TlsConfig>`;
+`handle_connection` performs a TLS server handshake (via
+`rusty_tls::TlsAcceptor::accept`) before any framed `Request`/`Response`
+traffic, including `Authenticate`, is ever read or written;
+`dispatch`/`ConnectionStore` remain completely unaware transport
+encryption exists; `src/server/framing.rs` required zero changes, as the
+design predicted (already generic over `Read`/`Write`).
+
+**One real implementation-time finding beyond the design's own sketch**:
+`handle_connection`'s existing plaintext path splits a connection into
+independent read/write halves via `TcpStream::try_clone` (two real
+OS-level socket handles) — but `rusty_tls::TlsServerStream`'s
+`rustls::ServerConnection` state can't be split that way; a read and a
+write both need to reach through the *same* connection object. Resolved
+with a new `ReadHalf`/`WriteHalf` enum pair: the `Plain` variant keeps
+the existing `try_clone` split completely unchanged (zero behavior
+change, verified by the full existing plaintext test suite passing
+unmodified); the `Tls` variant shares one
+`Rc<RefCell<TlsServerStream<TcpStream>>>` between both halves — `Rc`/
+`RefCell`, not `Arc`/`Mutex`, since each connection is served by exactly
+one OS thread (thread-per-connection, unchanged), so a single-threaded
+runtime borrow check is sufficient and the `Rc` itself never crosses a
+thread boundary (constructed entirely inside the already-spawned
+connection thread). This is a real, if bounded, design choice the
+original design document left as an "implementation-time decision" for
+exactly this reason.
+
+`TlsConfig::new` takes DER-encoded certificate chain + private key
+directly, matching `rusty_tls::TlsAcceptor::new`'s own shape.
+`TlsConfig::from_pem_files`/`TlsConfig::from_env` (the latter mirroring
+`AuthConfig::from_env`'s own pattern, reading
+`SERVER_TLS_CERT_CHAIN_PATH`/`SERVER_TLS_PRIVATE_KEY_PATH`) decode the
+common PEM-file case via `src/server/pem.rs` — a small, hand-written
+decoder, not a new dependency, exactly as the design's own "Ecosystem
+check" proposed: standard base64 decoding is a fully-specified,
+deterministic transform with no invisible-to-testing correctness
+property (unlike `AuthConfig::check`'s constant-time comparison, which
+*is* a dependency, `subtle`, for exactly that reason). `src/bin/dog_server.rs`
+is the one caller using `TlsConfig::from_env`; every test and benchmark
+passes `None` directly, the same pattern `AuthConfig::default()`
+established for v0.6.0.
+
+`tests/server_tls_integration.rs` (new, `required-features = ["server"]`)
+covers every functional acceptance criterion `SERVER-TLS-DESIGN.md`
+names over a real socket, using `rusty_tls::TlsStream` (this ecosystem
+crate's own client-side half, not a hand-rolled test client) and
+`rcgen`-generated throwaway self-signed certificates (a new dev-only
+dependency, matching `rusty_tls`'s own identical precedent for its own
+identical purpose). The transcript-level acceptance criterion — proving
+`Authenticate`'s token is genuinely absent from the wire, not just "we
+used `rusty_tls` so it must be fine" — is covered directly: a
+byte-recording `TcpStream` wrapper captures every byte a real TLS client
+actually sends, and the test asserts the plaintext token string is not
+present anywhere in that capture.
+
+One new dependency landed exactly as the revised design specified:
+`rusty_tls` (`Rusty-Mill/rusty_mill`, `crates/rusty_tls`, pinned to
+commit `9fd2e27c9cfd5d1b21a5e58b55e368258a0a2779`) — this crate's first
+git dependency, `dep:`-gated behind the `server` feature. `rustls` and
+its crypto provider (`ring`, `rusty_tls`'s own committed choice) remain
+in the dependency graph transitively; `rusty_multimodal_db`'s own source
+never names `rustls` directly, preserving the seam the design's
+"Ecosystem check" argued for.
+
+No existing source file outside `src/server/mod.rs`, `src/bin/dog_server.rs`,
+every `serve` call site (a one-argument addition each, `None`), and
+`Cargo.toml`'s `[dependencies]`/`[dev-dependencies]`/`[[test]]` entries
+was modified — verified by diff, satisfying this ADR's own "additive,
+not a rewrite" decision driver, the same bar `SERVER-AUTH`'s/
+`SERVER-TRANSACTION`'s own implementation rounds held themselves to.
 
 ## Context
 

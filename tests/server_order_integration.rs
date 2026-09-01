@@ -63,7 +63,7 @@ fn start_server() -> std::net::SocketAddr {
 
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
-    thread::spawn(move || serve(listener, connection_store, AuthConfig::default()));
+    thread::spawn(move || serve(listener, connection_store, AuthConfig::default(), None));
     addr
 }
 

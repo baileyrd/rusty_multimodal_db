@@ -515,3 +515,11 @@ after this design is explicitly accepted.
   and this document are now Accepted. Implementation follows as its own
   unit — see ADR-0014's own "Acceptance and implementation" section once
   it lands.
+- 2026-09-01: Implemented as `SERVER-001` v0.9.0 (`SERVER-001-FR-019`) —
+  see ADR-0014's own "Acceptance and implementation" section for the full
+  account, including the one real implementation-time finding beyond
+  this document's own sketch (the `ReadHalf`/`WriteHalf` `Rc<RefCell<_>>`
+  split, needed because `rusty_tls::TlsServerStream` can't be split via
+  `TcpStream::try_clone` the way the existing plaintext path is) and why
+  the transcript-level acceptance criterion is verified with a
+  byte-recording stream wrapper rather than a packet-capture tool.

@@ -86,8 +86,15 @@
 //! ADR-0013, Accepted): a batch of writes applied all-or-nothing, isolated
 //! from concurrent connections — explicitly not crash-atomic and not a
 //! multi-round-trip interactive session, see that design's own
-//! "Non-goals". **No transport encryption, no query language beyond
-//! fixed field-tag addressing** — see [`server`]'s
+//! "Non-goals". Native transport encryption is real and implemented too
+//! ([`server::TlsConfig`], `docs/design/SERVER-TLS-DESIGN.md`, ADR-0014,
+//! Accepted): a TLS server handshake via `rusty_tls` (this owner's own
+//! ecosystem-wide `rustls` wrapper, not a direct `rustls` dependency —
+//! this crate's first git dependency) before any framed traffic, also
+//! purely opt-in — a server started with no `TlsConfig` behaves exactly
+//! as before. **No query language beyond fixed field-tag addressing, and
+//! `TlsConfig`/`AuthConfig` must both be configured together before
+//! exposing a server beyond a trusted network** — see [`server`]'s
 //! own module docs and `docs/decisions/ADR-0010-server-query-layer-proposal.md`
 //! (Accepted) before using it; this is new, parallel capability, same as
 //! `generic` above. Two exceptions to "nothing in `production`/
@@ -165,12 +172,14 @@ pub mod record;
 /// default behind the `server` Cargo feature, distinct from `research`:
 /// this is new, real, additive capability, not a benchmarked-alternative
 /// or historical-spike module, and it introduces a real
-/// network-listening binary surface. Authentication/authorization is
-/// implemented and purely opt-in (`AuthConfig`, ADR-0012, Accepted); **no
-/// transport encryption** either way — see this module's own doc comment
-/// and ADR-0010's Consequences before enabling it, and never expose a
-/// server built from it beyond a trusted, localhost/development
-/// network.
+/// network-listening binary surface. Authentication/authorization
+/// (`AuthConfig`, ADR-0012, Accepted) and native transport encryption
+/// (`TlsConfig`, ADR-0014, Accepted, via `rusty_tls` — this crate's first
+/// git dependency, not a direct `rustls` dependency) are both implemented
+/// and purely opt-in — see this module's own doc comment and ADR-0010's
+/// Consequences before enabling it, and never expose a server built from
+/// it beyond a trusted, localhost/development network unless both are
+/// configured together.
 #[cfg(feature = "server")]
 pub mod server;
 pub mod store;
