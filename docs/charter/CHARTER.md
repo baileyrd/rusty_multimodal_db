@@ -64,11 +64,14 @@ authentication/authorization half — see that ADR and
 v0.6.0 for the real code (`AuthConfig`, `Request::Authenticate`).
 Transport encryption remains a separate, still-open gap — ADR-0012
 explicitly does not close it either way. ADR-0010's other named gap,
-"no transaction semantics," now has a design **Accepted** against it —
-ADR-0013, `docs/design/SERVER-TRANSACTION-DESIGN.md` — but acceptance
-authorizes the design, not implementation code; nothing has been built
-yet, tracked as a separate, not-yet-started unit, matching how ADR-0012
-was accepted before `SERVER-AUTH` implemented it.
+"no transaction semantics," now has a design **Accepted and
+implemented** too — ADR-0013 (**Accepted and implemented**) closes one
+bounded slice of it — see that ADR and
+`docs/design/SERVER-TRANSACTION-DESIGN.md` for the design, and
+`SERVER-001` v0.7.0 for the real code (`Request::Transaction`).
+Explicitly not a multi-round-trip interactive session and not
+crash-atomic across a batch — both real, still-open, deliberately
+deferred gaps, not silently assumed solved.
 
 ## Explicit non-goals
 

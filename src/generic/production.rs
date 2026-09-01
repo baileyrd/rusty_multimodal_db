@@ -262,6 +262,30 @@ impl<S> GenericProductionStore<S> {
     {
         self.inner.write().expect(LOCK_POISONED).flush()
     }
+
+    /// Runs `f` with exclusive access to the wrapped store `S` held for
+    /// `f`'s entire duration — the same internal lock every other method
+    /// here already acquires and releases per call, exposed here as one
+    /// continuous critical section spanning as many logical operations as
+    /// `f` performs. The generic analogue of
+    /// `crate::production::ProductionStore`'s own `TransactionalStore`
+    /// impl — the real mechanism behind the server layer's
+    /// `Request::Transaction` atomicity guarantee
+    /// (`docs/design/SERVER-TRANSACTION-DESIGN.md`, ADR-0013). A plain
+    /// inherent method, not a trait: every `*ConnectionStore` adapter that
+    /// wraps `GenericProductionStore<S>` (`OrderConnectionStore`,
+    /// `EmployeeConnectionStore`) is concretely typed over one specific
+    /// `S`, not generic over it — unlike `server::dog::DogConnectionStore<S>`,
+    /// there's no generic caller here needing a trait bound to reach this
+    /// method through.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the lock is poisoned — see `LOCK_POISONED`.
+    pub fn with_exclusive<R>(&self, f: impl FnOnce(&mut S) -> R) -> R {
+        let mut guard = self.inner.write().expect(LOCK_POISONED);
+        f(&mut guard)
+    }
 }
 
 // Uses `order_customer::{Order, ...}` as its concrete test fixture — see

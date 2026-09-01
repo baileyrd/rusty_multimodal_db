@@ -12,10 +12,11 @@
 
 use super::protocol::{
     DomainSchema, ErrorCode, FieldCapabilities, FieldDescriptor, FieldRef, ParentLookup, RecordId,
-    RelationCapabilities, ScanValue, ValueKind,
+    RelationCapabilities, ScanValue, TransactionOp, ValueKind,
 };
 use super::ConnectionStore;
 use crate::generic::production::GenericProductionStore;
+use crate::generic::query::{GetById, UpdateField};
 use crate::generic_spike::employee_impl::{
     CollaboratesWith, Department, DepartmentField, Employee, EmployeeProductionStack, ReportsTo,
     SalaryCents,
@@ -172,6 +173,36 @@ impl ConnectionStore for EmployeeConnectionStore {
                 neighbors: true,
             },
         }
+    }
+
+    fn apply_transaction(&self, updates: &[TransactionOp]) -> Result<(), (usize, ErrorCode)> {
+        self.store.with_exclusive(|inner| {
+            // Same validate-then-apply shape `server::dog`'s own
+            // `apply_transaction` uses — `Employee`'s only mutable field
+            // over this protocol is `salary_cents`. Safe under one
+            // continuously held lock: see
+            // `docs/design/SERVER-TRANSACTION-DESIGN.md`'s own
+            // "no runtime deletion" invariant.
+            for (i, op) in updates.iter().enumerate() {
+                match (op.field, &op.value) {
+                    (FIELD_SALARY, ScanValue::I64(_)) => {
+                        if GetById::<Employee>::get(inner, op.id).is_none() {
+                            return Err((i, ErrorCode::RecordNotFound));
+                        }
+                    }
+                    (FIELD_SALARY, _) => return Err((i, ErrorCode::Malformed)),
+                    (FIELD_NAME | FIELD_DEPARTMENT, _) => return Err((i, ErrorCode::Unsupported)),
+                    _ => return Err((i, ErrorCode::UnknownField)),
+                }
+            }
+            for op in updates {
+                if let ScanValue::I64(salary) = op.value {
+                    UpdateField::<Employee, SalaryCents>::update(inner, op.id, salary)
+                        .expect("already validated under the same lock acquisition above");
+                }
+            }
+            Ok(())
+        })
     }
 }
 

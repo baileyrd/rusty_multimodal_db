@@ -31,13 +31,14 @@
 
 use super::protocol::{
     DomainSchema, ErrorCode, FieldCapabilities, FieldDescriptor, FieldRef, ParentLookup, RecordId,
-    RelationCapabilities, ScanValue, ValueKind,
+    RelationCapabilities, ScanValue, TransactionOp, ValueKind,
 };
 use super::ConnectionStore;
 use crate::generic::order_customer::{
     Amount, BelongsToCustomer, Customer, Order, OrderProductionStack, OrderStatus, Status,
 };
 use crate::generic::production::GenericProductionStore;
+use crate::generic::query::{GetById, UpdateField};
 
 pub const FIELD_AMOUNT: FieldRef = 0;
 pub const FIELD_STATUS: FieldRef = 1;
@@ -195,6 +196,38 @@ impl ConnectionStore for OrderConnectionStore {
                 neighbors: false,
             },
         }
+    }
+
+    fn apply_transaction(&self, updates: &[TransactionOp]) -> Result<(), (usize, ErrorCode)> {
+        self.store.with_exclusive(|inner| {
+            // Same validate-then-apply shape `server::dog`'s own
+            // `apply_transaction` uses — `Order`'s only mutable field
+            // over this protocol is `amount_cents`. Safe under one
+            // continuously held lock: see
+            // `docs/design/SERVER-TRANSACTION-DESIGN.md`'s own
+            // "no runtime deletion" invariant.
+            for (i, op) in updates.iter().enumerate() {
+                match (op.field, &op.value) {
+                    (FIELD_AMOUNT, ScanValue::I64(_)) => {
+                        if GetById::<Order>::get(inner, op.id).is_none() {
+                            return Err((i, ErrorCode::RecordNotFound));
+                        }
+                    }
+                    (FIELD_AMOUNT, _) => return Err((i, ErrorCode::Malformed)),
+                    (FIELD_STATUS | FIELD_CREATED_AT | FIELD_DISCOUNT, _) => {
+                        return Err((i, ErrorCode::Unsupported))
+                    }
+                    _ => return Err((i, ErrorCode::UnknownField)),
+                }
+            }
+            for op in updates {
+                if let ScanValue::I64(amount) = op.value {
+                    UpdateField::<Order, Amount>::update(inner, op.id, amount)
+                        .expect("already validated under the same lock acquisition above");
+                }
+            }
+            Ok(())
+        })
     }
 }
 

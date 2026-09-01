@@ -124,6 +124,10 @@ required-features = ["server", "research"]
 name = "server_auth_integration"
 required-features = ["server"]
 
+[[test]]
+name = "server_transaction_integration"
+required-features = ["server"]
+
 # Same treatment, same reason.
 [[example]]
 name = "memory_footprint"

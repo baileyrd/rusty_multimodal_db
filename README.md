@@ -129,12 +129,15 @@ server instance accepts and the `ReadOnly`/`ReadWrite` class each grants;
 unauthenticated behavior exactly, so this is purely opt-in. It closes the
 "anyone who can open a TCP connection can do anything" gap, not the
 transport-encryption one — tokens and every record value are still
-plaintext on the wire. **A design for atomic multi-operation
-transactions is Accepted, not yet implemented** —
-`docs/design/SERVER-TRANSACTION-DESIGN.md`, ADR-0013, Accepted — see that
-document for what it would and wouldn't deliver (atomicity/isolation
-with respect to concurrent access, explicitly not crash-atomicity or a
-multi-round-trip interactive session) before assuming any of it exists.
+plaintext on the wire. **Atomic multi-operation transactions are now
+implemented** — `docs/design/SERVER-TRANSACTION-DESIGN.md`, ADR-0013,
+Accepted — `Request::Transaction { updates }` batches several
+`UpdateField`-shaped writes into one all-or-nothing operation, backed by
+a critical-section primitive on `ProductionStore`/`GenericProductionStore`
+themselves rather than a new lock. Delivers atomicity/isolation with
+respect to concurrent access, explicitly **not** crash-atomicity across a
+batch or a multi-round-trip interactive session — see that document for
+the full account before assuming more than it delivers.
 
 ```sh
 cargo bench --features server,research --bench server   # real-socket round-trip latency + thread-per-connection throughput sweep, all three domains
@@ -173,9 +176,9 @@ at the right file:
   authentication/authorization on the server/query layer, now **Accepted
   and implemented** (`AuthConfig`, `server` feature, `SERVER-001` v0.6.0).
 - **`docs/design/SERVER-TRANSACTION-DESIGN.md`** — the design for atomic
-  multi-operation transactions on the server/query layer, now
-  **Accepted** — no implementation exists yet, tracked as a separate,
-  not-yet-started unit.
+  multi-operation transactions on the server/query layer, now **Accepted
+  and implemented** (`Request::Transaction`, `server` feature, `SERVER-001`
+  v0.7.0).
 - **`docs/decisions/`** — one ADR per accepted architectural decision, in
   order:
   - `ADR-0001` — the three-backend (AoS/SoA/canonical) empirical comparison
@@ -192,8 +195,7 @@ at the right file:
   - `ADR-0012` — authentication/authorization for the server/query layer
     (now Accepted and implemented)
   - `ADR-0013` — atomic multi-operation transactions for the
-    server/query layer (now Accepted — no implementation yet, a
-    separate, not-yet-started unit)
+    server/query layer (now Accepted and implemented)
 - **`docs/specifications/SPEC-REGISTRY.md`** + **`docs/specifications/storage/`**/**`docs/specifications/server/`**
   — the `STORAGE-0xx`/`SERVER-0xx` requirement/spec tree each round implemented against.
 - **`docs/roadmap/ROADMAP.md`** — status vocabulary and what's next.

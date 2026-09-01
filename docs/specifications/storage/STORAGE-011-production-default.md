@@ -1,6 +1,6 @@
 # STORAGE-011 — Production default: consolidate storage, durability, and concurrency picks into one recommended type
 
-- Version: 0.1.0
+- Version: 0.2.0 (`TransactionalStore` — see "Change history")
 - Status: Accepted
 - Owners: baileyrd
 - Depends on: `STORAGE-001`, `STORAGE-002`, `STORAGE-005`, `STORAGE-007`, `STORAGE-008`, `STORAGE-009`, `STORAGE-010`
@@ -113,17 +113,34 @@ recommendation` section for the numbers.
   repeating their numbers.
 - `STORAGE-011-FR-007`: **No new dependency** — this spec composes
   existing, already-dependency-justified pieces.
+- `STORAGE-011-FR-008` (v0.2.0): **`TransactionalStore`** —
+  `src/production.rs` gains a new trait, `TransactionalStore`, with one
+  associated type (`Exclusive: DogStore`) and one method,
+  `with_exclusive<R>(&self, f: impl FnOnce(&mut Self::Exclusive) -> R) -> R`,
+  implemented by `ProductionStore` (`type Exclusive = MmapAgeStore`). Runs
+  `f` with the store's existing internal `RwLock` write-locked for `f`'s
+  entire duration — the same lock every other `&self`/`ConcurrentStore`
+  method already acquires and releases per call, exposed here as one
+  continuous critical section spanning as many logical operations as `f`
+  performs, instead of many short ones. This is the real mechanism behind
+  the server layer's `Request::Transaction` atomicity guarantee
+  (`docs/design/SERVER-TRANSACTION-DESIGN.md`, ADR-0013,
+  `SERVER-001-FR-017`) — no new lock, the existing one held longer.
+  Implemented only by `ProductionStore`, not every `ConcurrentStore`
+  variant: the other `src/concurrency/**` strategies are benchmarked
+  historical alternatives, never wrapped by the server layer in practice
+  (see `TransactionalStore`'s own doc comment).
 
 ## Architecture and interfaces
 
 `src/production.rs` — `ProductionStore`, its `DogStore`/`ConcurrentStore`
-impls, `create`/`open`/`flush`, and the two `From` impls.
-`tests/production_integration.rs` — the flagship integration test.
-`benches/workloads.rs`/`benches/concurrency.rs` — extended with
-`ProductionStore` as an additional variant (additive changes only). No
-changes to `src/store/canonical_cached.rs`, `src/durability/mmap_store.rs`,
-`src/durability/mod.rs`, `src/concurrency/global_rwlock.rs`, or
-`src/concurrency/mod.rs`.
+impls, `create`/`open`/`flush`, the two `From` impls, and (v0.2.0) the
+`TransactionalStore` trait and its one impl. `tests/production_integration.rs`
+— the flagship integration test. `benches/workloads.rs`/`benches/concurrency.rs`
+— extended with `ProductionStore` as an additional variant (additive
+changes only). No changes to `src/store/canonical_cached.rs`,
+`src/durability/mmap_store.rs`, `src/durability/mod.rs`,
+`src/concurrency/global_rwlock.rs`, or `src/concurrency/mod.rs`.
 
 ## Data/state and invariants
 
@@ -196,4 +213,18 @@ other spec in this tree.
 
 ## Traceability
 
-Implements: the "consolidate the production default" deliverable.
+Implements: the "consolidate the production default" deliverable. v0.2.0's
+`TransactionalStore` implements the storage-layer half of ADR-0013's
+accepted `SERVER-TRANSACTION-DESIGN` — the other half
+(`Request::Transaction`, `ConnectionStore::apply_transaction`) lives in
+`SERVER-001`.
+
+## Change history
+
+- 0.1.0: Initial consolidation — `ProductionStore`, the flagship
+  integration test, standard benchmark suite coverage, documentation
+  lead.
+- 0.2.0 (ADR-0013): `TransactionalStore` (`FR-008`) — the storage-layer
+  critical-section primitive the server layer's `Request::Transaction`
+  atomicity guarantee depends on. No change to `ProductionStore`'s
+  existing `DogStore`/`ConcurrentStore` behavior; purely additive.

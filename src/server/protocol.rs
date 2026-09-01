@@ -65,6 +65,16 @@ pub enum ScanValue {
     Str(String),
 }
 
+/// One write within a [`Request::Transaction`] batch — the same three
+/// fields `Request::UpdateField` already carries. See
+/// `docs/design/SERVER-TRANSACTION-DESIGN.md`, ADR-0013, `TXN-FR-001`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TransactionOp {
+    pub id: RecordId,
+    pub field: FieldRef,
+    pub value: ScanValue,
+}
+
 /// The outcome of a `Parent` lookup — kept as a three-way enum, not a
 /// nested `Option<Option<_>>` or a collapsed `Option<_>`, specifically to
 /// preserve the not-found/no-parent distinction this project's own PR #21
@@ -153,9 +163,16 @@ pub enum ErrorCode {
     /// `docs/design/SERVER-AUTH-DESIGN.md`, ADR-0012.
     Unauthenticated,
     /// The connection authenticated, but its token's class doesn't permit
-    /// this request kind (only `ReadOnly` vs. `UpdateField` today —
-    /// `AUTH-FR-003`).
+    /// this request kind (`ReadOnly` vs. `UpdateField`/`Transaction` —
+    /// `AUTH-FR-003`, `TXN-FR-004`).
     Unauthorized,
+    /// One [`TransactionOp`] within a [`Request::Transaction`] batch named
+    /// an `id` with no record — only reachable via
+    /// [`Response::TransactionFailed`]. A single, non-transactional
+    /// `Request::UpdateField` keeps using [`Response::NotFound`] for the
+    /// same case, unchanged — `TXN-FR-005`,
+    /// `docs/design/SERVER-TRANSACTION-DESIGN.md`, ADR-0013.
+    RecordNotFound,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -202,6 +219,14 @@ pub enum Request {
     Authenticate {
         token: String,
     },
+    /// A batch of `UpdateField`-shaped writes, applied all-or-nothing —
+    /// see `docs/design/SERVER-TRANSACTION-DESIGN.md`, ADR-0013,
+    /// `TXN-FR-001`/`TXN-FR-002`/`TXN-FR-003`. Every operation's
+    /// precondition is checked before any write is applied; either every
+    /// write in `updates` is applied, or none are.
+    Transaction {
+        updates: Vec<TransactionOp>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -226,6 +251,14 @@ pub enum Response {
     NoParent,
     Ok,
     Err {
+        code: ErrorCode,
+        message: String,
+    },
+    /// A [`Request::Transaction`] batch was rejected: `index` names the
+    /// first operation (into `updates`) that failed its precondition
+    /// check — no write in the batch was applied. `TXN-FR-001`.
+    TransactionFailed {
+        index: usize,
         code: ErrorCode,
         message: String,
     },
@@ -286,5 +319,42 @@ mod tests {
             let decoded: Response = bincode::deserialize(&bytes).unwrap();
             assert_eq!(decoded, resp);
         }
+    }
+
+    /// `TXN-FR-001`/`TXN-FR-005`: the new `Transaction` request,
+    /// `TransactionFailed` response, and `RecordNotFound` error code
+    /// round-trip through `bincode` the same way every existing variant
+    /// already does.
+    #[test]
+    fn transaction_request_and_new_shapes_round_trip_through_bincode() {
+        let req = Request::Transaction {
+            updates: vec![
+                TransactionOp {
+                    id: Uuid::from_u128(1),
+                    field: 1,
+                    value: ScanValue::U32(9),
+                },
+                TransactionOp {
+                    id: Uuid::from_u128(2),
+                    field: 1,
+                    value: ScanValue::U32(10),
+                },
+            ],
+        };
+        let bytes = bincode::serialize(&req).unwrap();
+        let decoded: Request = bincode::deserialize(&bytes).unwrap();
+        assert!(matches!(
+            decoded,
+            Request::Transaction { updates } if updates.len() == 2
+        ));
+
+        let resp = Response::TransactionFailed {
+            index: 1,
+            code: ErrorCode::RecordNotFound,
+            message: "irrelevant".into(),
+        };
+        let bytes = bincode::serialize(&resp).unwrap();
+        let decoded: Response = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(decoded, resp);
     }
 }
