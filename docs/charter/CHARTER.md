@@ -53,11 +53,16 @@ superseded by ADR-0005/ADR-0006 (durability) and ADR-0007/ADR-0008
 capabilities — this charter's original text is kept as the historical
 record of the bootstrap-time scope, not rewritten, per this project's own
 "layer findings, don't rewrite history" convention (see `RESULTS.md`).
-"No server, no network surface" is, as of ADR-0010, a **Proposed** (not yet
-accepted) amendment in the same vein — see
-`docs/design/SERVER-QUERY-LAYER-DESIGN.md` and ADR-0010 for the design and
-its explicit, deliberately-unresolved security gaps (no authentication, no
-transport encryption) before treating this line as superseded in practice.
+"No server, no network surface" was superseded the same way, by
+**Accepted** ADR-0010 — see `docs/design/SERVER-QUERY-LAYER-DESIGN.md`
+and `SERVER-001` for the real implementation. Its explicit,
+deliberately-unresolved security gaps at acceptance time (no
+authentication, no transport encryption) are being revisited, not left
+open indefinitely: ADR-0012 (Proposed, not yet accepted) is a design-only
+proposal to close the authentication/authorization half — see that ADR
+and `docs/design/SERVER-AUTH-DESIGN.md` for the design and what it does
+and does not close (transport encryption remains a separate, still-open
+gap even if ADR-0012 is accepted).
 
 ## Explicit non-goals
 

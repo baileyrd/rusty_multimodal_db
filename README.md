@@ -121,7 +121,10 @@ transaction semantics, no query language beyond fixed field-tag
 addressing** — see `src/server`'s own module docs and
 `docs/decisions/ADR-0010-server-query-layer-proposal.md` (Accepted) before
 using it. Do not expose a server built from this module beyond a trusted,
-localhost/development network.
+localhost/development network. (A design proposal to close the
+authentication/authorization half of this gap exists —
+`docs/design/SERVER-AUTH-DESIGN.md`, ADR-0012 — but it's **Proposed, not
+implemented**; this paragraph still describes the current, real state.)
 
 ```sh
 cargo bench --features server,research --bench server   # real-socket round-trip latency + thread-per-connection throughput sweep, all three domains
@@ -156,8 +159,11 @@ at the right file:
 - **`docs/design/SERVER-QUERY-LAYER-DESIGN.md`** — the design proposal for
   the network server/query layer (`server` feature), now Accepted and
   implemented.
-- **`docs/decisions/`** — one ADR per accepted architectural decision, in
-  order:
+- **`docs/design/SERVER-AUTH-DESIGN.md`** — a design proposal for
+  authentication/authorization on the server/query layer, **Proposed, not
+  yet accepted** — no implementation exists yet.
+- **`docs/decisions/`** — mostly accepted architectural decisions, one
+  proposal still pending review, in order:
   - `ADR-0001` — the three-backend (AoS/SoA/canonical) empirical comparison
   - `ADR-0002` — cache-miss instrumentation platform
   - `ADR-0003` — eager write-through cache invalidation
@@ -169,6 +175,8 @@ at the right file:
   - `ADR-0009` — the generic schema design proposal (now Accepted)
   - `ADR-0010` — the server/query layer proposal (now Accepted)
   - `ADR-0011` — schema discovery for the server/query layer (now Accepted)
+  - `ADR-0012` — authentication/authorization for the server/query layer
+    (**Proposed**, awaiting review — no implementation yet)
 - **`docs/specifications/SPEC-REGISTRY.md`** + **`docs/specifications/storage/`**/**`docs/specifications/server/`**
   — the `STORAGE-0xx`/`SERVER-0xx` requirement/spec tree each round implemented against.
 - **`docs/roadmap/ROADMAP.md`** — status vocabulary and what's next.
