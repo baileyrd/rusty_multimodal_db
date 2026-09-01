@@ -63,7 +63,12 @@ authentication/authorization half — see that ADR and
 `docs/design/SERVER-AUTH-DESIGN.md` for the design, and `SERVER-001`
 v0.6.0 for the real code (`AuthConfig`, `Request::Authenticate`).
 Transport encryption remains a separate, still-open gap — ADR-0012
-explicitly does not close it either way.
+explicitly does not close it either way. ADR-0010's other named gap,
+"no transaction semantics," has a design **Proposed** against it too —
+ADR-0013, `docs/design/SERVER-TRANSACTION-DESIGN.md` — but it is not yet
+accepted and nothing has been implemented; this charter entry records a
+proposal in flight, not a change to this project's current real
+behavior.
 
 ## Explicit non-goals
 
