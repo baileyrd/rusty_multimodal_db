@@ -132,6 +132,16 @@ Evidence: `cargo test --all-features` / `cargo bench` output referenced in `RESU
 
   Merged via PR #43 (`de2b1ad` → merge commit `23995ca`).
 
+- `SERVER-001` second real-hardware follow-up: the connection-count-ceiling question re-measured a third time, this time on `baileyai` itself rather than a substitute machine. This session runs directly on `baileyai` (`baileyai`, `baileyrd`, confirmed via `hostname`/`whoami`/`nproc` — 32 logical / 16 physical AMD Ryzen AI MAX+ 395 cores, SMT enabled, real dedicated hardware, no SSH substitution needed). `benches/server.rs`'s `THREAD_COUNTS` retuned from `Beast`'s `[1, 4, 24, 48]` to `[1, 4, 32, 64]`, the exact array `benches/concurrency.rs` already established for this same machine; module doc comment updated to match.
+
+  **Results** (full tables in `RESULTS.md`'s new second real-hardware subsection): latency drops to ~8–13 µs — a third to a quarter of both the container's ~37–39 µs and `Beast`'s ~29–42 µs. Throughput climbs strongly from 4 to 32 threads on real hardware — 3.3×–5.0× across domains/runs (e.g. `Dog`: 376,886 → 1,229,443 ops/sec run 1) — confirming again that the model's ceiling sits at or near real core count, not at some lower structural limit. Past 32 threads, 64 (2× cores) is flat-to-mildly-negative (−2% to −10%), milder than `Beast`'s worst-case −40%. **Headline finding, and the resolution of the prior round's own open surprise**: `baileyai`'s peak throughput (1.17M–1.33M ops/sec at 32 threads) is far higher than both the container's plateau (160K–310K) and `Beast`'s own peak (147K–192K) — roughly 4–8× the container, 7–9× `Beast`. Combined with the latency numbers, this settles the question `Beast`'s pass left open: dedicated Linux hardware is genuinely faster end to end than either environment, meaning `Beast`'s Windows loopback-TCP/scheduling stack — not the container — was the actual outlier.
+
+  `SERVER-001`'s "Open questions" updated: the second real-hardware follow-up entry added, and the `Beast` pass's own peak-throughput surprise marked resolved rather than left open. No existing source file outside `benches/server.rs` and docs (`RESULTS.md`, `SERVER-001-query-layer.md`, `docs/roadmap/ROADMAP.md`, `docs/traceability/TRACEABILITY.md`, this file) was touched — verified by diff. No new dependency, no spec version bump (same precedent as the `Beast` pass: retuning a bench's thread-count sweep for a new environment doesn't itself change the spec's implemented capability).
+
+  Validation: `cargo fmt --all -- --check`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test --release --all-features` (×3, no flakiness), `cargo test --release` (default features, unaffected) all clean; `cargo bench --features server,research --bench server` run twice for run-to-run variance (numbers above).
+
+  Merged via PR `<recorded at merge>` (`<recorded at merge>` → merge commit `<recorded at merge>`).
+
 ## In progress
 
 - (none)
