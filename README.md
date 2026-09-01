@@ -130,9 +130,11 @@ unauthenticated behavior exactly, so this is purely opt-in. It closes the
 "anyone who can open a TCP connection can do anything" gap, not the
 transport-encryption one — tokens and every record value are still
 plaintext on the wire. (A design proposal to close the transport-
-encryption gap natively, via `rustls`, exists —
-`docs/design/SERVER-TLS-DESIGN.md`, ADR-0014 — but it's **Proposed, not
-implemented**; this paragraph still describes the current, real state.)
+encryption gap natively, via `rusty_tls` — this owner's own
+ecosystem-wide wrapper around `rustls`, `Rusty-Mill/rusty_mill` —
+exists: `docs/design/SERVER-TLS-DESIGN.md`, ADR-0014 — but it's
+**Proposed, not implemented**; this paragraph still describes the
+current, real state.)
 **Atomic multi-operation transactions are now implemented** — `docs/design/SERVER-TRANSACTION-DESIGN.md`, ADR-0013,
 Accepted — `Request::Transaction { updates }` batches several
 `UpdateField`-shaped writes into one all-or-nothing operation, backed by
@@ -183,7 +185,8 @@ at the right file:
   and implemented** (`Request::Transaction`, `server` feature, `SERVER-001`
   v0.7.0).
 - **`docs/design/SERVER-TLS-DESIGN.md`** — a design proposal for native
-  transport encryption (TLS via `rustls`) on the server/query layer,
+  transport encryption (TLS via `rusty_tls`, this owner's own
+  ecosystem-wide `rustls` wrapper) on the server/query layer,
   **Proposed, not yet accepted** — no implementation exists yet.
 - **`docs/decisions/`** — mostly accepted architectural decisions, one
   proposal still pending review, in order:
