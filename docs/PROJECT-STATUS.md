@@ -280,6 +280,8 @@ Evidence: `cargo test --all-features` / `cargo bench` output referenced in `RESU
 
   Implemented via PR #68 (`93308a5` → merge commit `063099a`).
 
+- `CI-CACHE` — resolves the CI build-time cost `ADR-0015`'s Consequences and `RESULTS.md`'s own open questions named explicitly (DuckDB's `bundled` feature rebuilding its full C++ amalgamation from scratch on every CI run, since `.github/workflows/ci.yml` had no build cache — observed directly, repeatedly, over this session's own PR cycles: ~20 minutes per run). Fixed by adding `Swatinem/rust-cache@v2` to the one CI job, keyed on `Cargo.lock` — the standard, minimal-risk mitigation for this exact problem, not the more invasive alternatives ADR-0015 also named (a system-DuckDB feature variant, or excluding the bench from the default `--all-features` sweep). Workflow-only change, validated as syntactically valid YAML; the real effect (faster subsequent CI runs) is observable from this PR's own CI time onward, not locally reproducible in this session.
+
 ## In progress
 
 - (none)

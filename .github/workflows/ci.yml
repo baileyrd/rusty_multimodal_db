@@ -17,6 +17,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      # Caches `~/.cargo/registry`/`~/.cargo/git` and `target/`, keyed on Cargo.lock (falls back
+      # to the base branch's cache on a lockfile miss). Added specifically because `duckdb`'s
+      # `bundled` feature (`external-db-bench`, pulled in by `--all-features`) compiles DuckDB's
+      # own C++ amalgamation from source — a real, ~20-minute cost on every run without this,
+      # since a fresh runner starts with an empty `target/` every time. See ADR-0015's
+      # Consequences, which named this cost explicitly and left the mitigation for if it became a
+      # real friction point.
+      - uses: Swatinem/rust-cache@v2
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
       - name: cargo clippy
