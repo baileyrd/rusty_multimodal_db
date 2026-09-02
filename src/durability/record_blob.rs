@@ -28,14 +28,44 @@
 //! # Layout
 //!
 //! A fixed header ([`MAGIC`], then [`BLOB_VERSION`] as a little-endian
-//! `u32`) followed by the `bincode` encoding of [`RecordBlob`]. The header
-//! makes "not a record blob at all" (a stray file at the companion path,
-//! or a legacy pre-this-feature layout) detectable *before* handing bytes
-//! to `bincode`, and distinct from "a record blob from an incompatible
-//! build" — both surface as
+//! `u32`, then the record set's [`RecordBlob::fingerprint`] as a
+//! little-endian `u64`) followed by the `bincode` encoding of
+//! [`RecordBlob`]. The header makes "not a record blob at all" (a stray
+//! file at the companion path, or a legacy pre-this-feature layout)
+//! detectable *before* handing bytes to `bincode`, and distinct from "a
+//! record blob from an incompatible build" — both surface as
 //! [`DurabilityError::RecordBlobUnreadable`], never as `MmapAgeStore`'s
 //! own `InvalidMagic`/`SchemaVersionMismatch`, which describe the *ages*
 //! file (`STORAGE-014-FR-005`).
+//!
+//! # The header fingerprint (blob version 2)
+//!
+//! Version 1 had no fingerprint, so `ProductionStore::open` could only
+//! decide "is the blob on disk already this record set?" by serializing
+//! the caller's set and comparing it byte-for-byte with a full read of the
+//! file — measured at +27% on `open` at 1M records (`RESULTS.md`). Version
+//! 2 puts a 64-bit content fingerprint in the header, so that decision
+//! becomes one `fingerprint` pass over the in-memory records plus a
+//! 20-byte read ([`RecordBlob::is_current_at`]) — no serialization and no
+//! full-file read on the steady-state path. The same fingerprint lets
+//! [`RecordBlob::read`] detect a body that decodes but doesn't match what
+//! the header claims (a spliced or bit-flipped file).
+//!
+//! The fingerprint covers exactly the *immutable* content the blob exists
+//! to carry — record count, each record's `id` and `breed` in order, edge
+//! count, each edge in order — and deliberately **not** `age`: ages live
+//! in the ages file (the source of truth), and the copies `DogRecord`
+//! carries into the blob are seeds `open` never reads back once the ages
+//! file holds the record. Two record sets that differ only in seed ages
+//! therefore share a fingerprint and `open` leaves the blob alone, which
+//! is the correct outcome (the ages file already reconciled them). The
+//! hash is FNV-1a 64, written out inline: it is a fixed, published
+//! function (stable across Rust versions, unlike `DefaultHasher`, whose
+//! keys are explicitly unspecified), adequate for "did the caller hand me
+//! a different dataset?" — this is a change detector against an honest
+//! caller, not a defense against an adversary crafting collisions — and
+//! this crate adds no dependency for what fits in ten lines (same
+//! footing as the hand-written PEM decoder in `server::tls`).
 //!
 //! # Crash safety
 //!
@@ -51,8 +81,8 @@
 use super::DurabilityError;
 use crate::record::DogRecord;
 use serde::{Deserialize, Serialize};
-use std::fs::OpenOptions;
-use std::io::Write;
+use std::fs::{File, OpenOptions};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
@@ -63,11 +93,73 @@ use uuid::Uuid;
 const MAGIC: [u8; 8] = *b"DOGBLOB\0";
 
 /// This blob's on-disk layout, versioned from its first release —
-/// same convention as `MmapAgeStore`'s `SCHEMA_VERSION`.
-const BLOB_VERSION: u32 = 1;
+/// same convention as `MmapAgeStore`'s `SCHEMA_VERSION`. Version 1 was
+/// `MAGIC` + version + body; version 2 added the header fingerprint (see
+/// module docs). A version-1 blob is reported as a version mismatch by
+/// [`RecordBlob::read`] and counts as stale for [`RecordBlob::is_current_at`],
+/// so `ProductionStore::open` rewrites it in the new layout on first use.
+const BLOB_VERSION: u32 = 2;
 
-/// [`MAGIC`] followed by [`BLOB_VERSION`] as a little-endian `u32`.
-const HEADER_LEN: usize = MAGIC.len() + 4;
+/// Byte offset of the little-endian `u32` [`BLOB_VERSION`] in the header.
+const VERSION_OFFSET: usize = MAGIC.len();
+
+/// Byte offset of the little-endian `u64` [`RecordBlob::fingerprint`] in
+/// the header.
+const FINGERPRINT_OFFSET: usize = VERSION_OFFSET + 4;
+
+/// [`MAGIC`], then [`BLOB_VERSION`] as a little-endian `u32`, then the
+/// fingerprint as a little-endian `u64`: 20 bytes.
+const HEADER_LEN: usize = FINGERPRINT_OFFSET + 8;
+
+/// FNV-1a 64 — see module docs for why this hash, and why inline.
+struct Fnv1a64(u64);
+
+impl Fnv1a64 {
+    const OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+
+    fn new() -> Self {
+        Self(Self::OFFSET_BASIS)
+    }
+
+    fn update(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.0 ^= u64::from(b);
+            self.0 = self.0.wrapping_mul(Self::PRIME);
+        }
+    }
+
+    fn finish(&self) -> u64 {
+        self.0
+    }
+}
+
+/// Validate the fixed header and return the fingerprint it records.
+/// Shared by [`RecordBlob::read`] (which then decodes the body) and
+/// [`RecordBlob::is_current_at`] (which needs nothing else). `bytes` may
+/// be the whole file or just its first [`HEADER_LEN`] bytes. Errors are
+/// the `cause` half of a [`DurabilityError::RecordBlobUnreadable`].
+fn parse_header(bytes: &[u8]) -> Result<u64, String> {
+    if bytes.len() < HEADER_LEN || bytes[0..MAGIC.len()] != MAGIC {
+        return Err(
+            "magic number mismatch or file too short for a header — not a record blob".to_owned(),
+        );
+    }
+    // Bounds already checked above (`bytes.len() >= HEADER_LEN`), so the
+    // fixed-width slices below can't panic — same pattern
+    // `read_wal_entries` uses for its length prefix.
+    let mut version = [0u8; 4];
+    version.copy_from_slice(&bytes[VERSION_OFFSET..FINGERPRINT_OFFSET]);
+    let found = u32::from_le_bytes(version);
+    if found != BLOB_VERSION {
+        return Err(format!(
+            "blob version mismatch: file has {found}, this build expects {BLOB_VERSION}"
+        ));
+    }
+    let mut fingerprint = [0u8; 8];
+    fingerprint.copy_from_slice(&bytes[FINGERPRINT_OFFSET..HEADER_LEN]);
+    Ok(u64::from_le_bytes(fingerprint))
+}
 
 /// Suffix appended to the ages file's path to derive the companion
 /// blob's — see [`companion_path`].
@@ -105,6 +197,29 @@ pub(crate) struct RecordBlob {
 }
 
 impl RecordBlob {
+    /// The 64-bit content fingerprint the header carries: FNV-1a 64 over
+    /// the record count, each record's `id` bytes, `breed` length and
+    /// `breed` bytes in order, the edge count, and each edge's two `id`s
+    /// in order. Ages are excluded on purpose (see module docs). Lengths
+    /// are hashed so `("ab", "c")` and `("a", "bc")` can't collide by
+    /// concatenation, and order matters because the blob preserves caller
+    /// order and `bincode` would encode a reordering differently anyway.
+    pub(crate) fn fingerprint(&self) -> u64 {
+        let mut hash = Fnv1a64::new();
+        hash.update(&(self.records.len() as u64).to_le_bytes());
+        for record in &self.records {
+            hash.update(record.id.as_bytes());
+            hash.update(&(record.breed.len() as u64).to_le_bytes());
+            hash.update(record.breed.as_bytes());
+        }
+        hash.update(&(self.edges.len() as u64).to_le_bytes());
+        for (from, to) in &self.edges {
+            hash.update(from.as_bytes());
+            hash.update(to.as_bytes());
+        }
+        hash.finish()
+    }
+
     /// Serialize `self` into its complete on-disk image (header + body).
     /// Split out from [`Self::write`] so `ProductionStore::create`/`open`
     /// can encode *before* handing `records`/`edges` to
@@ -119,8 +234,22 @@ impl RecordBlob {
         let mut image = Vec::with_capacity(HEADER_LEN + body.len());
         image.extend_from_slice(&MAGIC);
         image.extend_from_slice(&BLOB_VERSION.to_le_bytes());
+        image.extend_from_slice(&self.fingerprint().to_le_bytes());
         image.extend_from_slice(&body);
         Ok(EncodedRecordBlob { image })
+    }
+
+    /// Write `self` at `path` in the *version-1* layout (no fingerprint)
+    /// — what a blob written by a build before this version bump looks
+    /// like, for tests that check the upgrade path.
+    #[cfg(test)]
+    pub(crate) fn write_legacy_v1(&self, path: &Path) -> Result<(), DurabilityError> {
+        let body = bincode::serialize(self)?;
+        let mut image = Vec::with_capacity(VERSION_OFFSET + 4 + body.len());
+        image.extend_from_slice(&MAGIC);
+        image.extend_from_slice(&1u32.to_le_bytes());
+        image.extend_from_slice(&body);
+        EncodedRecordBlob { image }.write(path)
     }
 
     /// [`Self::encode`] then [`EncodedRecordBlob::write`]. A test
@@ -139,8 +268,9 @@ impl RecordBlob {
 
     /// Read and validate the blob at `path`. Every way this can fail —
     /// the file is missing, shorter than its header, carries the wrong
-    /// magic, records an incompatible version, or its body doesn't
-    /// decode — maps to one distinctly-named variant,
+    /// magic, records an incompatible version, its body doesn't decode,
+    /// or the decoded body's [`Self::fingerprint`] isn't the one the
+    /// header claims — maps to one distinctly-named variant,
     /// [`DurabilityError::RecordBlobUnreadable`], naming the path and the
     /// specific cause. Never `InvalidMagic`/`SchemaVersionMismatch`
     /// (those describe the ages file), never a panic
@@ -158,33 +288,32 @@ impl RecordBlob {
 
         let bytes =
             std::fs::read(path).map_err(|e| unreadable(format!("cannot read file: {e}")))?;
-        if bytes.len() < HEADER_LEN || bytes[0..MAGIC.len()] != MAGIC {
-            return Err(unreadable(
-                "magic number mismatch or file too short for a header — not a record blob"
-                    .to_owned(),
-            ));
-        }
-        // Bounds already checked above (`bytes.len() >= HEADER_LEN`), so
-        // indexing the four version bytes directly can't panic — same
-        // pattern `read_wal_entries` uses for its length prefix.
-        let v = MAGIC.len();
-        let found = u32::from_le_bytes([bytes[v], bytes[v + 1], bytes[v + 2], bytes[v + 3]]);
-        if found != BLOB_VERSION {
+        let claimed = parse_header(&bytes).map_err(unreadable)?;
+        let blob: Self = bincode::deserialize(&bytes[HEADER_LEN..])
+            .map_err(|e| unreadable(format!("body does not decode: {e}")))?;
+        let actual = blob.fingerprint();
+        if actual != claimed {
             return Err(unreadable(format!(
-                "blob version mismatch: file has {found}, this build expects {BLOB_VERSION}"
+                "fingerprint mismatch: header claims {claimed:#018x}, body hashes to {actual:#018x}"
             )));
         }
-        bincode::deserialize(&bytes[HEADER_LEN..])
-            .map_err(|e| unreadable(format!("body does not decode: {e}")))
+        Ok(blob)
     }
 
-    /// [`Self::encode`] then [`EncodedRecordBlob::is_current_at`]. A
-    /// serialization failure counts as "not current" — the subsequent
-    /// [`Self::write`] surfaces the real error.
-    #[cfg(test)]
+    /// Whether the blob at `path` already holds this record set — the
+    /// check `ProductionStore::open` uses to skip a redundant rewrite in
+    /// the common case (same dataset at `create` and every later `open`,
+    /// which is every benchmark/test call site in this crate). Costs one
+    /// [`Self::fingerprint`] pass over the in-memory records plus a
+    /// [`HEADER_LEN`]-byte read — never a serialization, never a read of
+    /// the body. A missing, short, foreign, or version-1 file counts as
+    /// "not current" so that `open` heals it from the caller-supplied
+    /// truth — including upgrading an ages file written before this
+    /// companion existed, or a blob written before the fingerprint was.
     pub(crate) fn is_current_at(&self, path: &Path) -> bool {
-        self.encode()
-            .is_ok_and(|encoded| encoded.is_current_at(path))
+        let mut header = [0u8; HEADER_LEN];
+        let read_header = File::open(path).and_then(|mut file| file.read_exact(&mut header));
+        read_header.is_ok() && parse_header(&header) == Ok(self.fingerprint())
     }
 }
 
@@ -221,20 +350,6 @@ impl EncodedRecordBlob {
         }
         std::fs::rename(&temp_path, path)?;
         Ok(())
-    }
-
-    /// Whether the file at `path` is byte-for-byte this image — the check
-    /// `ProductionStore::open` uses to skip a redundant rewrite in the
-    /// common case (same dataset at `create` and every later `open`,
-    /// which is every benchmark/test call site in this crate). A byte
-    /// comparison rather than a decode-and-`PartialEq`: `bincode`'s
-    /// encoding is deterministic for equal inputs, and comparing bytes
-    /// costs one file read with no allocation of a second record set. A
-    /// missing or unreadable blob counts as "not current" so that `open`
-    /// heals it from the caller-supplied truth — including upgrading an
-    /// ages file written before this companion existed.
-    pub(crate) fn is_current_at(&self, path: &Path) -> bool {
-        std::fs::read(path).is_ok_and(|existing| existing == self.image)
     }
 }
 
@@ -326,7 +441,8 @@ mod tests {
         let path = companion_path(&dir.join("ages.mmap"));
         sample_blob().write(&path).unwrap();
         let mut bytes = std::fs::read(&path).unwrap();
-        bytes[MAGIC.len()..HEADER_LEN].copy_from_slice(&BLOB_VERSION.wrapping_add(1).to_le_bytes());
+        bytes[VERSION_OFFSET..FINGERPRINT_OFFSET]
+            .copy_from_slice(&BLOB_VERSION.wrapping_add(1).to_le_bytes());
         std::fs::write(&path, bytes).unwrap();
         match RecordBlob::read(&path).err() {
             Some(DurabilityError::RecordBlobUnreadable { cause, .. }) => {
@@ -334,7 +450,86 @@ mod tests {
             }
             other => panic!("expected RecordBlobUnreadable, got {other:?}"),
         }
+        assert!(!sample_blob().is_current_at(&path));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A blob from before the fingerprint existed (version 1) is a version
+    /// mismatch for `read` and stale for `is_current_at` — the combination
+    /// that makes `ProductionStore::open` rewrite it in the new layout.
+    #[test]
+    fn a_version_1_blob_is_reported_as_a_version_mismatch_and_as_stale() {
+        let dir = fresh_temp_dir("record_blob_v1").unwrap();
+        let path = companion_path(&dir.join("ages.mmap"));
+        sample_blob().write_legacy_v1(&path).unwrap();
+        match RecordBlob::read(&path).err() {
+            Some(DurabilityError::RecordBlobUnreadable { cause, .. }) => {
+                assert!(cause.contains("file has 1"), "unexpected cause: {cause}");
+            }
+            other => panic!("expected RecordBlobUnreadable, got {other:?}"),
+        }
+        assert!(!sample_blob().is_current_at(&path));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A body that decodes but isn't what the header claims (here: the
+    /// fingerprint bytes flipped; equivalently, a body spliced in from a
+    /// different blob) is unreadable with a fingerprint cause.
+    #[test]
+    fn a_body_that_does_not_match_the_header_fingerprint_is_unreadable() {
+        let dir = fresh_temp_dir("record_blob_fingerprint").unwrap();
+        let path = companion_path(&dir.join("ages.mmap"));
+        sample_blob().write(&path).unwrap();
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes[FINGERPRINT_OFFSET] ^= 0xff;
+        std::fs::write(&path, bytes).unwrap();
+        match RecordBlob::read(&path).err() {
+            Some(DurabilityError::RecordBlobUnreadable { cause, .. }) => {
+                assert!(cause.contains("fingerprint"), "unexpected cause: {cause}");
+            }
+            other => panic!("expected RecordBlobUnreadable, got {other:?}"),
+        }
+        assert!(!sample_blob().is_current_at(&path));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The fingerprint is a fixed function of the immutable content: the
+    /// same value on every call and every build for the same records
+    /// (pinned so an accidental change to the hashed fields or the hash
+    /// itself shows up as a test failure, not a silent rewrite of every
+    /// deployed blob on its next `open`), and different for any change to
+    /// an `id`, a `breed`, an edge, or ordering — but not to an age.
+    #[test]
+    fn fingerprint_is_stable_order_sensitive_and_ignores_ages() {
+        let base = sample_blob().fingerprint();
+        assert_eq!(
+            base, 0xd98e_f572_3749_8d59,
+            "pinned FNV-1a 64 of the sample set"
+        );
+
+        let mut aged = sample_blob();
+        aged.records[0].age = 99;
+        assert_eq!(
+            aged.fingerprint(),
+            base,
+            "ages are the ages file's business"
+        );
+
+        let mut rebred = sample_blob();
+        rebred.records[0].breed = "husky".to_owned();
+        assert_ne!(rebred.fingerprint(), base);
+
+        let mut reidentified = sample_blob();
+        reidentified.records[0].id = Uuid::from_u128(42);
+        assert_ne!(reidentified.fingerprint(), base);
+
+        let mut reordered = sample_blob();
+        reordered.records.swap(0, 1);
+        assert_ne!(reordered.fingerprint(), base);
+
+        let mut reversed_edge = sample_blob();
+        reversed_edge.edges[0] = (reversed_edge.edges[0].1, reversed_edge.edges[0].0);
+        assert_ne!(reversed_edge.fingerprint(), base);
     }
 
     #[test]
@@ -388,6 +583,13 @@ mod tests {
         let mut no_edges = sample_blob();
         no_edges.edges.clear();
         assert!(!no_edges.is_current_at(&path));
+
+        // Different seed ages, same immutable content: current. The ages
+        // file is the source of truth for ages; rewriting the blob for
+        // them would be wasted I/O on every `open` after an `update_age`.
+        let mut aged = sample_blob();
+        aged.records[0].age = 99;
+        assert!(aged.is_current_at(&path));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

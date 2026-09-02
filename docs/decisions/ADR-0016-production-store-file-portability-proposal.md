@@ -217,3 +217,19 @@ options" section for the full reasoning. Summarized:
   is a content hash in the blob header (a `BLOB_VERSION` bump), not a
   different architecture. Not built this round; no caller has asked.
 - `GenericMmapStore` remains out of scope, per the last revisit bullet.
+- 2026-09-02, follow-up implemented (`STORAGE-014` v0.2.0, blob version 2):
+  the header content hash named above is built. The header grows from 12
+  to 20 bytes — magic, `u32` version (now `2`), and a `u64` FNV-1a
+  fingerprint of the immutable content (record count, each `id` + `breed`,
+  edge count, each edge; `age` excluded, the ages file being its truth).
+  `open` now reads the 20-byte header and compares fingerprints, serializing
+  only when the blob is stale; `read` verifies the body against the header.
+  Re-measured, same method: `open` +0.3-4% at 1M (was +27%), +4-11% at
+  100K, +11-31% at 1K (a ~0.2 ms floor on a 0.6 ms operation); `create`
+  unchanged in kind (+36-45% at 100K/1M, the blob write itself). The hash
+  is hand-written (no new dependency, the `pem.rs` precedent) and pinned by
+  a test; it is a change detector, not an integrity guarantee — the
+  companion is trusted like the ages file. Version-1 blobs read as a
+  version mismatch and are upgraded in place by `open`; `open_portable` on
+  a never-reopened version-1 blob is a typed error, the one documented
+  cost of the bump. The `GenericMmapStore` revisit bullet is unchanged.
