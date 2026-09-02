@@ -1,6 +1,12 @@
 # ADR-0023: Mutual TLS — client certificates as an admission gate, layered under `AuthConfig`
 
-- Status: **Proposed** (not yet accepted; authorizes no implementation)
+- Status: **Accepted** (promoted from Proposed on 2026-09-02 — the owner
+  approved the design as proposed, option (a): client certificates as
+  an admission gate layered under `AuthConfig`, one optional input on
+  each end; (b) hold for class-from-certificate and (c) close as not
+  warranted declined; no changes requested). Acceptance authorizes the
+  design; implementation follows as its own unit — see "Acceptance and
+  implementation" below.
 - Date: 2026-09-02
 - Deciders: baileyrd
 - Related: `docs/design/SERVER-MTLS-DESIGN.md` (the full design document
@@ -186,5 +192,16 @@ Proposed: option 1. Concretely, at implementation:
   with it, accepting a longer path and a parser decision; **(c)** close
   as not warranted — no deployment today needs client certificates, and
   the token scheme behind TLS is judged sufficient; `ADR-0014`'s trigger
-  stays armed.
-- Outcome: pending the owner's decision.
+  stays armed. Proposed in PR #133.
+- 2026-09-02: accepted as proposed (option (a); (b) and (c) declined).
+  The design's throwaway probe (never committed) ran before acceptance
+  and confirmed the mechanism: an `rcgen` CA-signed `ClientAuth` leaf
+  round-trips through `TlsAcceptor::new_with_client_auth`; a client
+  with no identity fails at its first write with
+  `AlertReceived(CertificateRequired)` (server: "peer sent no
+  certificates"); a leaf from a different CA fails with
+  `AlertReceived(DecryptError)` (server: `BadSignature`); an empty root
+  set is `InvalidClientCaRoots` at construction — no hangs, every
+  rejection on the existing `TLS-FR-003` path. The next unit registers
+  `SERVER-001` v0.13.0 / FR-023 and implements per
+  `docs/design/SERVER-MTLS-DESIGN.md`. (This PR.)
