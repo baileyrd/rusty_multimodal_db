@@ -643,8 +643,8 @@ addition, gated like any appended code. `dog_server` gains an optional
   `tests/server_protocol_version.rs` (a `Hello { 2 }` client), since no
   real server negotiates below its own version; the client-side gate is
   one comparison. `ADR-0024`'s acceptance log carries the same note.
-- 2026-09-02: Part B implemented as `SERVER-001` v0.15.0 / FR-025 (this
-  PR), per the verification plan: acceptance criteria 1–6 hold as
+- 2026-09-02: Part B implemented as `SERVER-001` v0.15.0 / FR-025 (PR
+  #141), per the verification plan: acceptance criteria 1–6 hold as
   written; criterion 3 by the file-copy replay pair, as the plan
   allowed. One clarification: `ErrorCode::Journal` is an appended
   variant and so, by `ADR-0022`'s rule 2, bumps `PROTOCOL_VERSION` to
