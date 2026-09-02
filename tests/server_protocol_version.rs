@@ -255,7 +255,7 @@ fn hello_zero_and_a_late_hello_are_malformed_and_a_silent_client_is_served() {
 fn schema_driven_client_negotiates_the_current_version_on_every_domain() {
     let mut dog = SchemaDrivenClient::connect(start_dog_server(AuthConfig::default())).unwrap();
     assert_eq!(dog.server_protocol_version(), PROTOCOL_VERSION);
-    assert_eq!(dog.server_protocol_version(), 2);
+    assert_eq!(dog.server_protocol_version(), 3);
     let fields = dog.get(Uuid::from_u128(1)).unwrap().unwrap();
     assert!(fields
         .iter()
@@ -271,23 +271,108 @@ fn schema_driven_client_negotiates_the_current_version_on_every_domain() {
 }
 
 /// Criterion 8: a request index this build does not know (the one just
-/// past `Hello`) is a decode error, and the connection closes with no
-/// reply — today's pre-hello failure mode, unchanged and pinned. A
-/// version-3 server that appends index 11 would answer it instead; this
-/// test is the one that then moves.
+/// past `Rollback`, the highest at protocol version 3) is a decode error,
+/// and the connection closes with no reply — the pre-hello failure mode,
+/// unchanged and pinned. This test moved once already, when version 3
+/// appended 11–13 (ADR-0024); the next version that appends a variant
+/// moves it again.
 #[test]
 fn an_unknown_request_index_closes_the_connection_without_a_reply() {
     let addr = start_dog_server(AuthConfig::default());
     let (mut reader, mut writer) = connect(addr);
 
     // Frame: u32 LE length 4, then a `Request` whose declaration index is
-    // 11 — one past `Request::Hello` (10), the highest this build knows.
-    writer.write_all(&[0x04, 0, 0, 0, 0x0b, 0, 0, 0]).unwrap();
+    // 14 — one past `Request::Rollback` (13), the highest this build knows.
+    writer.write_all(&[0x04, 0, 0, 0, 0x0e, 0, 0, 0]).unwrap();
     writer.flush().unwrap();
 
     let reply: Result<Response, _> = read_message(&mut reader);
     assert!(
         reply.is_err(),
         "expected the connection to close with no reply, got {reply:?}"
+    );
+}
+
+/// `SESS-FR-006` (design criterion 6, ADR-0024) — the first real use of
+/// compatibility rules 3 and 4: the version-3 session requests are
+/// `Malformed` on a silent (version-1) connection and on one that said
+/// `Hello { 2 }`, with the connection open and an `UpdateField` still
+/// applied immediately (never staged); on a version-3 connection `Begin`
+/// is answered `Ok`.
+#[test]
+fn session_requests_are_malformed_below_protocol_version_3() {
+    let addr = start_dog_server(AuthConfig::default());
+
+    // Silent client: version 1.
+    let (mut reader, mut writer) = connect(addr);
+    assert_eq!(
+        roundtrip(&mut reader, &mut writer, &Request::Begin),
+        Response::Err {
+            code: ErrorCode::Malformed,
+            message: "the supplied value does not match this field's type".into(),
+        }
+    );
+    assert!(matches!(
+        roundtrip(&mut reader, &mut writer, &Request::DescribeSchema),
+        Response::Schema(_)
+    ));
+
+    // A client pinned at version 2.
+    let (mut reader, mut writer) = connect(addr);
+    assert_eq!(
+        roundtrip(
+            &mut reader,
+            &mut writer,
+            &Request::Hello {
+                protocol_version: 2
+            }
+        ),
+        Response::Hello {
+            protocol_version: 2
+        }
+    );
+    for req in [Request::Begin, Request::Commit, Request::Rollback] {
+        assert!(matches!(
+            roundtrip(&mut reader, &mut writer, &req),
+            Response::Err {
+                code: ErrorCode::Malformed,
+                ..
+            }
+        ));
+    }
+    assert_eq!(
+        roundtrip(
+            &mut reader,
+            &mut writer,
+            &Request::UpdateField {
+                id: Uuid::from_u128(1),
+                field: rusty_multimodal_db::server::dog::FIELD_AGE,
+                value: ScanValue::U32(9),
+            }
+        ),
+        Response::Ok
+    );
+
+    // Version 3: gated variants available.
+    let (mut reader, mut writer) = connect(addr);
+    assert_eq!(
+        roundtrip(
+            &mut reader,
+            &mut writer,
+            &Request::Hello {
+                protocol_version: PROTOCOL_VERSION
+            }
+        ),
+        Response::Hello {
+            protocol_version: PROTOCOL_VERSION
+        }
+    );
+    assert_eq!(
+        roundtrip(&mut reader, &mut writer, &Request::Begin),
+        Response::Ok
+    );
+    assert_eq!(
+        roundtrip(&mut reader, &mut writer, &Request::Rollback),
+        Response::Ok
     );
 }

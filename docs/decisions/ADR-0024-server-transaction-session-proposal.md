@@ -203,5 +203,16 @@ Proposed: option 2. Concretely, at implementation:
   PR #137.
 - 2026-09-02: accepted as proposed (option (a); (b) and (c) declined).
   The next unit registers `SERVER-001` v0.14.0 / FR-024 and implements
-  per `docs/design/SERVER-TRANSACTION-SESSION-DESIGN.md` Part A. (This
-  PR.)
+  per `docs/design/SERVER-TRANSACTION-SESSION-DESIGN.md` Part A. (PR
+  #138.)
+- 2026-09-02: implemented as `SERVER-001` v0.14.0 (FR-024) in this PR
+  — `PROTOCOL_VERSION = 3`, `Begin`/`Commit`/`Rollback` at 11–13,
+  `Staged` at 11, the three codes at 6–8, `MAX_STAGED_OPS`, the table
+  row and seven golden vectors with every older vector unchanged;
+  `handle_connection`'s negotiated version and staged buffer, the
+  intercepts after the auth and `ReadOnly` gates, `Malformed` below 3;
+  `dispatch` → `Unsupported`; `SchemaDrivenClient::begin()` →
+  `Session` with `update`/`commit`/`rollback`/`Drop` and
+  `ClientError::TransactionFailed`. Nine tests across three suites plus
+  two unit tests; every acceptance criterion holds; no deviation. Full
+  sweep green (340 lib tests, 338 + 2).

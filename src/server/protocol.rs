@@ -57,6 +57,7 @@
 //! |---|---|---|
 //! | 1 | `SERVER-001` v0.1.0 – v0.9.1 | `Request` 0–9 (`GetById` … `Transaction`), `Response` 0–9 (`Record` … `TransactionFailed`), every `ScanValue`/`ValueKind`/`ErrorCode`/`ParentLookup` variant and every struct as of v0.9.1 |
 //! | 2 | `SERVER-001` v0.10.0 | + `Request::Hello` (index 10), `Response::Hello` (index 10) |
+//! | 3 | `SERVER-001` v0.14.0 | + `Request::Begin`/`Commit`/`Rollback` (11–13), `Response::Staged` (11), `ErrorCode::NoSession`/`SessionOpen`/`SessionFull` (6–8) — the first *gated* variants: a server keeps the negotiated version per connection and answers the three requests `Malformed` below 3 (rule 3); a client sends them only after negotiating ≥ 3 (rule 4). ADR-0024 |
 //!
 //! ## Compatibility rules (`PROTO-FR-005`)
 //!
@@ -91,7 +92,16 @@ use uuid::Uuid;
 /// versions" table. Bumped by exactly one in any change that appends a
 /// variant (rule 2). Version 1 is retroactively the `SERVER-001` v0.9.1
 /// shape: what a client that never sends [`Request::Hello`] speaks.
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
+
+/// The most `UpdateField`s one connection may stage between
+/// [`Request::Begin`] and [`Request::Commit`] (`SESS-FR-004`, ADR-0024):
+/// the `MAX_STAGED_OPS + 1`-th is answered `ErrorCode::SessionFull` and
+/// not staged, the session staying open. A constant, not a config, on
+/// purpose — the first real report of hitting it decides whether it
+/// becomes one. Smaller than one `MAX_FRAME_BYTES` `Transaction` could
+/// carry, so a session never exceeds what a single request already may.
+pub const MAX_STAGED_OPS: usize = 4096;
 
 /// A record's id — every domain this crate has ever used is `Uuid`-keyed.
 pub type RecordId = Uuid;
@@ -222,6 +232,17 @@ pub enum ErrorCode {
     /// same case, unchanged — `TXN-FR-005`,
     /// `docs/design/SERVER-TRANSACTION-DESIGN.md`, ADR-0013.
     RecordNotFound,
+    /// Protocol 3. [`Request::Commit`] or [`Request::Rollback`] on a
+    /// connection with no session open (`SESS-FR-004`, ADR-0024).
+    NoSession,
+    /// Protocol 3. [`Request::Begin`] while a session is already open, or
+    /// a [`Request::Transaction`] inside one — one batch at a time per
+    /// connection (`SESS-FR-004`).
+    SessionOpen,
+    /// Protocol 3. The session already holds [`MAX_STAGED_OPS`] staged
+    /// writes; this one was not staged and the session stays open
+    /// (`SESS-FR-004`).
+    SessionFull,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -287,6 +308,25 @@ pub enum Request {
     Hello {
         protocol_version: u32,
     },
+    /// Protocol 3. Open a transaction session on this connection
+    /// (`SESS-FR-002`, ADR-0024, `docs/design/SERVER-TRANSACTION-SESSION-DESIGN.md`
+    /// Part A): until [`Request::Commit`]/[`Request::Rollback`], every
+    /// admitted [`Request::UpdateField`] is *staged* in a per-connection
+    /// buffer — answered [`Response::Staged`], nothing applied, no lock
+    /// held — and `Commit` applies the buffer as one batch exactly as
+    /// [`Request::Transaction`] would. Reads inside a session see committed
+    /// state only. Answered by `handle_connection` itself, never through
+    /// [`super::dispatch`]; `Malformed` on a connection negotiated below 3.
+    Begin,
+    /// Protocol 3. Apply the session's staged writes as one batch —
+    /// `Response::Ok`, or [`Response::TransactionFailed`] naming the staged
+    /// index — and close the session either way. Requires
+    /// `TokenClass::ReadWrite`, as `Transaction` does. `NoSession` without
+    /// one open.
+    Commit,
+    /// Protocol 3. Discard the session's staged writes and close it.
+    /// `NoSession` without one open.
+    Rollback,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -328,6 +368,13 @@ pub enum Response {
     /// all either side needs (rules 3 and 4 above).
     Hello {
         protocol_version: u32,
+    },
+    /// Protocol 3. Answers a [`Request::UpdateField`] staged inside a
+    /// session: `index` is its position in the batch [`Request::Commit`]
+    /// will apply — the index a later `TransactionFailed` would name.
+    /// Nothing has been applied yet (`SESS-FR-002`).
+    Staged {
+        index: u32,
     },
 }
 
@@ -466,6 +513,10 @@ mod tests {
             },
             &[0x0a, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00],
         );
+        // Protocol 3 (`SESS-FR-001`): appended at 11–13.
+        assert_golden("Begin", &Request::Begin, &[0x0b, 0x00, 0x00, 0x00]);
+        assert_golden("Commit", &Request::Commit, &[0x0c, 0x00, 0x00, 0x00]);
+        assert_golden("Rollback", &Request::Rollback, &[0x0d, 0x00, 0x00, 0x00]);
     }
 
     /// `BINENC-FR-004`: every `Response` variant's wire bytes, pinned —
@@ -587,15 +638,75 @@ mod tests {
             },
             &[0x0a, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00],
         );
+        // Protocol 3 (`SESS-FR-001`): `Staged` at 11; the three new error
+        // codes at 6–8, pinned through `Err`.
+        assert_golden_eq(
+            "Staged",
+            &Response::Staged { index: 2 },
+            &[0x0b, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00],
+        );
+        for (code, index) in [
+            (ErrorCode::NoSession, 0x06u8),
+            (ErrorCode::SessionOpen, 0x07),
+            (ErrorCode::SessionFull, 0x08),
+        ] {
+            assert_golden_eq(
+                "Err(session code)",
+                &Response::Err {
+                    code,
+                    message: "x".into(),
+                },
+                &bytes(&[
+                    &[0x08, 0x00, 0x00, 0x00],
+                    &[index, 0x00, 0x00, 0x00],
+                    &LEN1,
+                    b"x",
+                ]),
+            );
+        }
     }
 
     /// `PROTO-FR-001`/`PROTO-FR-005` rule 2: the constant matches the
-    /// module docs' table — version 2 is the one that added `Hello`. A
-    /// change that appends a variant bumps this by exactly one and
-    /// extends the table; this test is the reminder.
+    /// module docs' table — version 3 is the one that added the session
+    /// variants (2 added `Hello`). A change that appends a variant bumps
+    /// this by exactly one and extends the table; this test is the
+    /// reminder.
     #[test]
     fn protocol_version_is_the_one_the_table_names() {
-        assert_eq!(PROTOCOL_VERSION, 2);
+        assert_eq!(PROTOCOL_VERSION, 3);
+    }
+
+    /// `SESS-FR-001`: the session shapes round-trip through the codec like
+    /// every existing variant.
+    #[test]
+    fn session_shapes_round_trip_through_the_codec() {
+        for req in [Request::Begin, Request::Commit, Request::Rollback] {
+            let bytes = crate::codec::encode(&req).unwrap();
+            let decoded: Request = crate::codec::decode(&bytes).unwrap();
+            assert!(matches!(
+                (&req, &decoded),
+                (Request::Begin, Request::Begin)
+                    | (Request::Commit, Request::Commit)
+                    | (Request::Rollback, Request::Rollback)
+            ));
+        }
+        let resp = Response::Staged { index: 7 };
+        let bytes = crate::codec::encode(&resp).unwrap();
+        let decoded: Response = crate::codec::decode(&bytes).unwrap();
+        assert_eq!(decoded, resp);
+        for code in [
+            ErrorCode::NoSession,
+            ErrorCode::SessionOpen,
+            ErrorCode::SessionFull,
+        ] {
+            let resp = Response::Err {
+                code,
+                message: "irrelevant".into(),
+            };
+            let bytes = crate::codec::encode(&resp).unwrap();
+            let decoded: Response = crate::codec::decode(&bytes).unwrap();
+            assert_eq!(decoded, resp);
+        }
     }
 
     #[test]

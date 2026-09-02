@@ -635,4 +635,11 @@ addition, gated like any appended code. `dog_server` gains an optional
   (PR #137.)
 - 2026-09-02: Both parts accepted as proposed ("1, 1"). No content
   change. Implementation order: Part A as `SERVER-001` v0.14.0 /
-  FR-024, then Part B as v0.15.0 / FR-025.
+  FR-024, then Part B as v0.15.0 / FR-025. (PR #138.)
+- 2026-09-02: Part A implemented as `SERVER-001` v0.14.0 / FR-024 (this
+  PR), per the verification plan: acceptance criteria 1–8 hold as
+  written, no deviation. Criterion 7's "against a server reporting 2"
+  half is covered by the raw-protocol gating test in
+  `tests/server_protocol_version.rs` (a `Hello { 2 }` client), since no
+  real server negotiates below its own version; the client-side gate is
+  one comparison. `ADR-0024`'s acceptance log carries the same note.
