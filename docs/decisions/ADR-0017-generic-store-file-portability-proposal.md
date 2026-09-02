@@ -245,7 +245,9 @@ options" section for the full reasoning. Summarized:
   same in-place A/B, not the trait.*
 - Revisit if: a second store type ever needs the blob to know which `R`
   it holds — a schema tag in the header is a `BLOB_VERSION` bump, not a
-  redesign.
+  redesign. *Tripped by the owner's queue rather than a second store
+  type: proposed as `BLOB-SCHEMA-TAG-DESIGN.md` / `ADR-0019` (that
+  `BLOB_VERSION` bump, to 2), awaiting the owner's decision.*
 
 ## Acceptance and implementation
 

@@ -463,7 +463,10 @@ design document itself.
   implemented as `STORAGE-016` v0.1.0 (see "Implementation status").
 - Whether the blob should record which `R` it holds (a caller-supplied
   schema tag, or the slot widths as a weak check) — deferred; the `.mmap`
-  file makes the same trust assumption today.
+  file makes the same trust assumption today. **Proposed** in
+  `BLOB-SCHEMA-TAG-DESIGN.md` / `ADR-0019` (a `SchemaTag` trait on `R`,
+  hashed into a new header field, `GENBLOB\0` version 2); awaiting the
+  owner's decision.
 - Whether the streamed-serialization fingerprint's `open` cost is
   acceptable at 1M — measured at implementation, with the trait-method
   fingerprint as the named fallback; then the fallback itself measured
@@ -510,8 +513,10 @@ Resolutions of the open questions above, in order:
   `open_employee_production_stack_portable(path)` in `employee_impl.rs`.
   `Employee`'s durable stack is now portable as three files: `<path>`,
   `<path>.records`, `<path>.edges`.
-- Blob recording `R`: still deferred; the `.mmap` file makes the same
-  trust assumption.
+- Blob recording `R`: proposed in `BLOB-SCHEMA-TAG-DESIGN.md` /
+  `ADR-0019` (`SchemaTag` trait, `GENBLOB\0` and `GENEDGE\0` version
+  2), awaiting the owner's decision; the `.mmap` file makes the same
+  trust assumption and is out of that proposal's scope.
 - **`open`'s fingerprint cost at 1M: measured twice — the fallback
   trigger first appeared tripped, then measured in place was not.**
   First round, throwaway release build, median of 7/7/3: `open`
