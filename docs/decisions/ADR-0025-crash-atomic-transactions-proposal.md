@@ -208,7 +208,7 @@ Proposed: option 1. Concretely, at implementation:
   Implemented after `ADR-0024`'s unit, as `SERVER-001` v0.15.0 /
   FR-025, per `docs/design/SERVER-TRANSACTION-SESSION-DESIGN.md` Part
   B. (PR #138.)
-- 2026-09-02: implemented as `SERVER-001` v0.15.0 (FR-025) in this PR
+- 2026-09-02: implemented as `SERVER-001` v0.15.0 (FR-025) in PR #141
   — `src/server/journal.rs` (`BatchJournal`, `CheckpointFlush`,
   `JournalError`, the constants), `with_journal` on all three adapters
   with the append-before-apply and checkpoint steps inside

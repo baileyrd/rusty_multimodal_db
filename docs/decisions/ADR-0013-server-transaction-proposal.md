@@ -224,7 +224,7 @@ interfaces" section for the full reasoning. Summarized:
   durability redesign, not a small extension of this proposal's
   validate-then-apply mechanism.
   *Taken: `ADR-0025` / `SERVER-TRANSACTION-SESSION-DESIGN.md` Part B,
-  implemented as `SERVER-001` v0.15.0 / FR-025 in the PR after #140 — a
+  implemented as `SERVER-001` v0.15.0 / FR-025 in PR #141 — a
   redo journal at the domain adapter, smaller than the redesign this
   trigger expected because this proposal's own "no runtime deletion,
   idempotent overwrite" invariant makes redo sufficient; opt-in, so an
