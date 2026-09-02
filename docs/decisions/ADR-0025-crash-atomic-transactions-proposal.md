@@ -1,6 +1,12 @@
 # ADR-0025: Crash-atomic batches — an opt-in redo journal at the domain adapter, `fsync`'d before the first write
 
-- Status: **Proposed** (not yet accepted; authorizes no implementation)
+- Status: **Accepted** (promoted from Proposed on 2026-09-02 — the owner
+  approved the design as proposed, option (a): an opt-in redo journal
+  at the domain adapter, `fsync` before the first write, replay on
+  open, checkpoint by size; (b) always-on and (c) close as not
+  warranted declined; no changes requested). Acceptance authorizes the
+  design; implementation follows as its own unit, after `ADR-0024`'s —
+  see "Acceptance and implementation" below.
 - Date: 2026-09-02
 - Deciders: baileyrd
 - Related: `docs/design/SERVER-TRANSACTION-SESSION-DESIGN.md` Part B
@@ -196,5 +202,9 @@ Proposed: option 1. Concretely, at implementation:
   same journal, unconditional on every adapter and in `dog_server`,
   taking the `fsync` cost everywhere for the safer default; **(c)**
   close as not warranted — `TXN-FR-007`'s named gap stands as the
-  documented limitation, `ADR-0013`'s trigger stays armed.
-- Outcome: pending the owner's decision.
+  documented limitation, `ADR-0013`'s trigger stays armed. Proposed in
+  PR #137.
+- 2026-09-02: accepted as proposed (option (a); (b) and (c) declined).
+  Implemented after `ADR-0024`'s unit, as `SERVER-001` v0.15.0 /
+  FR-025, per `docs/design/SERVER-TRANSACTION-SESSION-DESIGN.md` Part
+  B. (This PR.)

@@ -1,6 +1,12 @@
 # ADR-0024: A buffered transaction session — `Begin`/`Commit`/`Rollback` at protocol version 3, no lock across round trips
 
-- Status: **Proposed** (not yet accepted; authorizes no implementation)
+- Status: **Accepted** (promoted from Proposed on 2026-09-02 — the owner
+  approved the design as proposed, option (a): a buffered session at
+  protocol version 3, no lock across round trips, commit as one
+  `Transaction`; (b) lock-held with timeout and (c) close as not
+  warranted declined; no changes requested). Acceptance authorizes the
+  design; implementation follows as its own unit — see "Acceptance and
+  implementation" below.
 - Date: 2026-09-02
 - Deciders: baileyrd
 - Related: `docs/design/SERVER-TRANSACTION-SESSION-DESIGN.md` Part A
@@ -193,5 +199,9 @@ Proposed: option 2. Concretely, at implementation:
   timeout and forced abort — the literal reading of `ADR-0013`'s
   trigger, at the liveness cost it named; **(c)** close as not
   warranted — client-side batching through `Request::Transaction` is
-  judged sufficient, and `ADR-0013`'s trigger stays armed.
-- Outcome: pending the owner's decision.
+  judged sufficient, and `ADR-0013`'s trigger stays armed. Proposed in
+  PR #137.
+- 2026-09-02: accepted as proposed (option (a); (b) and (c) declined).
+  The next unit registers `SERVER-001` v0.14.0 / FR-024 and implements
+  per `docs/design/SERVER-TRANSACTION-SESSION-DESIGN.md` Part A. (This
+  PR.)
