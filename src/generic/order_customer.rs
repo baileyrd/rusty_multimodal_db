@@ -10,14 +10,19 @@
 //!
 //! `Order` is the harder case `Dog` never was: **three** `ScannableField`s
 //! (`Amount`, `CreatedAt`, `DiscountCents`) and a directed `ChildOf`
-//! relation to `Customer`. [`OrderProductionStack`] below wires `Amount`
-//! specifically as the one durable, mmap-backed field (mirroring `Dog`'s
-//! `age` — see `mmap_store.rs`'s module docs on why exactly one durable
-//! field, not three); `CreatedAt`/`DiscountCents` stay in-memory-only
-//! `Scanned` layers on top, reusing the very forwarding impls
-//! `forward_scannable_pairs!` already generates below, unmodified, since
-//! those impls are generic over whatever inner store type they wrap.
+//! relation to `Customer`. [`OrderProductionStack`] below wires **two**
+//! of them durably (`STORAGE-017`): `Amount` as [`GenericMmapStore`]'s
+//! own mmap-backed field, and `DiscountCents` as an [`MmapScanned`] layer
+//! with its own slot file (`<path>.discount_cents.mmap`) on top of it.
+//! `CreatedAt` is deliberately left out of the durable stack — it stays
+//! in-memory in [`OrderGenericStore`] — as the standing proof that a
+//! field which doesn't need durability doesn't pay for it. Both layers
+//! forward the fields they don't own through the impls
+//! `forward_scannable_pairs!` generates below (one invocation per layer
+//! kind); those impls are generic over whatever inner store type they
+//! wrap, so the same three-marker list serves both.
 
+use super::mmap_scanned::MmapScanned;
 use super::mmap_store::GenericMmapStore;
 use super::store::{BaseStore, Indexed, Reversed, Scanned};
 use super::traits::{ChildOf, IndexedField, Record, ScannableField, SchemaTag};
@@ -130,10 +135,13 @@ impl ChildOf<BelongsToCustomer> for Order {
     }
 }
 
-// One invocation covering all three scannable fields' pairs — see
-// `store.rs`'s `forward_scannable_pairs!` module docs for why this can't
-// instead be one generic impl.
+// One invocation per layer kind, each covering all three scannable
+// fields' pairs — see `store.rs`'s `forward_scannable_pairs!` module docs
+// for why this can't instead be one generic impl. `MmapScanned` only
+// ever owns `DiscountCents` in this module, but listing all three keeps
+// the two layers interchangeable per field (`STORAGE-017-FR-008`).
 crate::forward_scannable_pairs!(Order; Amount: i64, CreatedAt: i64, DiscountCents: i64);
+crate::forward_scannable_pairs!(for MmapScanned; Order; Amount: i64, CreatedAt: i64, DiscountCents: i64);
 
 /// The full in-memory composed stack for `Order`/`Customer`: `BaseStore`
 /// (owns `Order` records) -> `Indexed<.., Status>` -> `Scanned<.., Amount>`
@@ -160,59 +168,96 @@ pub fn build_order_generic_store(orders: &[Order]) -> OrderGenericStore {
     Reversed::<_, Customer, Order, BelongsToCustomer>::new(scanned_discount, orders)
 }
 
-/// The durable production stack: [`GenericMmapStore`] (owns records, the
-/// `Status` index, and `Amount` — the one mmap-backed durable field) ->
-/// `Reversed<.., Customer, Order, BelongsToCustomer>` (the directed-
-/// relation reverse index, entirely in-memory — relations are rebuilt
-/// from the externally-supplied `records` at every `open`, same convention
-/// every durability variant in this crate already follows). `CreatedAt`/
-/// `DiscountCents` are deliberately not part of this stack — see module
-/// docs for why exactly one scannable field is durable.
-pub type OrderProductionStack =
-    Reversed<GenericMmapStore<Order, Status, Amount>, Customer, Order, BelongsToCustomer>;
+/// The durable production stack (`STORAGE-017`): [`GenericMmapStore`]
+/// (owns records, the `Status` index, and `Amount` in the base slot file
+/// at `path`) -> [`MmapScanned<.., Order, DiscountCents>`](MmapScanned)
+/// (owns `DiscountCents` in its own slot file at
+/// [`discount_cents_path`]`(path)`) -> `Reversed<.., Customer, Order,
+/// BelongsToCustomer>` (the directed-relation reverse index, entirely
+/// in-memory — relations are rebuilt from the record set at every `open`,
+/// same convention every durability variant in this crate already
+/// follows). `CreatedAt` is deliberately not part of this stack — see
+/// module docs.
+pub type OrderProductionStack = Reversed<
+    MmapScanned<GenericMmapStore<Order, Status, Amount>, Order, DiscountCents>,
+    Customer,
+    Order,
+    BelongsToCustomer,
+>;
+
+/// Where [`OrderProductionStack`] keeps its `DiscountCents` slot file,
+/// derived from the base `path`: `<path>.discount_cents.mmap`. Derived
+/// rather than supplied so the three constructors below take the same
+/// single `path` the `Amount`-only stack took, and so the companion blob
+/// (`<path>.records`) and every slot file sit next to each other.
+pub fn discount_cents_path(path: &std::path::Path) -> std::path::PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(".discount_cents.mmap");
+    std::path::PathBuf::from(name)
+}
+
+fn layer_and_reverse(
+    core: GenericMmapStore<Order, Status, Amount>,
+    orders: &[Order],
+    path: &std::path::Path,
+    open: bool,
+) -> Result<OrderProductionStack, crate::durability::DurabilityError> {
+    let discount_path = discount_cents_path(path);
+    let layered = if open {
+        MmapScanned::<_, Order, DiscountCents>::open(core, orders, &discount_path)?
+    } else {
+        MmapScanned::<_, Order, DiscountCents>::create(core, orders, &discount_path)?
+    };
+    Ok(Reversed::<_, Customer, Order, BelongsToCustomer>::new(
+        layered, orders,
+    ))
+}
 
 /// Build a fresh, durable production store for `Order`/`Customer` at
-/// `path` — the generic analogue of `ProductionStore::create`.
+/// `path` — the generic analogue of `ProductionStore::create`. Writes
+/// three files: the base slot file at `path`, its companion record blob,
+/// and the `DiscountCents` slot file at [`discount_cents_path`]`(path)`.
 ///
 /// # Errors
 ///
 /// Returns [`crate::durability::DurabilityError::Io`] under the same
-/// conditions [`GenericMmapStore::create`] does.
+/// conditions [`GenericMmapStore::create`] and [`MmapScanned::create`] do.
 pub fn create_order_production_stack(
     orders: Vec<Order>,
     path: &std::path::Path,
 ) -> Result<OrderProductionStack, crate::durability::DurabilityError> {
     let core = GenericMmapStore::<Order, Status, Amount>::create(orders.clone(), path)?;
-    Ok(Reversed::<_, Customer, Order, BelongsToCustomer>::new(
-        core, &orders,
-    ))
+    layer_and_reverse(core, &orders, path, false)
 }
 
 /// Reopen an existing durable production store for `Order`/`Customer` at
-/// `path` — the generic analogue of `ProductionStore::open`.
+/// `path` — the generic analogue of `ProductionStore::open`. Each slot
+/// file reconciles against `orders` independently (`STORAGE-017-FR-004`).
 ///
 /// # Errors
 ///
-/// Returns [`crate::durability::DurabilityError::Io`] under the same
-/// conditions [`GenericMmapStore::open`] does.
+/// Returns whatever [`GenericMmapStore::open`] and [`MmapScanned::open`]
+/// return — including
+/// [`crate::durability::DurabilityError::SlotWidthMismatch`] when the
+/// `DiscountCents` file was written for another record shape.
 pub fn open_order_production_stack(
     orders: Vec<Order>,
     path: &std::path::Path,
 ) -> Result<OrderProductionStack, crate::durability::DurabilityError> {
     let core = GenericMmapStore::<Order, Status, Amount>::open(orders.clone(), path)?;
-    Ok(Reversed::<_, Customer, Order, BelongsToCustomer>::new(
-        core, &orders,
-    ))
+    layer_and_reverse(core, &orders, path, true)
 }
 
 /// Reopen an existing durable production store for `Order`/`Customer`
-/// from its two files alone — no `orders` argument — the generic
-/// analogue of `ProductionStore::open_portable` (`STORAGE-015-FR-008`).
-/// Reads the record set back from the companion blob
-/// ([`GenericMmapStore::read_portable_records`]) and then builds the
+/// from its files alone — no `orders` argument — the generic analogue
+/// of `ProductionStore::open_portable` (`STORAGE-015-FR-008`,
+/// `STORAGE-017-FR-005`). Reads the record set back from the companion
+/// blob ([`GenericMmapStore::read_portable_records`]) and then builds the
 /// stack exactly as [`open_order_production_stack`] does, so the
 /// `Reversed` layer's per-customer child order follows the blob's
-/// persisted (creation) order.
+/// persisted (creation) order. Only the base slot file has a companion
+/// blob; the `DiscountCents` file reconciles against the records the
+/// blob yields, like any other `open`.
 ///
 /// # Errors
 ///
@@ -392,6 +437,36 @@ mod tests {
         _pair_exists::<S, CreatedAt, DiscountCents>();
     }
 
+    // `STORAGE-017-FR-008`: the same six ordered pairs exist for the
+    // durable layer, generated by the macro's `for MmapScanned` arm — no
+    // hand-written forwarding impl anywhere in `mmap_scanned.rs`.
+    #[allow(dead_code)]
+    fn _mmap_pair_exists<S, Owner, Forwarded>()
+    where
+        S: ScanField<Order, Forwarded> + UpdateField<Order, Forwarded>,
+        MmapScanned<S, Order, Owner>: ScanField<Order, Forwarded> + UpdateField<Order, Forwarded>,
+        Order: ScannableField<Owner> + ScannableField<Forwarded>,
+        <Order as ScannableField<Owner>>::ScanValue: super::super::mmap_field::MmapFieldValue,
+    {
+    }
+
+    #[allow(dead_code)]
+    fn _all_six_mmap_pairs_exist<
+        S: ScanField<Order, Amount>
+            + UpdateField<Order, Amount>
+            + ScanField<Order, CreatedAt>
+            + UpdateField<Order, CreatedAt>
+            + ScanField<Order, DiscountCents>
+            + UpdateField<Order, DiscountCents>,
+    >() {
+        _mmap_pair_exists::<S, CreatedAt, Amount>();
+        _mmap_pair_exists::<S, DiscountCents, Amount>();
+        _mmap_pair_exists::<S, Amount, CreatedAt>();
+        _mmap_pair_exists::<S, DiscountCents, CreatedAt>();
+        _mmap_pair_exists::<S, Amount, DiscountCents>();
+        _mmap_pair_exists::<S, CreatedAt, DiscountCents>();
+    }
+
     #[test]
     fn create_then_read_and_write_as_production_stack() {
         let dir = crate::bench_support::fresh_temp_dir("order_production_basic").unwrap();
@@ -416,6 +491,43 @@ mod tests {
                 .len(),
             2
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `STORAGE-017` criterion 1 through the real stack: both durable
+    /// fields update, flush, and reopen independently; `CreatedAt` reads
+    /// back from the caller-supplied records because nothing persists it.
+    #[test]
+    fn both_durable_fields_survive_flush_and_reopen_through_the_stack() {
+        let dir = crate::bench_support::fresh_temp_dir("order_production_two_fields").unwrap();
+        let path = dir.join("amount.mmap");
+
+        {
+            use super::super::store::Flush;
+            let mut stack = create_order_production_stack(sample(), &path).unwrap();
+            UpdateField::<Order, Amount>::update(&mut stack, Uuid::from_u128(1), 8_000).unwrap();
+            UpdateField::<Order, DiscountCents>::update(&mut stack, Uuid::from_u128(1), 640)
+                .unwrap();
+            // `CreatedAt` has no layer in this stack, so
+            // `UpdateField::<Order, CreatedAt>` doesn't exist for it —
+            // a compile error, not a runtime one.
+            Flush::flush(&stack).unwrap();
+        }
+        assert!(discount_cents_path(&path).is_file());
+
+        let reopened = open_order_production_stack(sample(), &path).unwrap();
+        let order = GetById::<Order>::get(&reopened, Uuid::from_u128(1)).unwrap();
+        assert_eq!(order.amount_cents, 8_000);
+        assert_eq!(order.discount_cents, 640);
+        assert_eq!(order.created_at_unix_ms, 1_000);
+
+        let mut discounts = ScanField::<Order, DiscountCents>::scan(&reopened);
+        discounts.sort_unstable();
+        assert_eq!(discounts, vec![0, 100, 640]);
+        let mut amounts = ScanField::<Order, Amount>::scan(&reopened);
+        amounts.sort_unstable();
+        assert_eq!(amounts, vec![999, 4_200, 8_000]);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -490,9 +602,27 @@ mod tests {
         shipped.sort();
         assert_eq!(shipped, vec![Uuid::from_u128(1), Uuid::from_u128(3)]);
 
+        // `STORAGE-017` criterion 4: updates to the second durable field
+        // survive a portable reopen too, and never touch the blob — the
+        // blob is written at `create` and rewritten only by an `open`
+        // that found it stale, not by field updates.
+        let companion = super::super::record_blob::blob_path(&path);
+        let blob_before = std::fs::read(&companion).unwrap();
+        {
+            use super::super::store::Flush;
+            let mut stack = open_order_production_stack_portable(&path).unwrap();
+            UpdateField::<Order, DiscountCents>::update(&mut stack, Uuid::from_u128(3), 333)
+                .unwrap();
+            Flush::flush(&stack).unwrap();
+        }
+        assert_eq!(std::fs::read(&companion).unwrap(), blob_before);
+        let reopened = open_order_production_stack_portable(&path).unwrap();
+        let order_3 = GetById::<Order>::get(&reopened, Uuid::from_u128(3)).unwrap();
+        assert_eq!(order_3.discount_cents, 333);
+        assert_eq!(order_3.amount_cents, 999);
+
         // Without the companion, the portable path fails naming it; the
         // caller-supplied path still works.
-        let companion = super::super::record_blob::blob_path(&path);
         std::fs::remove_file(&companion).unwrap();
         match open_order_production_stack_portable(&path) {
             Err(crate::durability::DurabilityError::RecordBlobUnreadable { path: p, .. }) => {

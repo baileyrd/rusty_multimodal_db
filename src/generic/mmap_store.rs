@@ -34,8 +34,10 @@
 //! over exactly one `IndexedField` marker (mirroring `breed_index`,
 //! immutable after construction) and exactly one `ScannableField` marker
 //! (mirroring `age`, the one mutable, mmap-backed field). A domain that
-//! wants more than one mutable durable field needs the redesign ADR-0009
-//! already flagged as unscoped follow-up work — not attempted here.
+//! wants a *second* mutable durable field doesn't widen this type — it
+//! stacks an [`MmapScanned`](super::mmap_scanned::MmapScanned) layer on
+//! top, one slot file per field (`STORAGE-017`; see the last section
+//! below). This store stays exactly as scoped as it was.
 //!
 //! # A finding from wiring this up: write-through consistency needed a new trait method
 //!
@@ -119,7 +121,7 @@
 //! record's slot can outlive it (see above), that's no longer true: a
 //! blind full-file scan would leak a removed record's value into
 //! [`ScanField::scan`]'s result. `scan` now iterates only the positions
-//! [`GenericMmapStore::position_index`] currently maps to a live id,
+//! `GenericMmapStore::position_index` currently maps to a live id,
 //! keeping the original bulk `chunks_exact` fast path when every slot in
 //! the file is still live (the common case — no record has ever been
 //! dropped between an `open` and the `records` now supplied), falling
@@ -141,8 +143,8 @@
 //! with nothing at any fixed offset a reader could check.
 //!
 //! Every file `GenericMmapStore::create` writes now begins with a fixed
-//! [`HEADER_LEN`]-byte header — an 8-byte [`MAGIC`] constant, then
-//! [`SCHEMA_VERSION`] as a little-endian `u32` (via the same
+//! `HEADER_LEN`-byte header — an 8-byte `MAGIC` constant, then
+//! `SCHEMA_VERSION` as a little-endian `u32` (via the same
 //! [`MmapFieldValue`] round-trip every id/value already uses) — followed
 //! by the id+value slot layout, otherwise unchanged. [`GenericMmapStore::open`]
 //! reads and checks this header *before* touching any slot data:
@@ -189,9 +191,9 @@
 //! path too, directly, rather than assuming the same fix automatically
 //! covers it.
 //!
-//! Every slot now carries one extra trailing byte — [`COMMITTED`] — after
+//! Every slot now carries one extra trailing byte — `COMMITTED` — after
 //! its id and value, written strictly *last*, once both of those are
-//! fully in place: [`Self::write_slot_into`] is the single function that
+//! fully in place: `SlotFile::write_slot_into` is the single function that
 //! performs a slot's id write, then its value write, then its marker
 //! write, in that exact order, and both call sites that ever established a
 //! slot's identity at the time (`create`'s per-record loop, and a
@@ -199,11 +201,11 @@
 //! one function, not two independently-maintained copies of the same
 //! three-step order, so they couldn't drift apart the way the original
 //! id/value split implicitly invited. (`write_slot` was later replaced by
-//! [`Self::append_committed_slot`] — see this module's own "next free
+//! `SlotFile::append_committed_slot` — see this module's own "next free
 //! slot" race section — which builds the identical three-field layout
 //! but commits it through a different mechanism; `write_slot_into` itself
 //! is unchanged and still the one place that byte layout is defined.)
-//! [`Self::is_committed`] reads that byte back; [`Self::open`]'s
+//! `SlotFile::is_committed` reads that byte back; [`GenericMmapStore::open`]'s
 //! reconciliation pass skips any slot whose marker isn't set, exactly as
 //! if that id had never been persisted at all — the record it belongs to
 //! (if still current) falls into the ordinary "no persisted entry yet"
@@ -223,12 +225,12 @@
 //! copy-on-write) — stated explicitly, per this project's own convention
 //! of naming its durability assumptions rather than leaving them
 //! implicit, not proven beyond what "smallest possible write" implies.
-//! [`Self::is_committed`]'s own doc comment covers the update path's
+//! `SlotFile::is_committed`'s own doc comment covers the update path's
 //! separate, narrower assumption in the same spirit.
 //!
 //! **Another one-time limitation, same shape as the header round's own**:
 //! a file written by the *previous* round (id+value slots, header, no
-//! commit marker) has a different [`SCHEMA_VERSION`] recorded in its
+//! commit marker) has a different `SCHEMA_VERSION` recorded in its
 //! header, so reopening one now correctly fails as
 //! [`DurabilityError::SchemaVersionMismatch`] rather than being misread
 //! under the new, wider slot layout — the version bump this round makes
@@ -249,7 +251,7 @@
 //! real two-*live*-process harness, `src/bin/multiprocess_harness.rs` —
 //! contrast the crash-safety harness above, which kills one process
 //! mid-work; this one lets both run to completion and race) reproduced
-//! this directly, 24/24 trials: [`Self::open`]'s previous design decided
+//! this directly, 24/24 trials: [`GenericMmapStore::open`]'s previous design decided
 //! a new record's slot position purely from `existing_slot_count`, a
 //! value read from *this process's own* memory-mapped view of the file's
 //! length, before growing it. Two processes opening concurrently, each
@@ -266,10 +268,10 @@
 //!
 //! **The fix moves the position decision out of this process's own,
 //! necessarily-stale read and into the kernel**, via `O_APPEND`.
-//! [`Self::append_committed_slot`] opens a dedicated file handle with
+//! `SlotFile::append_committed_slot` opens a dedicated file handle with
 //! the `append` flag set and performs exactly one `write_all` call per
 //! missing record, each carrying that slot's fully-formed bytes — id,
-//! then value, then the trailing [`COMMITTED`] marker, precomputed into
+//! then value, then the trailing `COMMITTED` marker, precomputed into
 //! one buffer, so the write that lands the slot's identity *is* the
 //! write that commits it, one syscall, not three separate mmap writes
 //! racing anything. POSIX specifies that for a regular file opened with
@@ -383,58 +385,65 @@
 //! decoded as whatever it happens to deserialize to (`STORAGE-015`
 //! v0.2.0, `SCHTAG-FR-001`/`-002`; see `generic::record_blob`'s "The
 //! schema tag" section).
+//!
+//! # One slot-file engine, shared with the per-field layer
+//!
+//! **Refactored in a follow-up round** (`STORAGE-017`, ADR-0020,
+//! `docs/design/MULTI-FIELD-MMAP-DURABILITY-DESIGN.md`). Everything this
+//! module's sections describe about the `.mmap` file itself — the
+//! `MAGIC`/`SCHEMA_VERSION` header, the id+value+`COMMITTED` slot layout,
+//! the `O_APPEND` single-`write_all` append, the re-map after appending —
+//! moved verbatim into `generic::slot_file::SlotFile`, a crate-private
+//! type that owns one mapped file and does the byte arithmetic. This
+//! store keeps everything that is *policy*: the record map, the index,
+//! the `position_index` reconciliation (which persisted slot belongs to
+//! which live record, which records need a fresh slot), the companion
+//! blob, and the permissive treatment of trailing partial bytes. The
+//! file format did not change — `SCHEMA_VERSION` is still 2 and every
+//! file written before the refactor opens identically — and this
+//! module's tests are textually unchanged, which is how that was checked.
+//!
+//! The reason for the split is
+//! [`MmapScanned`](super::mmap_scanned::MmapScanned): a layer that owns
+//! *one* `ScannableField` in its own `SlotFile` and forwards everything
+//! else to whatever it wraps, so a domain can make a second field durable
+//! by stacking rather than by widening this type. That layer reconciles
+//! its file the same way this store does, but refuses a file whose slot
+//! body isn't a whole number of its own slots
+//! ([`DurabilityError::SlotWidthMismatch`]) because it has no companion
+//! blob to fall back on — a divergence this module's own permissive
+//! behaviour keeps, deliberately, so nothing that opened before still
+//! fails now.
 
 use super::mmap_field::MmapFieldValue;
 use super::query::{FilterEq, GetById, ScanField, UpdateField};
 use super::record_blob::{self, blob_path, GenericRecordBlob};
+use super::slot_file::SlotFile;
 use super::store::Flush;
-use super::traits::{IndexedField, Record, ScannableField, SchemaTag};
+use super::traits::{IndexedField, ScannableField, SchemaTag};
 use super::NotFound;
 use crate::durability::DurabilityError;
-use memmap2::MmapMut;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::collections::HashMap;
-use std::fs::{File, OpenOptions};
-use std::io::{Seek, Write};
 use std::marker::PhantomData;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-/// Identifies a file as one [`GenericMmapStore`] wrote, at all — 8
-/// arbitrary-but-fixed bytes, ASCII-readable purely for the convenience of
-/// anyone inspecting a file by hand (`hexdump`/`xxd`), not a meaningful
-/// abbreviation the code relies on. One global constant, not per-`R` —
-/// the header identifies "a `GenericMmapStore`-shaped file," not which
-/// domain it belongs to; nothing in this format encodes that today, on
-/// either side of this round.
-const MAGIC: [u8; 8] = *b"GMMAPST\0";
-
-/// Bumped whenever [`GenericMmapStore`]'s on-disk *slot* layout changes in
-/// a way that would make an old file misread under a new build — bumped
-/// this round for the trailing per-slot [`COMMITTED`] marker byte (see
-/// this module's own doc comment), the same way the record-identity-
-/// keying round would have bumped it for the id+value slot layout, had
-/// this marker existed yet at that point.
-const SCHEMA_VERSION: u32 = 2;
-
-/// [`MAGIC`] followed by [`SCHEMA_VERSION`] as a little-endian `u32` — see
-/// this module's doc comment for the full header design.
-const HEADER_LEN: usize = MAGIC.len() + 4;
-
-/// The value [`GenericMmapStore::is_committed`] looks for in a slot's
-/// trailing marker byte. Any other byte value — including `0`, what a
-/// freshly-extended file's zero-filled bytes already are before anything
-/// writes to them — means "not committed," so a slot that was never
-/// reached at all (file merely grown, e.g. by `open`'s `file.set_len`
-/// ahead of writing it) and a slot whose marker write was interrupted by
-/// a crash both read the same safe way: absent, not corrupted.
-const COMMITTED: u8 = 1;
+// The tests below poke at the file format directly (header bytes, commit
+// markers), so they need the format constants and the mapping types the
+// production code no longer touches itself — `SlotFile` does.
+#[cfg(all(test, feature = "research"))]
+use super::slot_file::{HEADER_LEN, MAGIC, SCHEMA_VERSION};
+#[cfg(all(test, feature = "research"))]
+use memmap2::MmapMut;
+#[cfg(all(test, feature = "research"))]
+use std::fs::OpenOptions;
 
 /// The generic, durable storage core: owns every record, one equality
 /// index (`IndexMarker`), and one mmap-backed scannable field
 /// (`ScanMarker`). See module docs for why it's hand-fused, not composed,
 /// scoped to exactly one field of each kind, and why each persisted slot
-/// now carries its own record id rather than being addressed by array
+/// carries its own record id rather than being addressed by array
 /// position alone.
 pub struct GenericMmapStore<R, IndexMarker, ScanMarker>
 where
@@ -444,14 +453,17 @@ where
 {
     records: HashMap<R::Id, R>,
     index: HashMap<R::IndexValue, Vec<R::Id>>,
-    /// `id` -> that id's *current* slot position in `mmap` — built by
+    /// `id` -> that id's *current* slot position in `file` — built by
     /// matching persisted ids against `records`, not by array index. See
     /// module docs for the two mismatch cases this reconciliation has to
     /// decide between.
     position_index: HashMap<R::Id, usize>,
-    mmap: MmapMut,
-    #[allow(dead_code)] // kept for symmetry with MmapAgeStore's Self; not read again
-    path: PathBuf,
+    /// The mapped `.mmap` file itself — header, slot arithmetic, commit
+    /// markers, append and re-map all live in `SlotFile`
+    /// (`src/generic/slot_file.rs`) since `STORAGE-017`, shared with the
+    /// per-field `MmapScanned` layer. This store keeps the policy: which
+    /// slots to reuse, which records to append, and the index above.
+    file: SlotFile<R::Id, R::ScanValue>,
     _marker: PhantomData<(IndexMarker, ScanMarker)>,
 }
 
@@ -461,9 +473,9 @@ where
 /// into its own struct (rather than a tuple) purely for readability at
 /// the `create`/`open` call sites, mirroring
 /// `src/durability/mmap_store.rs`'s own `Indexes` struct. Deliberately
-/// does *not* include `position_index` any more — unlike `records`/
-/// `index`, that now depends on what's actually persisted (see module
-/// docs), so `create`/`open` each compute it themselves.
+/// does *not* include `position_index` — unlike `records`/`index`, that
+/// depends on what's actually persisted (see module docs), so
+/// `create`/`open` each compute it themselves.
 struct Indexes<R, IndexMarker>
 where
     R: IndexedField<IndexMarker>,
@@ -471,12 +483,6 @@ where
     records: HashMap<R::Id, R>,
     index: HashMap<R::IndexValue, Vec<R::Id>>,
 }
-
-/// Every `(id, value)` pair read from an existing file during
-/// [`GenericMmapStore::open`]'s reconciliation pass, keyed by id, each
-/// paired with the slot position it was found at.
-type PersistedSlots<R, ScanMarker> =
-    HashMap<<R as Record>::Id, (usize, <R as ScannableField<ScanMarker>>::ScanValue)>;
 
 impl<R, IndexMarker, ScanMarker> GenericMmapStore<R, IndexMarker, ScanMarker>
 where
@@ -488,181 +494,21 @@ where
     R::Id: MmapFieldValue,
     R::ScanValue: MmapFieldValue,
 {
-    /// Bytes per persisted slot: the id prefix, the scannable value, and
-    /// the trailing [`COMMITTED`] marker byte — see module docs for why
-    /// neither addition is optional.
-    fn slot_width() -> usize {
-        R::Id::BYTE_WIDTH + R::ScanValue::BYTE_WIDTH + 1
-    }
-
-    /// Byte offset of slot `position`'s first byte — every slot sits after
-    /// the fixed [`HEADER_LEN`]-byte header, not at file offset 0 directly.
+    /// Byte offset of slot `position`'s first byte in the `.mmap` file —
+    /// kept on this type, as a thin delegate, so the format tests below
+    /// can corrupt a specific slot without reaching into `SlotFile`.
+    #[cfg(all(test, feature = "research"))]
     fn slot_offset(position: usize) -> usize {
-        HEADER_LEN + position * Self::slot_width()
-    }
-
-    fn read_value(&self, position: usize) -> R::ScanValue {
-        let id_width = R::Id::BYTE_WIDTH;
-        let start = Self::slot_offset(position) + id_width;
-        R::ScanValue::read_le(&self.mmap[start..start + R::ScanValue::BYTE_WIDTH])
-    }
-
-    fn write_value(&mut self, position: usize, value: R::ScanValue) {
-        let id_width = R::Id::BYTE_WIDTH;
-        let start = Self::slot_offset(position) + id_width;
-        value.write_le(&mut self.mmap[start..start + R::ScanValue::BYTE_WIDTH]);
-    }
-
-    /// Write a full slot at `position` directly into `mmap`: id, then
-    /// value, then the trailing [`COMMITTED`] marker — strictly in that
-    /// order, the marker only once both halves of the slot's identity are
-    /// fully in place. Used by `create`'s per-record loop, before `Self`
-    /// even exists yet. `open`'s new-slot append path used to go through
-    /// this too (via a since-removed `write_slot` wrapper); it now goes
-    /// through [`Self::append_committed_slot`] instead, which builds the
-    /// identical three-field byte layout but commits it via one
-    /// `O_APPEND` `write_all` call rather than three separate mmap writes
-    /// at a locally-computed position — see module docs' "next free
-    /// slot" race section for why. `read_value`/`write_value` above never
-    /// need to touch the id or marker half of a slot again once it's
-    /// written, since `position_index` already captures the id ->
-    /// position mapping in memory.
-    fn write_slot_into(mmap: &mut MmapMut, position: usize, id: R::Id, value: R::ScanValue) {
-        let id_width = R::Id::BYTE_WIDTH;
-        let value_width = R::ScanValue::BYTE_WIDTH;
-        let start = Self::slot_offset(position);
-        id.write_le(&mut mmap[start..start + id_width]);
-        value.write_le(&mut mmap[start + id_width..start + id_width + value_width]);
-        mmap[start + id_width + value_width] = COMMITTED;
-    }
-
-    /// Whether slot `position`'s trailing marker byte reads back as
-    /// [`COMMITTED`] — the one thing [`Self::open`]'s reconciliation pass
-    /// trusts before treating a slot's id/value bytes as real data at
-    /// all. A slot that fails this check (marker byte anything other than
-    /// `COMMITTED`) is skipped entirely during reconciliation, exactly as
-    /// if it had never been persisted — see module docs for the full
-    /// mechanism and why a single trailing byte, not id-write-ordering,
-    /// is what this round's fix relies on.
-    ///
-    /// **Scoped to slot *creation* only, deliberately** — this crate's own
-    /// crash-safety diagnosis (this round's own follow-up pass, not the
-    /// original diagnosis round) checked the in-place *update* path
-    /// separately, directly, rather than assuming this fix covers it too:
-    /// [`UpdateField::update`]/[`Self::write_value`] overwrite only a
-    /// slot's already-committed value bytes, never its id or marker, via
-    /// one `copy_from_slice` call of `R::ScanValue::BYTE_WIDTH` bytes. A
-    /// process-level `SIGKILL` can only land at an instruction boundary,
-    /// never inside one CPU store instruction, and that single fixed-
-    /// width, compile-time-sized copy is exactly the shape LLVM is
-    /// expected to lower to one (or a small, fixed number of) store
-    /// instructions rather than a byte-wise loop — so an in-place value
-    /// update tearing mid-write was expected to be far harder to trigger
-    /// than the original id/value gap. Reproduced empirically: many
-    /// rapid, back-to-back, unsynchronized updates alternating between
-    /// two maximally-distinguishable byte patterns, killed at
-    /// uncontrolled points relative to individual writes, across repeated
-    /// trials (`src/bin/crash_safety_harness.rs`'s `trial_torn_update`) —
-    /// every single trial read back exactly one of the two known
-    /// patterns, never a mix. That result is evidence for, not proof of,
-    /// this remaining safe on every platform/compiler this crate might
-    /// ever run on — it depends on codegen this project doesn't pin or
-    /// verify per-target, a real, narrower, explicitly-accepted residual
-    /// assumption, not a second commit-marker mechanism. Closing that gap
-    /// for certain would mean paying the same append-and-repoint cost
-    /// `create`/`write_slot` pay for a *new* slot on every single
-    /// in-place `update` too — turning every mutation into unbounded,
-    /// log-structured file growth — which is exactly the "much heavier
-    /// machinery" this round's own module doc says a single-byte marker
-    /// is meant to avoid building without a real design needing it first.
-    fn is_committed(mmap: &MmapMut, position: usize) -> bool {
-        let start = Self::slot_offset(position);
-        let marker_offset = start + R::Id::BYTE_WIDTH + R::ScanValue::BYTE_WIDTH;
-        mmap[marker_offset] == COMMITTED
-    }
-
-    /// Atomically append one fully-formed, already-committed slot — id,
-    /// then value, then the trailing [`COMMITTED`] marker, precomputed
-    /// into a single buffer — to `appender`'s file via one `write_all`
-    /// call, and return the position that slot landed at. See this
-    /// module's doc comment (the "next free slot" race section) for why
-    /// this closes the race the previous, length-derived position
-    /// calculation had, and why the position is read back from this
-    /// specific write's own resulting file offset rather than recomputed
-    /// from the file's length.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`DurabilityError::Io`] if the write or the subsequent
-    /// offset query fails.
-    fn append_committed_slot(
-        appender: &mut File,
-        id: R::Id,
-        value: R::ScanValue,
-    ) -> Result<usize, DurabilityError> {
-        let id_width = R::Id::BYTE_WIDTH;
-        let value_width = R::ScanValue::BYTE_WIDTH;
-        let slot_width = Self::slot_width();
-
-        let mut buffer = vec![0u8; slot_width];
-        id.write_le(&mut buffer[..id_width]);
-        value.write_le(&mut buffer[id_width..id_width + value_width]);
-        buffer[id_width + value_width] = COMMITTED;
-
-        appender.write_all(&buffer)?;
-        // Safe without any coordination: this file offset lives on the
-        // open file description `appender` owns privately (see module
-        // docs) — no other process's own append can perturb what this
-        // read reports.
-        let end_offset = appender.stream_position()?;
-        let position = (end_offset as usize - HEADER_LEN) / slot_width - 1;
-        Ok(position)
-    }
-
-    /// Write the fixed header ([`MAGIC`] + [`SCHEMA_VERSION`]) at the very
-    /// start of `mmap` — called once, by [`Self::create`] only. `open`
-    /// never writes a header; it only ever reads and validates one an
-    /// earlier `create` already wrote.
-    fn write_header(mmap: &mut MmapMut) {
-        mmap[0..MAGIC.len()].copy_from_slice(&MAGIC);
-        SCHEMA_VERSION.write_le(&mut mmap[MAGIC.len()..HEADER_LEN]);
-    }
-
-    /// Read and validate the header at the start of `mmap` — see this
-    /// module's own doc comment for exactly what each failure means and
-    /// why they're kept distinct. Called by [`Self::open`] before any
-    /// slot data is read; a file that fails this check has none of its
-    /// record data touched at all.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`DurabilityError::InvalidMagic`] if `mmap` is shorter than
-    /// [`HEADER_LEN`] or its first [`MAGIC`]`.len()` bytes don't match,
-    /// or [`DurabilityError::SchemaVersionMismatch`] if the magic matches
-    /// but the recorded version doesn't.
-    fn read_header(mmap: &MmapMut) -> Result<(), DurabilityError> {
-        if mmap.len() < HEADER_LEN || mmap[0..MAGIC.len()] != MAGIC {
-            return Err(DurabilityError::InvalidMagic);
-        }
-        let found = u32::read_le(&mmap[MAGIC.len()..HEADER_LEN]);
-        if found != SCHEMA_VERSION {
-            return Err(DurabilityError::SchemaVersionMismatch {
-                found,
-                expected: SCHEMA_VERSION,
-            });
-        }
-        Ok(())
+        SlotFile::<R::Id, R::ScanValue>::slot_offset(position)
     }
 
     /// True once every slot currently in the file maps to a live record in
     /// `position_index` — i.e. no record has ever been dropped between an
-    /// `open` and the `records` this store was actually built from. Since
-    /// positions are unique and never reused, `position_index.len()`
-    /// matching the file's total slot count (the header excluded) is
-    /// sufficient to prove every slot 0..total is covered (pigeonhole —
-    /// see module docs' `scan` section for why this matters).
+    /// `open` and the `records` this store was actually built from. See
+    /// `SlotFile::is_gapless` for the pigeonhole argument and module docs'
+    /// `scan` section for why this matters.
     fn is_gapless(&self) -> bool {
-        self.position_index.len() * Self::slot_width() == self.mmap.len() - HEADER_LEN
+        self.file.is_gapless(self.position_index.len())
     }
 
     fn build_indexes(records: &[R]) -> Indexes<R, IndexMarker> {
@@ -715,42 +561,29 @@ where
     /// the companion blob can't be written; [`DurabilityError::Serde`] if
     /// `records` can't be serialized.
     pub fn create(records: Vec<R>, path: &Path) -> Result<Self, DurabilityError> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
         let encoded_blob = GenericRecordBlob::new(&records).encode()?;
-        let slot_width = Self::slot_width();
         let indexes = Self::build_indexes(&records);
 
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(path)?;
-        file.set_len((HEADER_LEN + records.len() * slot_width) as u64)?;
-
-        // SAFETY: this process holds exclusive read/write access to the
-        // freshly-created file at `path` for the lifetime of the mapping;
-        // nothing else concurrently truncates or writes to it out from
-        // under the mapping — the same single-process-exclusive-access
-        // assumption `MmapAgeStore::create` documents.
-        let mut mmap = unsafe { MmapMut::map_mut(&file)? };
-        Self::write_header(&mut mmap);
-        let mut position_index = HashMap::with_capacity(records.len());
-        for (position, record) in records.iter().enumerate() {
-            Self::write_slot_into(&mut mmap, position, record.id(), record.scannable_value());
-            position_index.insert(record.id(), position);
-        }
-        mmap.flush()?;
+        // Slot `i` holds record `i`, in `records`' own order — which is
+        // exactly the position index, before the file even exists.
+        let file = SlotFile::create(
+            path,
+            records
+                .iter()
+                .map(|record| (record.id(), record.scannable_value())),
+        )?;
+        let position_index = records
+            .iter()
+            .enumerate()
+            .map(|(position, record)| (record.id(), position))
+            .collect();
         encoded_blob.write(&blob_path(path))?;
 
         Ok(Self {
             records: indexes.records,
             index: indexes.index,
             position_index,
-            mmap,
-            path: path.to_path_buf(),
+            file,
             _marker: PhantomData,
         })
     }
@@ -762,9 +595,9 @@ where
     /// can hit (a persisted id no longer in `records`; a record in
     /// `records` with no persisted slot yet). A record in the second case
     /// gets a freshly-appended slot, seeded from its own
-    /// [`ScannableField::scannable_value`] — appended via
-    /// [`Self::append_committed_slot`], not written at a locally-computed
-    /// position; see module docs' "next free slot" race section for why.
+    /// [`ScannableField::scannable_value`] — appended through an
+    /// `O_APPEND` handle, not written at a locally-computed position; see
+    /// module docs' "next free slot" race section for why.
     ///
     /// Also keeps the companion blob at `<path>.records` current with
     /// `records`: its header fingerprint is compared against `records`
@@ -797,56 +630,31 @@ where
             }
         };
         let indexes = Self::build_indexes(&records);
-        let slot_width = Self::slot_width();
-        let id_width = R::Id::BYTE_WIDTH;
-
-        let file = OpenOptions::new().read(true).write(true).open(path)?;
 
         // First pass: check the header, then (only once it checks out)
         // read every *committed* (id, value) pair, keyed by id — the
         // reconciliation step the record-identity-keying fix added. A
         // slot whose marker byte isn't `COMMITTED` (never reached, or a
-        // crash landed before its marker write) is skipped here entirely
+        // crash landed before its marker write) is skipped there entirely
         // — see module docs — so it falls through reconciliation below
         // exactly as if it had never been persisted, rather than handing
         // a torn id/value pair to a caller. A trailing partial slot
         // (fewer than `slot_width` bytes left) is ignored, the same
         // permissive-truncation convention this crate's WAL reader
         // (`durability::read_wal_entries`) already follows.
-        let persisted: PersistedSlots<R, ScanMarker> = {
-            // SAFETY: see `create` — same single-process exclusive-access
-            // assumption for the *mapping* itself. This mapping is read,
-            // then dropped before any append below; `memmap2` unmaps on
-            // drop.
-            let mmap = unsafe { MmapMut::map_mut(&file)? };
-            Self::read_header(&mmap)?;
-            let existing_slot_count = (mmap.len() - HEADER_LEN) / slot_width;
-            let value_width = R::ScanValue::BYTE_WIDTH;
-            let mut persisted = HashMap::with_capacity(existing_slot_count);
-            for position in 0..existing_slot_count {
-                if !Self::is_committed(&mmap, position) {
-                    continue;
-                }
-                let start = Self::slot_offset(position);
-                let id = R::Id::read_le(&mmap[start..start + id_width]);
-                let value =
-                    R::ScanValue::read_le(&mmap[start + id_width..start + id_width + value_width]);
-                persisted.insert(id, (position, value));
-            }
-            persisted
-        };
+        let mut file = SlotFile::open(path)?;
+        let persisted = file.committed_pairs();
 
         // Reconcile: every record in `records` either already has a
         // persisted slot (reuse its position) or doesn't (append a fresh
         // one for it, in `records`' own order — deterministic, not
         // HashMap-iteration-order-dependent). A persisted id with no
         // matching record in `records` is simply never added to
-        // `position_index` — see module docs' "stale" case. Unlike the
-        // previous design, a missing record's position is *not* computed
-        // here at all — it's whatever `append_committed_slot` reports
-        // back from the write that actually landed it (see module docs'
-        // "next free slot" race section for why that distinction is the
-        // entire fix).
+        // `position_index` — see module docs' "stale" case. A missing
+        // record's position is *not* computed here at all — it's whatever
+        // `SlotFile::append_committed_slots` reports back from the write
+        // that actually landed it (see module docs' "next free slot" race
+        // section for why that distinction is the entire fix).
         let mut position_index = HashMap::with_capacity(records.len());
         let mut missing: Vec<&R> = Vec::new();
         for record in &records {
@@ -859,24 +667,15 @@ where
         }
 
         if !missing.is_empty() {
-            let mut appender = OpenOptions::new().append(true).open(path)?;
-            for record in missing {
-                let position = Self::append_committed_slot(
-                    &mut appender,
-                    record.id(),
-                    record.scannable_value(),
-                )?;
+            let positions = file.append_committed_slots(
+                missing
+                    .iter()
+                    .map(|record| (record.id(), record.scannable_value())),
+            )?;
+            for (record, position) in missing.iter().zip(positions) {
                 position_index.insert(record.id(), position);
             }
         }
-
-        // Re-map at the file's current length — reflecting any appends
-        // just made above, through a *different* handle than `mmap`
-        // (already dropped, block-scoped, before those appends) but the
-        // same underlying file, so its on-disk length is already correct
-        // by the time this mapping is established.
-        // SAFETY: see `create`.
-        let mmap = unsafe { MmapMut::map_mut(&file)? };
 
         // Only now that the mmap file has opened and reconciled cleanly:
         // an error above must never replace a valid blob with one
@@ -889,8 +688,7 @@ where
             records: indexes.records,
             index: indexes.index,
             position_index,
-            mmap,
-            path: path.to_path_buf(),
+            file,
             _marker: PhantomData,
         })
     }
@@ -946,7 +744,7 @@ where
     fn get(&self, id: R::Id) -> Option<R> {
         let mut record = self.records.get(&id)?.clone();
         let position = *self.position_index.get(&id)?;
-        record.set_scannable_value(self.read_value(position));
+        record.set_scannable_value(self.file.read_value(position));
         Some(record)
     }
 }
@@ -993,19 +791,21 @@ where
     fn scan(&self) -> Vec<R::ScanValue> {
         let id_width = R::Id::BYTE_WIDTH;
         let value_width = R::ScanValue::BYTE_WIDTH;
-        let slot_width = Self::slot_width();
+        let slot_width = SlotFile::<R::Id, R::ScanValue>::slot_width();
         if self.is_gapless() {
-            // Skip the header — everything from here on is slot data.
-            // `is_gapless` (see its own doc comment) already guarantees
-            // every slot in this range is committed, via the same
-            // pigeonhole argument: an uncommitted slot is never in
+            // `slot_bytes` skips the header — everything from here on is
+            // slot data. `is_gapless` (see its own doc comment) already
+            // guarantees every slot in this range is committed, via the
+            // same pigeonhole argument: an uncommitted slot is never in
             // `position_index`, so if every slot *were* accounted for
             // here despite one being uncommitted, `position_index` would
             // be short by exactly that slot and this fast path wouldn't
             // have been taken at all. `[id_width..id_width + value_width]`
             // stops short of the trailing marker byte — it's never part
             // of a value.
-            return self.mmap[HEADER_LEN..]
+            return self
+                .file
+                .slot_bytes()
                 .chunks_exact(slot_width)
                 .map(|slot| R::ScanValue::read_le(&slot[id_width..id_width + value_width]))
                 .collect();
@@ -1014,7 +814,7 @@ where
         positions.sort_unstable();
         positions
             .into_iter()
-            .map(|position| self.read_value(position))
+            .map(|position| self.file.read_value(position))
             .collect()
     }
 }
@@ -1032,7 +832,7 @@ where
 {
     fn update(&mut self, id: R::Id, value: R::ScanValue) -> Result<(), NotFound<R::Id>> {
         let position = *self.position_index.get(&id).ok_or(NotFound(id))?;
-        self.write_value(position, value);
+        self.file.write_value(position, value);
         Ok(())
     }
 }
@@ -1050,8 +850,7 @@ where
     /// Force the mapped scannable field to physical disk (`msync`) —
     /// mirrors `MmapAgeStore::flush` exactly.
     fn flush(&self) -> Result<(), DurabilityError> {
-        self.mmap.flush()?;
-        Ok(())
+        self.file.flush()
     }
 }
 

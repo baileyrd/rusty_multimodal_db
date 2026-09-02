@@ -503,3 +503,14 @@ touching that contract; full unification is a revisit trigger.
 
 - 2026-09-02: Proposed.
 - 2026-09-02: Accepted as proposed by the owner, no changes requested.
+- 2026-09-02: Implemented as `STORAGE-017` v0.1.0 (`docs/specifications/
+  storage/STORAGE-017-multi-field-mmap-durability.md`). Two of the open
+  questions above are settled by the implementation and recorded in the
+  spec's "Traceability": the `SlotFile` boundary (the `chunks_exact` fast
+  path stays in each owner, over `SlotFile::slot_bytes()`; criterion 6
+  held — see `RESULTS.md`), and the slot-width error (a new
+  `DurabilityError::SlotWidthMismatch { path, body_len, slot_width }`,
+  since no existing variant carries the arithmetic; it also refuses a
+  file truncated mid-slot, which `GenericMmapStore` tolerates). The
+  per-file tag, the manifest, the unification, and the variable-width
+  field stay open as written.

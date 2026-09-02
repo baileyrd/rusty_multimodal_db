@@ -76,6 +76,12 @@
 //!   the stack, so the record is fully consistent by the time it reaches
 //!   the caller — no change needed in `Indexed`/`Symmetric`/`Reversed`,
 //!   none of which own any `ScannableField` data to patch.
+//! - [`mmap_scanned::MmapScanned`] is `Scanned`'s durable twin: the same
+//!   layered shape, but its one field lives in its own slot file (the same
+//!   engine `GenericMmapStore` uses) rather than a `HashMap`, so a stack
+//!   can hold more than one mutable-and-durable field without
+//!   `GenericMmapStore` itself growing past its one. Its `GetById` patches
+//!   the record the same way `Scanned` does.
 //!
 //! **A real, measured cost, not free**: unlike the durable core (where the
 //! merge replaces work that already had to happen), the in-memory fix adds
@@ -90,6 +96,7 @@
 
 pub(crate) mod edge_blob;
 pub mod mmap_field;
+pub mod mmap_scanned;
 pub mod mmap_store;
 /// `Order`/`Customer` — this library's reference implementation, proving
 /// the design against a second, structurally different domain than `Dog`.
@@ -101,9 +108,11 @@ pub mod order_customer;
 pub mod production;
 pub mod query;
 pub(crate) mod record_blob;
+pub(crate) mod slot_file;
 pub mod store;
 pub mod traits;
 
+pub use mmap_scanned::MmapScanned;
 pub use mmap_store::GenericMmapStore;
 #[cfg(feature = "research")]
 pub use order_customer::{

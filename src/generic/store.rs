@@ -288,12 +288,35 @@ where
 // invocation.
 #[macro_export]
 macro_rules! forward_scannable_pairs {
-    // Entry point: a record type and its `ScannableField` markers, each
-    // with its concrete `ScanValue` type (needed because macro_rules!
-    // can't look up an associated type).
+    // Entry points, one per layer kind. Each layer that owns one
+    // scannable field and forwards the others needs its own set of pairs;
+    // the layer is spelled by name (not as a path) because a `$layer:path`
+    // fragment cannot be followed by `<`, and the two layers this crate
+    // has are enumerated so the invocation site doesn't need to know
+    // where they live. Adding a third layer means adding one arm here.
+    // `for Layer; $record; Marker1: Value1, Marker2: Value2, ...`
+    //
+    // These arms come before the bare `$record:ty` one on purpose: `for`
+    // also opens a `for<'a> ...` type, so a `ty` fragment matcher tried
+    // first would fail *hard* on `for Scanned` instead of falling through.
+    (for Scanned; $record:ty; $($marker:ident : $value:ty),+ $(,)?) => {
+        $crate::forward_scannable_pairs!(
+            @rotate [$crate::generic::store::Scanned] $record; []; [$($marker : $value),+]
+        );
+    };
+    (for MmapScanned; $record:ty; $($marker:ident : $value:ty),+ $(,)?) => {
+        $crate::forward_scannable_pairs!(
+            @rotate [$crate::generic::mmap_scanned::MmapScanned] $record; []; [$($marker : $value),+]
+        );
+    };
+
+    // The original entry point: a record type and its `ScannableField`
+    // markers, each with its concrete `ScanValue` type (needed because
+    // macro_rules! can't look up an associated type). Generates the pairs
+    // for the in-memory `Scanned` layer.
     // `$record; Marker1: Value1, Marker2: Value2, ...`
     ($record:ty; $($marker:ident : $value:ty),+ $(,)?) => {
-        $crate::forward_scannable_pairs!(@rotate $record; []; [$($marker : $value),+]);
+        $crate::forward_scannable_pairs!(for Scanned; $record; $($marker : $value),+);
     };
 
     // Peels `$owner` off the front of the not-yet-processed list, emits
@@ -309,41 +332,48 @@ macro_rules! forward_scannable_pairs {
     // runtime-style check. `$owner` never appears in the "everything
     // else" list at the point it's used, by construction — it's been
     // removed from `$rest` and not yet added to `$prefix`.
-    (@rotate $record:ty; [$($prefix:ident : $prefix_value:ty),*]; [$owner:ident : $owner_value:ty $(, $rest:ident : $rest_value:ty)*]) => {
+    // The layer's path travels as one bracketed token tree (`$layer:tt`,
+    // e.g. `[$crate::generic::store::Scanned]`) through the internal
+    // arms — a single `tt` so it can sit inside the `@pairs` repetition
+    // without a depth mismatch — and is only opened up by the payload arm,
+    // which splices it in front of `<S, $record, $owner>`.
+    (@rotate $layer:tt $record:ty; [$($prefix:ident : $prefix_value:ty),*]; [$owner:ident : $owner_value:ty $(, $rest:ident : $rest_value:ty)*]) => {
         $crate::forward_scannable_pairs!(
-            @pairs $record; $owner : $owner_value;
+            @pairs $layer $record; $owner : $owner_value;
             [$($prefix : $prefix_value,)* $($rest : $rest_value),*]
         );
         $crate::forward_scannable_pairs!(
-            @rotate $record; [$($prefix : $prefix_value,)* $owner : $owner_value]; [$($rest : $rest_value),*]
+            @rotate $layer $record; [$($prefix : $prefix_value,)* $owner : $owner_value]; [$($rest : $rest_value),*]
         );
     };
     // Base case: nothing left to peel off — every owner has had its
     // pairs generated.
-    (@rotate $record:ty; [$($prefix:ident : $prefix_value:ty),*]; []) => {};
+    (@rotate $layer:tt $record:ty; [$($prefix:ident : $prefix_value:ty),*]; []) => {};
 
     // Emits one `@impl_pair` per marker in the "everything else" list,
     // for the fixed `$owner`.
-    (@pairs $record:ty; $owner:ident : $owner_value:ty; [$($forwarded:ident : $forwarded_value:ty),* $(,)?]) => {
+    (@pairs $layer:tt $record:ty; $owner:ident : $owner_value:ty; [$($forwarded:ident : $forwarded_value:ty),* $(,)?]) => {
         $(
-            $crate::forward_scannable_pairs!(@impl_pair $record; $owner : $owner_value; $forwarded : $forwarded_value);
+            $crate::forward_scannable_pairs!(@impl_pair $layer $record; $owner : $owner_value; $forwarded : $forwarded_value);
         )*
     };
 
     // The actual payload: one concrete `ScanField`/`UpdateField` pair.
-    (@impl_pair $record:ty; $owner:ident : $owner_value:ty; $forwarded:ident : $forwarded_value:ty) => {
+    // Both layers expose the same `inner`/`inner_mut` accessors, which is
+    // all the generated body relies on.
+    (@impl_pair [$($layer:tt)*] $record:ty; $owner:ident : $owner_value:ty; $forwarded:ident : $forwarded_value:ty) => {
         impl<S> $crate::generic::query::ScanField<$record, $forwarded>
-            for $crate::generic::store::Scanned<S, $record, $owner>
+            for $($layer)*<S, $record, $owner>
         where
             S: $crate::generic::query::ScanField<$record, $forwarded>,
         {
             fn scan(&self) -> Vec<$forwarded_value> {
-                $crate::generic::store::Scanned::inner(self).scan()
+                $($layer)*::inner(self).scan()
             }
         }
 
         impl<S> $crate::generic::query::UpdateField<$record, $forwarded>
-            for $crate::generic::store::Scanned<S, $record, $owner>
+            for $($layer)*<S, $record, $owner>
         where
             S: $crate::generic::query::UpdateField<$record, $forwarded>,
         {
@@ -355,7 +385,7 @@ macro_rules! forward_scannable_pairs {
                 (),
                 $crate::generic::NotFound<<$record as $crate::generic::traits::Record>::Id>,
             > {
-                $crate::generic::store::Scanned::inner_mut(self).update(id, value)
+                $($layer)*::inner_mut(self).update(id, value)
             }
         }
     };

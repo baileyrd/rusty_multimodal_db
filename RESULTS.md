@@ -853,6 +853,36 @@ Building `GenericMmapStore::get` surfaced something none of the four spikes exer
 
 A regression test now guards against this recurring silently: `order_customer.rs`'s `get_reflects_a_prior_update_through_every_layer_of_the_in_memory_stack` writes through the innermost (`Amount`) and outermost (`DiscountCents`) `Scanned` layers and checks `GetById::get` reflects each write immediately, while confirming untouched fields on the same record are unaffected.
 
+### Multi-field mmap durability (`STORAGE-017`): a second durable field costs a second slot file, and `get` pays one more layer
+
+`ADR-0020`'s implementation (`docs/specifications/storage/STORAGE-017-multi-field-mmap-durability.md`) changed two things the `generic_production` bench can see. First, the slot-file engine `GenericMmapStore` owned (header, `[id][value][COMMITTED]` slots, the `chunks_exact` scan fast path's byte layout, `msync`) was extracted into a `pub(crate)` `SlotFile<Id, V>` and the store refactored onto it — same on-disk format, all 16 of its tests textually unchanged; the question is whether the extraction moved the core's own `scan`/`update`. Second, `OrderProductionStack` — the type every group in this bench runs against — now carries a second mutable-and-durable field: `Reversed<MmapScanned<GenericMmapStore<Order, Status, Amount>, Order, DiscountCents>, …>`, with `DiscountCents` in its own `<path>.discount_cents.mmap` beside the core's `.mmap` and `.records`. So `create`/`open`/`open_append` now build or reconcile two slot files, and `get` (and `parent`, which goes through `get`) crosses one more layer that reads one more slot and patches one more field.
+
+Same container, same session, `--features research --bench generic_production` at Criterion's defaults. "Before" is the full run on the pre-change commit (`0bf3000`, the branch's base); "after" is the full run on the finished change. Because this container's 1M groups drift by up to ~15% between runs of the same code (the calibration note under `### `GenericMmapStore` file portability`), `get` and `scan` were then re-run back-to-back, `git stash`-isolated — base code, then the change, minutes apart — and that pair is the one the verdict on those two rows rests on.
+
+| Group | 1K before | 1K after | 100K before | 100K after | 1M before | 1M after |
+|---|---:|---:|---:|---:|---:|---:|
+| `get` | 116.9 ns | 143.2 ns | 129.7 ns | 165.6 ns | 157.8 ns | 267.6 ns |
+| `get` (back-to-back pair) | 114.0 ns | 145.6 ns (**+28%**) | 140.2 ns | 170.7 ns (**+22%**) | 132.1 ns | 220.0 ns (**+67%**) |
+| `scan` (`Amount`, core) | 938.3 ns | 759.7 ns | 90.7 µs | 125.8 µs | 3.235 ms | 3.584 ms |
+| `scan` (back-to-back pair) | 757.0 ns | 775.7 ns (+2%) | 98.9 µs | 106.3 µs (+7%, CIs overlap) | 3.382 ms | 3.200 ms (−5%) |
+| `scan_layer` (`DiscountCents`, through `MmapScanned`) | — | 579.7 ns | — | 138.3 µs | — | 3.671 ms |
+| `update` (`Amount`, core) | 44.9 ns | 45.6 ns (+2%) | 57.4 ns | 61.0 ns (+6%) | 61.5 ns | 58.5 ns (−5%) |
+| `update_layer` (`DiscountCents`, through `MmapScanned`) | — | 47.2 ns | — | 61.1 ns | — | 61.7 ns |
+| `filter` (`Status`) | 133.5 ns | 144.4 ns (+8%) | 11.90 µs | 12.15 µs (+2%) | 220.4 µs | 239.8 µs (+9%) |
+| `parent` | 83.1 ns | 114.4 ns (**+38%**) | 100.2 ns | 143.7 ns (**+43%**) | 97.3 ns | 201.2 ns (**+107%**) |
+| `children` | 66.0 ns | 69.5 ns (+5%) | 76.5 ns | 76.3 ns (0%) | 88.2 ns | 77.8 ns (−12%) |
+| `create` (now two slot files + blob) | 1.764 ms | 2.266 ms (**+28%**) | 91.84 ms | 119.5 ms (**+30%**) | 2.339 s | 2.732 s (**+17%**) |
+| `open` (now reconciles two slot files) | 339.1 µs | 389.9 µs (**+15%**) | 76.13 ms | 103.9 ms (**+36%**) | 2.092 s | 2.977 s (**+42%**) |
+| `open_append` | 2.163 ms | 1.619 ms (−25%) | 104.7 ms | 160.0 ms (**+53%**) | 2.941 s | 4.348 s (**+48%**) |
+
+**The extraction itself is free** (acceptance criterion 6): the core's `scan` and `update` — the two groups whose code moved into `SlotFile` — are within this container's noise at every size. The full-run `scan` cells look alarming (+39% at 100K, +11% at 1M) but the back-to-back pair puts them at +2% / +7% / −5%, and the first after-run's 100K cell was itself 18% above a second after-run of the same binary (104.3 µs); that spread *is* the noise floor here. `update`, `filter`, and `children` — the last two never touch a slot file — agree: nothing outside the drift band. `scan_layer`/`update_layer` land where `scan`/`update` do (the layer's `ScanField` is the same `chunks_exact` walk over its own file; its `UpdateField` is the same one-slot write), which is the point of sharing one engine: the second field costs what the first did, not more.
+
+**The second field is not free, and the cost lands where `Scanned`'s did**: `get` +22–28% at 1K/100K and +67% at 1M, `parent` in step with it. This is structural, the same per-layer price the in-memory write-through fix above measured at 43–88% for `Scanned`, now paid on a slot-file read instead of a `HashMap` lookup: every `get` through the stack now does one more `position_index` lookup, one more 25-byte slot read from a second mapped file, and one more `set_scannable_value`. At 1M the second file's slot is a cache miss the single-file stack never took, hence the bigger multiplier there. A stack that does not need a second durable field does not pay this — `GenericMmapStore` alone is unchanged — and a domain that needs it was paying for a `Scanned` layer already (that is what `OrderProductionStack` had for `DiscountCents` before this round), so the honest comparison for such a domain is durable-layer-`get` against in-memory-layer-`get`, not against no layer at all.
+
+**`create`/`open`/`open_append` pay for the second file directly**: `create` writes a second 25 MB slot file at 1M (+17–30%), `open` reads and reconciles it against the core's live ids (+15–42%), and `open_append` does both for the appended tail (+48–53% at 100K/1M; the 1K cell's −25% is a 10-sample group on a 2 ms call, the `open_append` drift the calibration note already flagged). None of these are on a per-record hot path.
+
+**Verdict**: `ADR-0020`'s prediction held — one shared slot-file engine, the existing format untouched, the core's own numbers where they were; the price of a second mutable-and-durable field is one more slot-file read per `get` and one more file per `create`/`open`, both now quantified. Per-record reads on the two-field stack at 1M: `get` 220–268 ns, `parent` 201 ns, `children` 78 ns, `update` 59–62 ns either field, `scan` 3.2–3.7 ms either field.
+
 ## Server / query layer
 
 `benches/server.rs` — the throughput/latency benchmark `SERVER-001`'s own "Open questions" named as a real, unscoped follow-up since the layer's initial implementation. Unlike every other suite in this document, this one puts a real `TcpListener`/`TcpStream` pair (loopback) in the timed path: the question is what the network/dispatch layer costs on top of the already-measured in-process operation, not the operation itself. See `benches/server.rs`'s own module docs for the full methodology (why not Criterion, why a small fixed 20-id pool rather than this document's usual 1K/100K/1M sweep, why `GetById` is the one request kind measured across all three domains).
