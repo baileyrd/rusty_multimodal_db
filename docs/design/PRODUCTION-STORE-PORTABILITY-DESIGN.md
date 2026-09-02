@@ -409,13 +409,23 @@ open questions above, in order:
   samples (3 at 1M): `open` +27%/+30%/+27% at 1K/100K/1M records, `create`
   +15%/+68%/+78%; `open_portable` between the old and new `open`. Full
   table and verdict in `RESULTS.md`'s `### ProductionStore file
-  portability (STORAGE-014)` subsection. Named follow-up, not built: a
-  content hash in the blob header so `open` compares a fingerprint instead
-  of a full serialization (a `BLOB_VERSION` bump).
+  portability (STORAGE-014)` subsection. Named follow-up, not built at
+  the time: a content hash in the blob header so `open` compares a
+  fingerprint instead of a full serialization (a `BLOB_VERSION` bump).
+  **Built as `STORAGE-014` v0.2.0 (blob version 2)**: a `u64` FNV-1a
+  fingerprint of the immutable content follows the version in a 20-byte
+  header; `open` reads the header and compares fingerprints, serializing
+  only when stale; version-1 blobs are upgraded in place. Re-measured:
+  `open` +0.3-4% at 1M (was +27%). Details in the spec's v0.2.0 change
+  entry and `RESULTS.md`'s `#### Follow-up: header fingerprint`
+  subsection.
 - Tier 1/2 durability variants: still out of scope — unchanged.
 
 ## Change history
 
+- 2026-09-02: "Implementation status" updated — the header-fingerprint
+  follow-up is built (`STORAGE-014` v0.2.0, blob version 2); `open`'s
+  steady-state cost is no longer a full serialize-and-compare.
 - 2026-09-02: "Implementation status" addendum — implemented, open
   questions resolved or explicitly carried, measured `open` cost recorded.
 - 2026-09-01: Initial proposal, in response to the owner asking to

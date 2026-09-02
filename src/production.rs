@@ -95,17 +95,21 @@
 //! format, or about `create`/`open`'s signatures, changed.
 //!
 //! The blob is write-once at `create`; the only other time it's written
-//! is when [`ProductionStore::open`] is handed a record set that differs
-//! byte-for-byte (in `bincode` encoding) from what the blob holds — the
-//! same "the caller's dataset is the truth" reconciliation `MmapAgeStore::
-//! open` already performs for the ages file. That comparison costs one
-//! read of the companion file on every `open`; a missing or unreadable
-//! blob simply counts as stale and is (re)written, which also upgrades a
-//! pre-`STORAGE-014` directory holding only an ages file on its first
-//! `open`. Only `open_portable` ever *requires* the blob — and a missing
-//! or corrupt one there is [`DurabilityError::RecordBlobUnreadable`], a
-//! variant distinct from the ages file's own `InvalidMagic`/
-//! `SchemaVersionMismatch`, never a panic.
+//! is when [`ProductionStore::open`] is handed a record set whose
+//! immutable content (`id`s, `breed`s, edges) differs from what the blob
+//! holds — the same "the caller's dataset is the truth" reconciliation
+//! `MmapAgeStore::open` already performs for the ages file. That check
+//! is a content fingerprint in the blob's header against one computed
+//! from the caller's records: no serialization and a 20-byte read on
+//! every `open` (blob version 2; version 1 compared full serialized
+//! images, measured at +27% on `open` at 1M records). A missing,
+//! unreadable, or version-1 blob simply counts as stale and is
+//! (re)written, which also upgrades a pre-`STORAGE-014` directory
+//! holding only an ages file on its first `open`. Only `open_portable`
+//! ever *requires* the blob — and a missing or corrupt one there is
+//! [`DurabilityError::RecordBlobUnreadable`], a variant distinct from
+//! the ages file's own `InvalidMagic`/`SchemaVersionMismatch`, never a
+//! panic.
 
 use crate::concurrency::{ConcurrencyError, ConcurrentStore};
 use crate::durability::record_blob::{companion_path, RecordBlob};
@@ -198,12 +202,18 @@ impl ProductionStore {
     /// of truth for every age.
     ///
     /// As of `STORAGE-014` this also keeps the companion record blob at
-    /// `<path>.records` in step with the caller's record set: after the
-    /// ages file opens, the blob is read once and compared byte-for-byte
-    /// with what `records`/`edges` encode to; if it's missing, unreadable,
-    /// or different, it's (re)written. A directory holding only an ages
-    /// file written before this companion existed is therefore upgraded
-    /// on its first `open` — no migration step. The comparison runs
+    /// `<path>.records` in step with the caller's record set: the blob's
+    /// header fingerprint is compared with the fingerprint of `records`/
+    /// `edges` (their `id`s, `breed`s, and edges — not their ages, which
+    /// the ages file owns); if the blob is missing, unreadable, from an
+    /// older blob version, or fingerprints differently, it's (re)written
+    /// after the ages file opens. A directory holding only an ages file
+    /// written before this companion existed is therefore upgraded on its
+    /// first `open` — no migration step — and so is a version-1 blob
+    /// written before the header carried a fingerprint. The steady-state
+    /// check (same dataset every `open`) is one hash pass over the
+    /// in-memory records plus a 20-byte read; the record set is only
+    /// serialized when a rewrite is actually needed. The rewrite runs
     /// *after* `MmapAgeStore::open` succeeds, so an ages-file error never
     /// clobbers a valid blob belonging to a different dataset.
     ///
@@ -211,17 +221,23 @@ impl ProductionStore {
     ///
     /// Returns [`DurabilityError::Io`] under the same conditions
     /// [`MmapAgeStore::open`] does, or if a stale/missing companion blob
-    /// can't be rewritten.
+    /// can't be rewritten; [`DurabilityError::Serde`] if a stale blob's
+    /// replacement can't be serialized (not reachable for any `DogRecord`
+    /// this crate builds).
     pub fn open(
         records: Vec<DogRecord>,
         edges: Vec<(Uuid, Uuid)>,
         path: &Path,
     ) -> Result<Self, DurabilityError> {
         let blob = RecordBlob { records, edges };
-        let encoded = blob.encode()?;
-        let inner = MmapAgeStore::open(blob.records, blob.edges, path)?;
         let companion = companion_path(path);
-        if !encoded.is_current_at(&companion) {
+        let replacement = if blob.is_current_at(&companion) {
+            None
+        } else {
+            Some(blob.encode()?)
+        };
+        let inner = MmapAgeStore::open(blob.records, blob.edges, path)?;
+        if let Some(encoded) = replacement {
             encoded.write(&companion)?;
         }
         Ok(Self {
@@ -602,10 +618,44 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A blob written before its header carried a fingerprint (blob
+    /// version 1) is upgraded in place by the first `open` — after which
+    /// `open_portable` works. Same shape as the ages-only legacy case.
+    #[test]
+    fn open_upgrades_a_version_1_blob_in_place() {
+        let dir = fresh_temp_dir("production_portable_v1").unwrap();
+        let path = dir.join("ages.mmap");
+        ProductionStore::create(sample(), sample_edges(), &path).unwrap();
+        let companion = companion_path(&path);
+        let blob = RecordBlob {
+            records: sample(),
+            edges: sample_edges(),
+        };
+        blob.write_legacy_v1(&companion).unwrap();
+        assert!(matches!(
+            ProductionStore::open_portable(&path),
+            Err(DurabilityError::RecordBlobUnreadable { .. })
+        ));
+
+        drop(ProductionStore::open(sample(), sample_edges(), &path).unwrap());
+        assert!(
+            blob.is_current_at(&companion),
+            "open must rewrite a v1 blob"
+        );
+        let reopened = ProductionStore::open_portable(&path).unwrap();
+        assert_eq!(
+            DogStore::get(&reopened, Uuid::from_u128(3)).unwrap().breed,
+            "poodle"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// `open` with a *changed* record set (the identity-keyed
     /// reconciliation `MMAP-AGE-STORE-IDENTITY-FIX` provides) refreshes the
     /// blob, so a later `open_portable` sees the new set — and an `open`
-    /// with the *same* set leaves the blob's bytes alone.
+    /// with the *same* set (even with different seed ages, which the ages
+    /// file owns) leaves the blob's bytes alone.
     #[test]
     fn open_refreshes_the_blob_only_when_the_record_set_changed() {
         let dir = fresh_temp_dir("production_portable_refresh").unwrap();
@@ -616,6 +666,9 @@ mod tests {
         let original_modified = std::fs::metadata(&companion).unwrap().modified().unwrap();
 
         drop(ProductionStore::open(sample(), sample_edges(), &path).unwrap());
+        let mut reaged = sample();
+        reaged[0].age = 99;
+        drop(ProductionStore::open(reaged, sample_edges(), &path).unwrap());
         assert_eq!(std::fs::read(&companion).unwrap(), original);
         assert_eq!(
             std::fs::metadata(&companion).unwrap().modified().unwrap(),
