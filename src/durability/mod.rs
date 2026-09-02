@@ -245,7 +245,7 @@ pub(crate) fn append_wal_entry(
     writer: &mut impl std::io::Write,
     entry: &WalEntry,
 ) -> Result<(), DurabilityError> {
-    let bytes = bincode::serialize(entry)?;
+    let bytes = crate::codec::encode(entry)?;
     let len = bytes.len() as u32;
     writer.write_all(&len.to_le_bytes())?;
     writer.write_all(&bytes)?;
@@ -280,7 +280,7 @@ pub(crate) fn read_wal_entries(path: &std::path::Path) -> Result<Vec<WalEntry>, 
         if offset + len > bytes.len() {
             break;
         }
-        let entry: WalEntry = bincode::deserialize(&bytes[offset..offset + len])?;
+        let entry: WalEntry = crate::codec::decode(&bytes[offset..offset + len])?;
         entries.push(entry);
         offset += len;
     }
@@ -473,14 +473,14 @@ impl CanonicalCachedState {
     /// module docs for why that's still safe), variant 4 on the full
     /// state, variant 5 alongside a recorded cutoff sequence number.
     pub(crate) fn write_to(&self, path: &Path) -> Result<(), DurabilityError> {
-        let bytes = bincode::serialize(self)?;
+        let bytes = crate::codec::encode(self)?;
         std::fs::write(path, bytes)?;
         Ok(())
     }
 
     pub(crate) fn read_from(path: &Path) -> Result<Self, DurabilityError> {
         let bytes = std::fs::read(path)?;
-        Ok(bincode::deserialize(&bytes)?)
+        Ok(crate::codec::decode(&bytes)?)
     }
 
     /// Every current record, as a plain `Vec` — used by variant 3

@@ -281,7 +281,7 @@ impl RecordBlob {
     ///
     /// Returns [`DurabilityError::Serde`] if serialization fails.
     pub(crate) fn encode(&self) -> Result<EncodedRecordBlob, DurabilityError> {
-        let body = bincode::serialize(self)?;
+        let body = crate::codec::encode(self)?;
         Ok(EncodedRecordBlob {
             image: encode_image(&MAGIC, BLOB_VERSION, self.fingerprint(), &body),
         })
@@ -292,7 +292,7 @@ impl RecordBlob {
     /// like, for tests that check the upgrade path.
     #[cfg(test)]
     pub(crate) fn write_legacy_v1(&self, path: &Path) -> Result<(), DurabilityError> {
-        let body = bincode::serialize(self)?;
+        let body = crate::codec::encode(self)?;
         let mut image = Vec::with_capacity(VERSION_OFFSET + 4 + body.len());
         image.extend_from_slice(&MAGIC);
         image.extend_from_slice(&1u32.to_le_bytes());
@@ -337,7 +337,7 @@ impl RecordBlob {
         let bytes =
             std::fs::read(path).map_err(|e| unreadable(format!("cannot read file: {e}")))?;
         let claimed = parse_header(&bytes, &MAGIC, BLOB_VERSION).map_err(unreadable)?;
-        let blob: Self = bincode::deserialize(&bytes[HEADER_LEN..])
+        let blob: Self = crate::codec::decode(&bytes[HEADER_LEN..])
             .map_err(|e| unreadable(format!("body does not decode: {e}")))?;
         let actual = blob.fingerprint();
         if actual != claimed {
@@ -641,6 +641,33 @@ mod tests {
         match RecordBlob::read(&path).err() {
             Some(DurabilityError::RecordBlobUnreadable { cause, .. }) => {
                 assert!(cause.contains("decode"), "unexpected cause: {cause}");
+            }
+            other => panic!("expected RecordBlobUnreadable, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `STORAGE-018` implementation-time finding: unlike the two generic
+    /// blobs, this one decodes the body *before* fingerprinting, and its
+    /// fingerprint is over the decoded records rather than the bytes —
+    /// so a body with junk appended used to be silently accepted. Under
+    /// the codec's trailing-bytes rejection (`BINENC-FR-002`) it is now a
+    /// decode error, the same `RecordBlobUnreadable` a truncated body
+    /// gets.
+    #[test]
+    fn a_body_with_trailing_junk_is_unreadable_with_a_decode_cause() {
+        let dir = fresh_temp_dir("record_blob_trailing_junk").unwrap();
+        let path = companion_path(&dir.join("ages.mmap"));
+        sample_blob().write(&path).unwrap();
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes.extend_from_slice(&[0xaa, 0xbb]);
+        std::fs::write(&path, &bytes).unwrap();
+        match RecordBlob::read(&path).err() {
+            Some(DurabilityError::RecordBlobUnreadable { cause, .. }) => {
+                assert!(
+                    cause.starts_with("body does not decode"),
+                    "unexpected cause: {cause}"
+                );
             }
             other => panic!("expected RecordBlobUnreadable, got {other:?}"),
         }

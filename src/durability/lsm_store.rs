@@ -167,7 +167,7 @@ impl LsmStore {
         }
         for generation in (0..self.flushed_generations).rev() {
             let bytes = std::fs::read(Self::sst_path(&self.dir, generation))?;
-            let sst: BTreeMap<Uuid, u32> = bincode::deserialize(&bytes)?;
+            let sst: BTreeMap<Uuid, u32> = crate::codec::decode(&bytes)?;
             if let Some(&age) = sst.get(&id) {
                 return Ok(Some(age));
             }
@@ -225,7 +225,7 @@ impl LsmStore {
         let indexes = Self::build_indexes(&records, edges);
 
         let flushed_generations = match std::fs::read(Self::generations_path(dir)) {
-            Ok(bytes) => bincode::deserialize(&bytes)?,
+            Ok(bytes) => crate::codec::decode(&bytes)?,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => 0,
             Err(e) => return Err(e.into()),
         };
@@ -263,12 +263,12 @@ impl LsmStore {
     /// Returns [`DurabilityError::Io`]/[`DurabilityError::Serde`] if the
     /// SST file, generation count, or fresh WAL can't be written.
     pub fn flush(&mut self) -> Result<(), DurabilityError> {
-        let bytes = bincode::serialize(&self.memtable)?;
+        let bytes = crate::codec::encode(&self.memtable)?;
         std::fs::write(Self::sst_path(&self.dir, self.flushed_generations), bytes)?;
         self.flushed_generations += 1;
         std::fs::write(
             Self::generations_path(&self.dir),
-            bincode::serialize(&self.flushed_generations)?,
+            crate::codec::encode(&self.flushed_generations)?,
         )?;
 
         self.memtable.clear();

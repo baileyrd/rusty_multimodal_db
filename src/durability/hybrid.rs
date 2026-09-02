@@ -136,7 +136,7 @@ impl HybridStore {
 
         let (mut state, cutoff) = if snapshot_path.exists() {
             let bytes = std::fs::read(&snapshot_path)?;
-            let snapshot: HybridSnapshot = bincode::deserialize(&bytes)?;
+            let snapshot: HybridSnapshot = crate::codec::decode(&bytes)?;
             (snapshot.state, snapshot.seq_at_snapshot)
         } else {
             (CanonicalCachedState::new(records, edges), None)
@@ -187,7 +187,7 @@ impl HybridStore {
             seq_at_snapshot,
             state: &self.state,
         };
-        let bytes = bincode::serialize(&snapshot)?;
+        let bytes = crate::codec::encode(&snapshot)?;
         std::fs::write(&self.snapshot_path, bytes)?;
         Ok(())
     }

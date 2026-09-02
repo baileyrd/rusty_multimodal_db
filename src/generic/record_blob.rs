@@ -192,7 +192,7 @@ where
     /// Returns [`DurabilityError::Serde`] if serialization fails.
     pub(crate) fn fingerprint(&self) -> Result<u64, DurabilityError> {
         let mut hash = Fnv1a64::new();
-        bincode::serialize_into(&mut hash, self.records)?;
+        crate::codec::encode_into(&mut hash, self.records)?;
         Ok(hash.finish())
     }
 
@@ -204,7 +204,7 @@ where
     ///
     /// Returns [`DurabilityError::Serde`] if serialization fails.
     pub(crate) fn encode(&self) -> Result<EncodedRecordBlob, DurabilityError> {
-        let body = bincode::serialize(self.records)?;
+        let body = crate::codec::encode(self.records)?;
         let mut hash = Fnv1a64::new();
         hash.update(&body);
         Ok(EncodedRecordBlob {
@@ -271,7 +271,7 @@ where
             "fingerprint mismatch: header claims {claimed:#018x}, body hashes to {actual:#018x}"
         )));
     }
-    bincode::deserialize(body).map_err(|e| unreadable(format!("body does not decode: {e}")))
+    crate::codec::decode(body).map_err(|e| unreadable(format!("body does not decode: {e}")))
 }
 
 /// Where a `GenericMmapStore` whose mmap file lives at `path` keeps its
@@ -676,6 +676,35 @@ mod tests {
         .unwrap();
         assert_eq!(read::<Order>(&path).unwrap(), orders);
         assert!(blob.is_current_at(&path));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `STORAGE-018` acceptance criterion 5: this blob fingerprints the
+    /// body *bytes* before decoding, so a body with junk appended is
+    /// still caught as a fingerprint mismatch — the codec's trailing-
+    /// bytes rejection (`BINENC-FR-002`) never gets to run, and the
+    /// error a reader sees is unchanged from before the codec existed.
+    #[cfg(feature = "research")]
+    #[test]
+    fn a_body_with_trailing_junk_is_still_a_fingerprint_mismatch() {
+        use crate::generic::order_customer::Order;
+        let orders: Vec<Order> = Vec::new();
+        let blob = GenericRecordBlob::new(&orders);
+        let mut image = blob.encode().unwrap().image;
+        image.extend_from_slice(&[0xaa, 0xbb]);
+
+        let dir = fresh_temp_dir("generic_blob_trailing_junk").unwrap();
+        let path = blob_path(&dir.join("store.mmap"));
+        std::fs::write(&path, &image).unwrap();
+        match read::<Order>(&path) {
+            Err(DurabilityError::RecordBlobUnreadable { cause, .. }) => {
+                assert!(
+                    cause.starts_with("fingerprint mismatch"),
+                    "unexpected cause: {cause}"
+                );
+            }
+            other => panic!("expected RecordBlobUnreadable, got {other:?}"),
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

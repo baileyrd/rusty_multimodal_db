@@ -104,7 +104,7 @@ where
     /// Returns [`DurabilityError::Serde`] if serialization fails.
     pub(crate) fn fingerprint(&self) -> Result<u64, DurabilityError> {
         let mut hash = Fnv1a64::new();
-        bincode::serialize_into(&mut hash, self.edges)?;
+        crate::codec::encode_into(&mut hash, self.edges)?;
         Ok(hash.finish())
     }
 
@@ -116,7 +116,7 @@ where
     ///
     /// Returns [`DurabilityError::Serde`] if serialization fails.
     pub(crate) fn encode(&self) -> Result<EncodedRecordBlob, DurabilityError> {
-        let body = bincode::serialize(self.edges)?;
+        let body = crate::codec::encode(self.edges)?;
         let mut hash = Fnv1a64::new();
         hash.update(&body);
         Ok(EncodedRecordBlob {
@@ -179,7 +179,7 @@ where
             "fingerprint mismatch: header claims {claimed:#018x}, body hashes to {actual:#018x}"
         )));
     }
-    bincode::deserialize(body).map_err(|e| unreadable(format!("body does not decode: {e}")))
+    crate::codec::decode(body).map_err(|e| unreadable(format!("body does not decode: {e}")))
 }
 
 /// The single-relation convention for where a stack whose primary file

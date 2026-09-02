@@ -512,8 +512,8 @@ mod tests {
             field: 1,
             value: ScanValue::U32(42),
         };
-        let bytes = bincode::serialize(&req).unwrap();
-        let decoded: Request = bincode::deserialize(&bytes).unwrap();
+        let bytes = crate::codec::encode(&req).unwrap();
+        let decoded: Request = crate::codec::decode(&bytes).unwrap();
         assert!(matches!(
             decoded,
             Request::UpdateField {
@@ -530,8 +530,8 @@ mod tests {
                 (1, ScanValue::U32(3)),
             ],
         };
-        let bytes = bincode::serialize(&resp).unwrap();
-        let decoded: Response = bincode::deserialize(&bytes).unwrap();
+        let bytes = crate::codec::encode(&resp).unwrap();
+        let decoded: Response = crate::codec::decode(&bytes).unwrap();
         assert_eq!(decoded, resp);
     }
 
@@ -543,8 +543,8 @@ mod tests {
         let req = Request::Authenticate {
             token: "s3cr3t".into(),
         };
-        let bytes = bincode::serialize(&req).unwrap();
-        let decoded: Request = bincode::deserialize(&bytes).unwrap();
+        let bytes = crate::codec::encode(&req).unwrap();
+        let decoded: Request = crate::codec::decode(&bytes).unwrap();
         assert!(matches!(decoded, Request::Authenticate { token } if token == "s3cr3t"));
 
         for code in [ErrorCode::Unauthenticated, ErrorCode::Unauthorized] {
@@ -552,8 +552,8 @@ mod tests {
                 code,
                 message: "irrelevant".into(),
             };
-            let bytes = bincode::serialize(&resp).unwrap();
-            let decoded: Response = bincode::deserialize(&bytes).unwrap();
+            let bytes = crate::codec::encode(&resp).unwrap();
+            let decoded: Response = crate::codec::decode(&bytes).unwrap();
             assert_eq!(decoded, resp);
         }
     }
@@ -578,8 +578,8 @@ mod tests {
                 },
             ],
         };
-        let bytes = bincode::serialize(&req).unwrap();
-        let decoded: Request = bincode::deserialize(&bytes).unwrap();
+        let bytes = crate::codec::encode(&req).unwrap();
+        let decoded: Request = crate::codec::decode(&bytes).unwrap();
         assert!(matches!(
             decoded,
             Request::Transaction { updates } if updates.len() == 2
@@ -590,8 +590,8 @@ mod tests {
             code: ErrorCode::RecordNotFound,
             message: "irrelevant".into(),
         };
-        let bytes = bincode::serialize(&resp).unwrap();
-        let decoded: Response = bincode::deserialize(&bytes).unwrap();
+        let bytes = crate::codec::encode(&resp).unwrap();
+        let decoded: Response = crate::codec::decode(&bytes).unwrap();
         assert_eq!(decoded, resp);
     }
 }

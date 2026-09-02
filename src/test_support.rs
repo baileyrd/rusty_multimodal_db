@@ -57,16 +57,16 @@ pub(crate) fn assert_golden<T>(label: &str, value: &T, golden: &[u8])
 where
     T: serde::Serialize + serde::de::DeserializeOwned,
 {
-    let encoded = bincode::serialize(value).unwrap();
+    let encoded = crate::codec::encode(value).unwrap();
     assert_eq!(
         encoded,
         golden,
         "{label}: encoding drifted from the pinned bytes; actual: [{}]",
         hex_literal(&encoded)
     );
-    let decoded: T = bincode::deserialize(golden).unwrap();
+    let decoded: T = crate::codec::decode(golden).unwrap();
     assert_eq!(
-        bincode::serialize(&decoded).unwrap(),
+        crate::codec::encode(&decoded).unwrap(),
         golden,
         "{label}: the pinned bytes did not decode to a value that re-encodes to them"
     );
@@ -81,7 +81,7 @@ where
     T: serde::Serialize + serde::de::DeserializeOwned + PartialEq + std::fmt::Debug,
 {
     assert_golden(label, value, golden);
-    let decoded: T = bincode::deserialize(golden).unwrap();
+    let decoded: T = crate::codec::decode(golden).unwrap();
     assert_eq!(
         &decoded, value,
         "{label}: the pinned bytes decode to a different value"
