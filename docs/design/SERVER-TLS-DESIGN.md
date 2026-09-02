@@ -490,7 +490,10 @@ after this design is explicitly accepted.
   decided here. Matches `SERVER-AUTH-DESIGN.md`'s own open question on
   this exact point, though the mechanism (`rusty_tls::TlsAcceptor::new_with_client_auth`)
   already exists, unlike when that open question was first written —
-  see "Ecosystem check" above.
+  see "Ecosystem check" above. *Resolved: designed as
+  `SERVER-MTLS-DESIGN.md` / `ADR-0023` and implemented as `SERVER-001`
+  v0.13.0 / FR-023 — a policy design on the existing mechanism, as
+  predicted.*
 - Certificate rotation without a server restart (e.g. a SIGHUP-triggered
   reload) is unaddressed — the "restart with new config" story is the
   same one `AuthConfig`'s own token-rotation non-goal already accepted.

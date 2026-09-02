@@ -204,4 +204,16 @@ Proposed: option 1. Concretely, at implementation:
   set is `InvalidClientCaRoots` at construction — no hangs, every
   rejection on the existing `TLS-FR-003` path. The next unit registers
   `SERVER-001` v0.13.0 / FR-023 and implements per
-  `docs/design/SERVER-MTLS-DESIGN.md`. (This PR.)
+  `docs/design/SERVER-MTLS-DESIGN.md`. (PR #134.)
+- 2026-09-02: implemented as `SERVER-001` v0.13.0 (FR-023) in this PR
+  — `TlsConfig::new_with_client_auth` / `from_pem_files_with_client_ca`
+  / `from_env` with `SERVER_TLS_CLIENT_CA_PATH` (a partial configuration
+  is `Some(Err(Io(NotFound)))`, the table factored for a hermetic unit
+  test) / `requires_client_certificate()`; `ClientTlsConfig::with_identity`
+  / `with_identity_pem_files` / `has_identity()` with a key-redacting
+  `Debug`; `dog_server` reporting the mode. `handle_connection`, `serve`,
+  `AuthConfig`, `TokenClass`, the wire, `PROTOCOL_VERSION`, and
+  `Cargo.toml` unchanged, exactly as the Decision said. Four tests in
+  `tests/server_tls_integration.rs` on a throwaway `rcgen` CA, one unit
+  test; every acceptance criterion 1–10 holds; no deviation. Full sweep
+  green (338 lib tests, 337 + 1; TLS suite 12/12).

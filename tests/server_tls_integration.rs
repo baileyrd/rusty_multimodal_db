@@ -378,3 +378,232 @@ fn schema_driven_client_tls_failures_are_errors_not_hangs() {
         other => panic!("expected the self-signed certificate to be refused, got {other:?}"),
     }
 }
+
+// ---------------------------------------------------------------------------
+// Mutual TLS (`SERVER-001-FR-023`, ADR-0023, `docs/design/SERVER-MTLS-DESIGN.md`)
+// ---------------------------------------------------------------------------
+
+/// A throwaway CA (DER certificate + its key pair), generated fresh per
+/// test, never committed — the operator's own CA the design assumes.
+fn throwaway_ca() -> (rcgen::Certificate, rcgen::KeyPair) {
+    let key = rcgen::KeyPair::generate().unwrap();
+    let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+    params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    (params.self_signed(&key).unwrap(), key)
+}
+
+/// A client leaf (`ClientAuth` EKU) signed by `ca` — DER chain (just the
+/// leaf) + DER key, exactly the shape `ClientTlsConfig::with_identity`
+/// takes.
+fn client_identity(ca: &rcgen::Certificate, ca_key: &rcgen::KeyPair) -> (Vec<Vec<u8>>, Vec<u8>) {
+    let key = rcgen::KeyPair::generate().unwrap();
+    let mut params = rcgen::CertificateParams::new(vec!["client".to_string()]).unwrap();
+    params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ClientAuth];
+    let cert = params.signed_by(&key, ca, ca_key).unwrap();
+    (vec![cert.der().to_vec()], key.serialize_der())
+}
+
+/// A server requiring a certificate chaining to `ca`.
+fn mtls_server_config(ca: &rcgen::Certificate) -> TlsConfig {
+    let (cert_der, key_der) = self_signed_leaf();
+    let tls =
+        TlsConfig::new_with_client_auth(vec![cert_der], key_der, vec![ca.der().to_vec()]).unwrap();
+    assert!(tls.requires_client_certificate());
+    tls
+}
+
+fn identity_client(chain: Vec<Vec<u8>>, key: Vec<u8>) -> ClientTlsConfig {
+    dev_tls().with_identity(chain, key)
+}
+
+/// `MTLS-FR-001`/`MTLS-FR-003`: a client presenting a certificate signed by
+/// the configured CA is admitted, and `SchemaDrivenClient` over that
+/// identity reads, writes, and scans exactly as it does over plain TLS
+/// (`schema_driven_client_connects_over_tls`). A raw `rusty_tls` client
+/// with the same identity completes a round trip too, so the admission
+/// is the server's, not something the library client adds.
+#[test]
+fn mtls_admits_a_client_whose_certificate_chains_to_the_configured_ca() {
+    let (ca, ca_key) = throwaway_ca();
+    let addr = start_server(AuthConfig::default(), Some(mtls_server_config(&ca)));
+
+    let (chain, key) = client_identity(&ca, &ca_key);
+    let mut raw = TlsStream::new_with_client_identity(
+        TcpStream::connect(addr).unwrap(),
+        "localhost",
+        &TrustPolicy::DangerNoVerification,
+        chain.clone(),
+        key.clone(),
+    )
+    .unwrap();
+    assert!(matches!(
+        roundtrip(&mut raw, Request::DescribeSchema),
+        Response::Schema(_)
+    ));
+
+    let tls = identity_client(chain, key);
+    assert!(tls.has_identity());
+    assert!(
+        !format!("{tls:?}").contains("PRIVATE") && format!("{tls:?}").contains("identity: true"),
+        "Debug must report the identity's presence, never its bytes: {tls:?}"
+    );
+    let mut client =
+        SchemaDrivenClient::connect_with(addr, ConnectOptions::new().tls(tls)).unwrap();
+    assert_eq!(client.server_protocol_version(), PROTOCOL_VERSION);
+    assert!(client
+        .update(Uuid::from_u128(1), "age", ScanValue::U32(9))
+        .unwrap());
+    assert_eq!(client.scan("age").unwrap(), vec![ScanValue::U32(9)]);
+}
+
+/// `MTLS-FR-001`/`MTLS-FR-008`: a client with no certificate, and one whose
+/// certificate chains to a *different* CA, each fail the handshake — an
+/// error at the client, never a valid `Response`, never a hang — and the
+/// server keeps serving admitted clients afterwards (it neither panicked
+/// nor wedged).
+#[test]
+fn mtls_rejects_a_client_without_a_certificate_or_with_one_from_another_ca() {
+    let (ca, ca_key) = throwaway_ca();
+    let addr = start_server(AuthConfig::default(), Some(mtls_server_config(&ca)));
+
+    // No identity: raw and library clients alike.
+    let mut raw = connect_tls(addr);
+    let no_identity: Result<Response, _> = write_message(&mut raw, &Request::DescribeSchema)
+        .map_err(|e| e.to_string())
+        .and_then(|()| read_message(&mut raw).map_err(|e| e.to_string()));
+    assert!(
+        no_identity.is_err(),
+        "no certificate, yet a Response decoded: {no_identity:?}"
+    );
+    match SchemaDrivenClient::connect_with(addr, ConnectOptions::new().tls(dev_tls())).map(|_| ()) {
+        Err(ClientError::Frame(_)) => {}
+        other => panic!("expected the handshake to fail without an identity, got {other:?}"),
+    }
+
+    // An identity from a CA the server does not trust.
+    let (other_ca, other_key) = throwaway_ca();
+    let (chain, key) = client_identity(&other_ca, &other_key);
+    match SchemaDrivenClient::connect_with(
+        addr,
+        ConnectOptions::new().tls(identity_client(chain, key)),
+    )
+    .map(|_| ())
+    {
+        Err(ClientError::Frame(_)) => {}
+        other => panic!("expected the handshake to fail for a foreign CA, got {other:?}"),
+    }
+
+    // The server is still healthy for an admitted client.
+    let (chain, key) = client_identity(&ca, &ca_key);
+    let mut ok = SchemaDrivenClient::connect_with(
+        addr,
+        ConnectOptions::new().tls(identity_client(chain, key)),
+    )
+    .unwrap();
+    assert_eq!(ok.scan("age").unwrap(), vec![ScanValue::U32(3)]);
+}
+
+/// `MTLS-FR-002`: admission and class are layered, not merged. With
+/// tokens configured an admitted connection still starts unauthenticated
+/// (`Unauthenticated` without a token, `Unauthorized` for a write on a
+/// read token, a write on the write token); with no tokens an admitted
+/// connection writes immediately (`AUTH-FR-007` behind the gate).
+#[test]
+fn mtls_composes_with_auth_config_as_admission_then_class() {
+    let (ca, ca_key) = throwaway_ca();
+    let auth = AuthConfig::new(Some("read-token".into()), Some("write-token".into()));
+    let addr = start_server(auth, Some(mtls_server_config(&ca)));
+    let (chain, key) = client_identity(&ca, &ca_key);
+    let identity = || identity_client(chain.clone(), key.clone());
+
+    match SchemaDrivenClient::connect_with(addr, ConnectOptions::new().tls(identity())).map(|_| ())
+    {
+        Err(ClientError::Server(ErrorCode::Unauthenticated, _)) => {}
+        other => panic!("an admitted connection must still need a token, got {other:?}"),
+    }
+    let mut client = SchemaDrivenClient::connect_with(
+        addr,
+        ConnectOptions::new().tls(identity()).token("read-token"),
+    )
+    .unwrap();
+    match client.update(Uuid::from_u128(1), "age", ScanValue::U32(9)) {
+        Err(ClientError::Server(ErrorCode::Unauthorized, _)) => {}
+        other => panic!("read token behind the gate must still be read-only, got {other:?}"),
+    }
+    client.authenticate("write-token").unwrap();
+    assert!(client
+        .update(Uuid::from_u128(1), "age", ScanValue::U32(9))
+        .unwrap());
+
+    // Certificates only: no tokens configured.
+    let addr = start_server(AuthConfig::default(), Some(mtls_server_config(&ca)));
+    let mut client =
+        SchemaDrivenClient::connect_with(addr, ConnectOptions::new().tls(identity())).unwrap();
+    assert!(client
+        .update(Uuid::from_u128(1), "age", ScanValue::U32(4))
+        .unwrap());
+}
+
+/// `MTLS-FR-004`: the PEM path on both ends — a CA file with more than
+/// one `CERTIFICATE` block, a client identity from PEM files — and the
+/// construction-time errors: an empty root set is `TlsConfigError::Tls`,
+/// a missing file is `Io`. Files live in a per-test directory, never in
+/// the repository.
+#[test]
+fn mtls_pem_files_and_construction_errors() {
+    use rusty_multimodal_db::server::TlsConfigError;
+    let dir = unique_dir("server_tls_integration_mtls_pem");
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let (ca, ca_key) = throwaway_ca();
+    let (unrelated_ca, _) = throwaway_ca();
+    let server_key = rcgen::KeyPair::generate().unwrap();
+    let server_cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
+        .unwrap()
+        .self_signed(&server_key)
+        .unwrap();
+    let client_key = rcgen::KeyPair::generate().unwrap();
+    let mut params = rcgen::CertificateParams::new(vec!["client".to_string()]).unwrap();
+    params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ClientAuth];
+    let client_cert = params.signed_by(&client_key, &ca, &ca_key).unwrap();
+
+    let chain_path = dir.join("server.pem");
+    let key_path = dir.join("server.key");
+    let ca_path = dir.join("client-ca.pem");
+    let client_chain_path = dir.join("client.pem");
+    let client_key_path = dir.join("client.key");
+    std::fs::write(&chain_path, server_cert.pem()).unwrap();
+    std::fs::write(&key_path, server_key.serialize_pem()).unwrap();
+    std::fs::write(&ca_path, format!("{}{}", unrelated_ca.pem(), ca.pem())).unwrap();
+    std::fs::write(&client_chain_path, client_cert.pem()).unwrap();
+    std::fs::write(&client_key_path, client_key.serialize_pem()).unwrap();
+
+    let tls = TlsConfig::from_pem_files_with_client_ca(&chain_path, &key_path, &ca_path).unwrap();
+    assert!(tls.requires_client_certificate());
+    let addr = start_server(AuthConfig::default(), Some(tls));
+    let identity = dev_tls()
+        .with_identity_pem_files(&client_chain_path, &client_key_path)
+        .unwrap();
+    let mut client =
+        SchemaDrivenClient::connect_with(addr, ConnectOptions::new().tls(identity)).unwrap();
+    assert_eq!(client.scan("age").unwrap(), vec![ScanValue::U32(3)]);
+
+    match TlsConfig::from_pem_files_with_client_ca(&chain_path, &key_path, dir.join("missing.pem"))
+        .map(|_| ())
+    {
+        Err(TlsConfigError::Io(_)) => {}
+        other => panic!("expected Io for a missing CA file, got {other:?}"),
+    }
+    let (cert_der, key_der) = self_signed_leaf();
+    match TlsConfig::new_with_client_auth(vec![cert_der], key_der, Vec::new()).map(|_| ()) {
+        Err(TlsConfigError::Tls(_)) => {}
+        other => panic!("expected Tls for an empty root set, got {other:?}"),
+    }
+    match dev_tls()
+        .with_identity_pem_files(dir.join("missing.pem"), &client_key_path)
+        .map(|_| ())
+    {
+        Err(TlsConfigError::Io(_)) => {}
+        other => panic!("expected Io for a missing identity file, got {other:?}"),
+    }
+}

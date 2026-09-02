@@ -103,7 +103,8 @@ interfaces" section for the full reasoning. Summarized:
    disproportionate; this crate has no concept of "users" anywhere else
    in its data model) vs. mTLS client certificates (out of scope until/
    unless native TLS is revisited, since it depends on owning TLS
-   directly) vs. **a shared-secret token sent once per connection via a
+   directly — *revisited: `ADR-0023`, `SERVER-001` v0.13.0 / FR-023,
+   layered under this token scheme, not replacing it*) vs. **a shared-secret token sent once per connection via a
    new `Request::Authenticate`, checked before any other request is
    served** (**chosen**).
 3. **Authorization granularity**: per-field/per-record ACLs (rejected —

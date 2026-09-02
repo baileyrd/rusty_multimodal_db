@@ -10,7 +10,9 @@
 //! native transport encryption (`TlsConfig::from_env`, ADR-0014) are both
 //! real and opt-in via the process environment
 //! (`SERVER_AUTH_READ_ONLY_TOKEN`/`SERVER_AUTH_READ_WRITE_TOKEN`,
-//! `SERVER_TLS_CERT_CHAIN_PATH`/`SERVER_TLS_PRIVATE_KEY_PATH`) — with
+//! `SERVER_TLS_CERT_CHAIN_PATH`/`SERVER_TLS_PRIVATE_KEY_PATH`, and —
+//! for mutual TLS, ADR-0023 — an optional `SERVER_TLS_CLIENT_CA_PATH`
+//! naming the CA roots every client certificate must chain to) — with
 //! none of them set, this behaves exactly as it did before either
 //! feature existed: no auth, no encryption. Do not expose this beyond a
 //! trusted, localhost/development network unless both are configured —
@@ -57,13 +59,17 @@ fn main() {
         None => None,
         Some(Ok(tls)) => Some(tls),
         Some(Err(e)) => panic!(
-            "SERVER_TLS_CERT_CHAIN_PATH/SERVER_TLS_PRIVATE_KEY_PATH configured but invalid: {e}"
+            "SERVER_TLS_CERT_CHAIN_PATH/SERVER_TLS_PRIVATE_KEY_PATH/SERVER_TLS_CLIENT_CA_PATH configured but invalid: {e}"
         ),
     };
     eprintln!(
-        "dog_server listening on {addr} (auth: {}, TLS: {} — see ADR-0012/ADR-0014; do not expose beyond a trusted network unless both are configured)",
+        "dog_server listening on {addr} (auth: {}, TLS: {} — see ADR-0012/ADR-0014/ADR-0023; do not expose beyond a trusted network unless both are configured)",
         if auth.is_configured() { "configured" } else { "NOT configured" },
-        if tls.is_some() { "configured" } else { "NOT configured" },
+        match &tls {
+            None => "NOT configured",
+            Some(tls) if tls.requires_client_certificate() => "configured, client certificate required",
+            Some(_) => "configured",
+        },
     );
 
     serve(listener, connection_store, auth, tls);

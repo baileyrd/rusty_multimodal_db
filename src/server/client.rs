@@ -107,9 +107,11 @@ use super::protocol::{
     DomainSchema, ErrorCode, FieldDescriptor, ParentLookup, RecordId, Request, Response, ScanValue,
     PROTOCOL_VERSION,
 };
+use super::{pem, TlsConfigError};
 use std::fmt;
 use std::io::{self, BufReader, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
+use std::path::Path;
 
 /// The client-side trust policy for [`ClientTlsConfig`], re-exported
 /// from `rusty_tls` so a caller can name one without depending on
@@ -179,11 +181,31 @@ impl From<FrameError> for ClientError {
 /// must carry (also sent as SNI) and the [`TrustPolicy`] it is verified
 /// under. A self-signed development certificate needs
 /// `TrustPolicy::DangerNoVerification` or `PinnedAnchors`; a real one
-/// works under `TrustPolicy::System`.
-#[derive(Debug, Clone)]
+/// works under `TrustPolicy::System`. Against a server built with
+/// `TlsConfig::new_with_client_auth` (mutual TLS, `FR-023`, ADR-0023)
+/// the client must also present an identity — see
+/// [`ClientTlsConfig::with_identity`].
+#[derive(Clone)]
 pub struct ClientTlsConfig {
     server_name: String,
     trust: TrustPolicy,
+    /// `MTLS-FR-003`: a DER certificate chain (leaf first) and DER private
+    /// key presented during the handshake. Never printed — see the
+    /// `Debug` impl.
+    identity: Option<(Vec<Vec<u8>>, Vec<u8>)>,
+}
+
+/// Hand-written so the identity's private key never reaches a log:
+/// prints whether an identity is present, not its bytes (the same
+/// never-echo-a-secret rule `AuthConfig` follows for tokens).
+impl fmt::Debug for ClientTlsConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ClientTlsConfig")
+            .field("server_name", &self.server_name)
+            .field("trust", &self.trust)
+            .field("identity", &self.identity.is_some())
+            .finish()
+    }
 }
 
 impl ClientTlsConfig {
@@ -191,6 +213,7 @@ impl ClientTlsConfig {
         Self {
             server_name: server_name.into(),
             trust,
+            identity: None,
         }
     }
 
@@ -200,6 +223,48 @@ impl ClientTlsConfig {
 
     pub fn trust(&self) -> &TrustPolicy {
         &self.trust
+    }
+
+    /// Present this DER-encoded certificate chain (leaf first) and DER
+    /// private key (PKCS#8, PKCS#1, or SEC1) during the handshake
+    /// (`MTLS-FR-003`, `FR-023`) — what a server built with
+    /// `TlsConfig::new_with_client_auth` requires. Mechanism:
+    /// `rusty_tls::TlsStream::new_with_client_identity`. A key that does
+    /// not match the certificate, or malformed DER, is
+    /// [`ClientError::Tls`] at connect time before any I/O; an identity
+    /// the server's roots reject fails under the `Hello` as
+    /// `ClientError::Frame(FrameError::Io(..))`, like any other handshake
+    /// failure. Against a server that does not require a certificate the
+    /// identity is simply never asked for.
+    pub fn with_identity(mut self, cert_chain_der: Vec<Vec<u8>>, private_key_der: Vec<u8>) -> Self {
+        self.identity = Some((cert_chain_der, private_key_der));
+        self
+    }
+
+    /// [`ClientTlsConfig::with_identity`] from PEM files — the chain file
+    /// may hold the leaf followed by intermediates, the key file exactly
+    /// one block — decoded by the same `pem` module and reporting the same
+    /// [`TlsConfigError`] shapes (`Io`, `Pem`) as `TlsConfig::from_pem_files`.
+    pub fn with_identity_pem_files(
+        self,
+        cert_chain_path: impl AsRef<Path>,
+        private_key_path: impl AsRef<Path>,
+    ) -> Result<Self, TlsConfigError> {
+        let cert_chain_pem =
+            std::fs::read_to_string(cert_chain_path).map_err(TlsConfigError::Io)?;
+        let private_key_pem =
+            std::fs::read_to_string(private_key_path).map_err(TlsConfigError::Io)?;
+        let cert_chain_der = pem::decode_blocks(&cert_chain_pem).map_err(TlsConfigError::Pem)?;
+        let private_key_blocks =
+            pem::decode_blocks(&private_key_pem).map_err(TlsConfigError::Pem)?;
+        let [private_key_der] = <[Vec<u8>; 1]>::try_from(private_key_blocks)
+            .map_err(|_| TlsConfigError::Pem(pem::PemError::UnterminatedBlock))?;
+        Ok(self.with_identity(cert_chain_der, private_key_der))
+    }
+
+    /// Whether an identity will be presented — see [`ClientTlsConfig::with_identity`].
+    pub fn has_identity(&self) -> bool {
+        self.identity.is_some()
     }
 }
 
@@ -328,10 +393,20 @@ impl SchemaDrivenClient {
         tcp.set_nodelay(true).map_err(FrameError::from)?;
         let transport = match &options.tls {
             None => Transport::Plain(tcp),
-            Some(tls) => Transport::Tls(Box::new(
-                rusty_tls::TlsStream::new(tcp, &tls.server_name, &tls.trust)
-                    .map_err(ClientError::Tls)?,
-            )),
+            Some(tls) => {
+                let stream = match &tls.identity {
+                    None => rusty_tls::TlsStream::new(tcp, &tls.server_name, &tls.trust),
+                    Some((chain, key)) => rusty_tls::TlsStream::new_with_client_identity(
+                        tcp,
+                        &tls.server_name,
+                        &tls.trust,
+                        chain.clone(),
+                        key.clone(),
+                    ),
+                }
+                .map_err(ClientError::Tls)?;
+                Transport::Tls(Box::new(stream))
+            }
         };
         let mut stream = BufReader::new(transport);
 
