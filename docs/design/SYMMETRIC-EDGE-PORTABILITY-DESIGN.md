@@ -1,7 +1,8 @@
-# `Symmetric` Edge-List Portability Design (Proposed)
+# `Symmetric` Edge-List Portability Design (Accepted)
 
-- Status: **Proposed** — awaiting owner review. Acceptance would
-  authorize the design only; implementation still requires its own unit
+- Status: **Accepted** (promoted from Proposed on 2026-09-02 — the owner
+  approved the design as proposed, no changes requested). Acceptance
+  authorizes the design only; implementation still requires its own unit
   (registering `STORAGE-016` and a planning packet) before any code is
   written — the posture `ADR-0016` and `ADR-0017` both took. See
   `ADR-0018-symmetric-edge-list-portability-proposal.md` for the decision
@@ -435,3 +436,5 @@ design document itself.
   owner queued after `GENERIC-STORE-FINGERPRINT-MEASUREMENT` ("1, 2, 3,
   then 4"), and the first open question `GENERIC-STORE-PORTABILITY-
   DESIGN` left.
+- 2026-09-02: Accepted as proposed by the owner, no changes requested.
+  Implementation (`STORAGE-016`) is the next unit.

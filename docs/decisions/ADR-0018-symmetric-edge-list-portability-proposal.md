@@ -1,6 +1,6 @@
 # ADR-0018: Persist `Symmetric`'s edge list in its own companion blob — make `Employee`'s durable stack reopenable from its path alone
 
-- Status: **Proposed** (awaiting owner review)
+- Status: **Accepted** (promoted from Proposed on 2026-09-02 — the owner approved the design as proposed, no changes requested)
 - Date: 2026-09-02
 - Deciders: baileyrd
 - Related: `docs/design/SYMMETRIC-EDGE-PORTABILITY-DESIGN.md` (the full
@@ -268,4 +268,5 @@ options" section for the full reasoning. Summarized:
 
 ## Acceptance and implementation
 
-- Pending owner review.
+- 2026-09-02: accepted as proposed. The next unit registers `STORAGE-016`
+  and implements per `docs/design/SYMMETRIC-EDGE-PORTABILITY-DESIGN.md`.
