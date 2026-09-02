@@ -215,7 +215,7 @@ Accepted: option 3. Concretely, at implementation:
 - 2026-09-02: accepted as proposed (option (a); (b) and (c) declined).
   The next unit registers `SERVER-001` v0.10.0 / FR-020 and implements
   per `docs/design/SERVER-PROTOCOL-VERSION-DESIGN.md`. (PR #125.)
-- 2026-09-02: implemented as `SERVER-001` v0.10.0 (FR-020) in this PR —
+- 2026-09-02: implemented as `SERVER-001` v0.10.0 (FR-020) in PR #126 —
   `PROTOCOL_VERSION = 2`, `Request::Hello`/`Response::Hello` at index
   10 with golden vectors, the first-frame intercept before
   authentication (`min`, version 0 / non-first → `Malformed`),
