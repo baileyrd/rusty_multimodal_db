@@ -207,6 +207,10 @@ to undo the ones that already landed.
   proposal delivers atomicity with respect to concurrent access; it does
   not deliver crash-atomicity across a batch. See "Non-goals" and
   "Security, privacy, and compatibility."
+  *Closed for journaled adapters at `SERVER-001` v0.15.0 / FR-025
+  (`ADR-0025`, `SERVER-TRANSACTION-SESSION-DESIGN.md` Part B): an opt-in
+  redo journal `fsync`'d before the first write; an unjournaled adapter
+  keeps this requirement's named gap, by choice.*
 
 ## Architecture and interfaces
 

@@ -208,3 +208,18 @@ Proposed: option 1. Concretely, at implementation:
   Implemented after `ADR-0024`'s unit, as `SERVER-001` v0.15.0 /
   FR-025, per `docs/design/SERVER-TRANSACTION-SESSION-DESIGN.md` Part
   B. (PR #138.)
+- 2026-09-02: implemented as `SERVER-001` v0.15.0 (FR-025) in this PR
+  — `src/server/journal.rs` (`BatchJournal`, `CheckpointFlush`,
+  `JournalError`, the constants), `with_journal` on all three adapters
+  with the append-before-apply and checkpoint steps inside
+  `apply_transaction`'s existing closure, `SERVER_TXN_JOURNAL_PATH`,
+  `ErrorCode::Journal`, the `dog-jrnl-txn` bench rows in `RESULTS.md`.
+  Seven unit tests and one integration test; every acceptance
+  criterion holds. One clarification, not a deviation: `ErrorCode::Journal`
+  is an appended variant, so `ADR-0022`'s rule 2 bumps `PROTOCOL_VERSION`
+  to 4 and rule 3 downgrades it to `Unsupported` on a connection below 4
+  (`downgrade_for_version`) — this ADR named the index and the gating
+  but not the bump. The partial-checkpoint case (flush or truncate
+  failing after the writes) leaves a longer journal that replays
+  idempotently, as the design's invariants allow. Full sweep green (347
+  lib tests, 340 + 7).

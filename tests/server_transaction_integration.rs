@@ -618,3 +618,103 @@ fn a_read_only_connection_can_open_a_session_but_not_stage_or_commit() {
     assert_eq!(roundtrip(&mut c, Request::Commit), Response::Ok);
     assert_eq!(age_of(&mut c, Uuid::from_u128(1)), 30);
 }
+
+// ---------------------------------------------------------------------------
+// Crash-atomic batches (`SERVER-001-FR-025`, ADR-0025,
+// `docs/design/SERVER-TRANSACTION-SESSION-DESIGN.md` Part B)
+// ---------------------------------------------------------------------------
+
+fn start_journaled_server(records: Vec<DogRecord>) -> (std::net::SocketAddr, std::path::PathBuf) {
+    let dir = unique_dir("server_transaction_integration_journal");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("dogs.mmap");
+    let journal = dir.join("txn.journal");
+    let store = ProductionStore::create(records, Vec::new(), &path).unwrap();
+    let connection_store = Arc::new(DogConnectionStore::with_journal(store, &journal).unwrap());
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    thread::spawn(move || serve(listener, connection_store, AuthConfig::default(), None));
+    (addr, journal)
+}
+
+/// `JRN-FR-001`/`JRN-FR-002`/`JRN-FR-007` (design criterion 2): over a real
+/// socket, a `Transaction` and a session `Commit` are each journaled
+/// before they are answered `Ok`; a batch that fails validation and a
+/// single `UpdateField` journal nothing; the writes land exactly as on an
+/// unjournaled server.
+#[test]
+fn a_journaled_server_journals_transactions_and_session_commits_only() {
+    let (addr, journal) = start_journaled_server(sample_records());
+    let mut c = connect_v3(addr);
+    let journal_len = || std::fs::metadata(&journal).unwrap().len();
+    let header = journal_len();
+
+    assert_eq!(
+        roundtrip(
+            &mut c,
+            Request::Transaction {
+                updates: vec![
+                    TransactionOp {
+                        id: Uuid::from_u128(1),
+                        field: FIELD_AGE,
+                        value: ScanValue::U32(30),
+                    },
+                    TransactionOp {
+                        id: Uuid::from_u128(2),
+                        field: FIELD_AGE,
+                        value: ScanValue::U32(40),
+                    },
+                ],
+            },
+        ),
+        Response::Ok
+    );
+    let after_txn = journal_len();
+    assert!(after_txn > header, "the Transaction was not journaled");
+    assert_eq!(age_of(&mut c, Uuid::from_u128(1)), 30);
+
+    assert_eq!(roundtrip(&mut c, Request::Begin), Response::Ok);
+    assert_eq!(
+        stage(&mut c, Uuid::from_u128(3), 7),
+        Response::Staged { index: 0 }
+    );
+    assert_eq!(journal_len(), after_txn, "staging must not journal");
+    assert_eq!(roundtrip(&mut c, Request::Commit), Response::Ok);
+    let after_commit = journal_len();
+    assert!(
+        after_commit > after_txn,
+        "the session Commit was not journaled"
+    );
+    assert_eq!(age_of(&mut c, Uuid::from_u128(3)), 7);
+
+    match roundtrip(
+        &mut c,
+        Request::Transaction {
+            updates: vec![TransactionOp {
+                id: Uuid::from_u128(99),
+                field: FIELD_AGE,
+                value: ScanValue::U32(1),
+            }],
+        },
+    ) {
+        Response::TransactionFailed {
+            index: 0,
+            code: ErrorCode::RecordNotFound,
+            ..
+        } => {}
+        other => panic!("expected TransactionFailed, got {other:?}"),
+    }
+    assert_eq!(
+        journal_len(),
+        after_commit,
+        "a rejected batch must not journal"
+    );
+
+    assert_eq!(stage(&mut c, Uuid::from_u128(1), 31), Response::Ok);
+    assert_eq!(
+        journal_len(),
+        after_commit,
+        "a single UpdateField must not journal"
+    );
+    assert_eq!(age_of(&mut c, Uuid::from_u128(1)), 31);
+}

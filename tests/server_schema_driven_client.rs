@@ -320,7 +320,7 @@ fn value_of(client: &mut SchemaDrivenClient, id: Uuid, field: &str) -> ScanValue
 #[test]
 fn sessions_stage_commit_and_roll_back_on_every_domain() {
     let mut dog = SchemaDrivenClient::connect(start_dog_server()).unwrap();
-    assert_eq!(dog.server_protocol_version(), 3);
+    assert_eq!(dog.server_protocol_version(), 4);
 
     let mut s = dog.begin().unwrap();
     assert_eq!(
