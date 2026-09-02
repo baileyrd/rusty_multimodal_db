@@ -203,8 +203,8 @@ Accepted: option 3. Concretely, at implementation:
 - Revisit if: `SchemaDrivenClient` is used against an auth-configured
   server — it has no `authenticate` today (pre-existing, independent of
   this design); a separate unit. *Taken: `SERVER-001` v0.11.0 / FR-021
-  (`connect_authenticated`, `authenticate`) in the PR after #127; no
-  change to this decision.*
+  (`connect_authenticated`, `authenticate`) in PR #128; no change to
+  this decision.*
 
 ## Acceptance and implementation
 
