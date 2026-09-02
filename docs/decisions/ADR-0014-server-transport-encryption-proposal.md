@@ -350,7 +350,7 @@ interfaces" section for the full reasoning. Summarized:
   already exists, so that future revisit would mostly be a client-cert
   distribution/revocation policy design, not an implementation from
   scratch. *Taken: `ADR-0023` / `SERVER-MTLS-DESIGN.md`, implemented as
-  `SERVER-001` v0.13.0 / FR-023 in the PR after #134 — an admission gate
+  `SERVER-001` v0.13.0 / FR-023 in PR #135 — an admission gate
   layered under `AuthConfig`; distribution and revocation named out of
   scope there; no change to this decision.*
 - Revisit if: certificate rotation without a server restart becomes a
