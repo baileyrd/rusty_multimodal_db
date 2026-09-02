@@ -614,4 +614,68 @@ mod tests {
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// `BINENC-FR-004`: the `GENBLOB\0` body for one `Order`, pinned byte
+    /// for byte — the record count, then the record's fields in
+    /// declaration order: two ids (each a `u64` length of 16 and the 16
+    /// big-endian bytes), `amount_cents` as an `i64`, `status` as a `u32`
+    /// variant index, `created_at_unix_ms` and `discount_cents` as
+    /// `i64`s. The fingerprint is FNV-1a 64 over exactly these bytes, so
+    /// a tagged image built from them reads back as the record set — a
+    /// blob written by a build before this pin is still readable.
+    /// `Order` lives behind `research`, so this runs with `--all-features`
+    /// (the sweep and CI both do).
+    #[cfg(feature = "research")]
+    #[test]
+    fn one_order_body_encodes_to_its_pinned_bytes() {
+        use crate::generic::order_customer::{Order, OrderStatus};
+        use uuid::Uuid;
+
+        let orders = vec![Order {
+            id: Uuid::from_u128(1),
+            customer_id: Uuid::from_u128(2),
+            amount_cents: 1000,
+            status: OrderStatus::Shipped,
+            created_at_unix_ms: 5,
+            discount_cents: 0,
+        }];
+        const BODY: [u8; 84] = [
+            0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // len = 1
+            0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // id
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, //
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, //
+            0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // customer_id
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, //
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, //
+            0xe8, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // amount_cents = 1000
+            0x01, 0x00, 0x00, 0x00, // OrderStatus::Shipped
+            0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // created_at_unix_ms
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // discount_cents
+        ];
+        crate::test_support::assert_golden_eq("GENBLOB body", &orders, &BODY);
+
+        let blob = GenericRecordBlob::new(&orders);
+        let image = blob.encode().unwrap().image;
+        assert_eq!(&image[TAGGED_HEADER_LEN..], &BODY);
+        let mut hash = Fnv1a64::new();
+        hash.update(&BODY);
+        assert_eq!(blob.fingerprint().unwrap(), hash.finish());
+
+        let dir = fresh_temp_dir("generic_blob_golden").unwrap();
+        let path = blob_path(&dir.join("store.mmap"));
+        std::fs::write(
+            &path,
+            encode_tagged_image(
+                &MAGIC,
+                BLOB_VERSION,
+                hash.finish(),
+                Order::SCHEMA_TAG,
+                &BODY,
+            ),
+        )
+        .unwrap();
+        assert_eq!(read::<Order>(&path).unwrap(), orders);
+        assert!(blob.is_current_at(&path));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

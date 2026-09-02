@@ -137,6 +137,7 @@
 /// consumer actually sees. See this module's own docs.
 #[cfg(any(test, feature = "research"))]
 pub mod bench_support;
+pub(crate) mod codec;
 pub mod concurrency;
 pub mod durability;
 /// Synthetic `DogRecord` dataset generation, used to build benchmark

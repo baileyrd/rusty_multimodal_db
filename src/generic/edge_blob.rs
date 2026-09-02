@@ -520,4 +520,43 @@ mod tests {
         assert!(!EdgeBlob::new(&sample(), TAG).is_current_at(&path));
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// `BINENC-FR-004`: the `GENEDGE\0` body for one `(Uuid, Uuid)` pair,
+    /// pinned byte for byte — the pair count, then each id as a `u64`
+    /// length of 16 and the 16 big-endian bytes. The fingerprint is
+    /// FNV-1a 64 over exactly these bytes, so a tagged image built from
+    /// them reads back as the edge list — a blob written by a build
+    /// before this pin is still readable.
+    #[test]
+    fn one_pair_body_encodes_to_its_pinned_bytes() {
+        let edges = vec![(Uuid::from_u128(1), Uuid::from_u128(2))];
+        const BODY: [u8; 56] = [
+            0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // len = 1
+            0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // from
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, //
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, //
+            0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // to
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, //
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02,
+        ];
+        crate::test_support::assert_golden_eq("GENEDGE body", &edges, &BODY);
+
+        let blob = EdgeBlob::new(&edges, TAG);
+        let image = blob.encode().unwrap().image;
+        assert_eq!(&image[TAGGED_HEADER_LEN..], &BODY);
+        let mut hash = Fnv1a64::new();
+        hash.update(&BODY);
+        assert_eq!(blob.fingerprint().unwrap(), hash.finish());
+
+        let dir = fresh_temp_dir("edge_blob_golden").unwrap();
+        let path = edges_path(&dir.join("store.mmap"));
+        std::fs::write(
+            &path,
+            encode_tagged_image(&MAGIC, BLOB_VERSION, hash.finish(), TAG, &BODY),
+        )
+        .unwrap();
+        assert_eq!(read::<Uuid>(&path, TAG).unwrap(), edges);
+        assert!(blob.is_current_at(&path));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

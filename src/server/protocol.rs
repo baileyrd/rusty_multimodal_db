@@ -267,6 +267,243 @@ pub enum Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{assert_golden, assert_golden_eq};
+
+    /// `Uuid::from_u128(1)` on the wire: a `u64` length of 16, then the
+    /// 16 big-endian bytes. Every id-carrying variant below pays this.
+    const ID1: [u8; 24] = [
+        0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, //
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, //
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+    ];
+
+    /// `Uuid::from_u128(2)`, likewise.
+    const ID2: [u8; 24] = [
+        0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, //
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, //
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02,
+    ];
+
+    /// A `u64` sequence length of 1 — what every one-element `Vec`/
+    /// one-byte `String` below is prefixed with.
+    const LEN1: [u8; 8] = [0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+
+    /// Concatenate the pinned pieces of one vector, so each variant's
+    /// literal reads as "variant index, then its fields" without
+    /// spelling the 24-byte id out every time.
+    fn bytes(parts: &[&[u8]]) -> Vec<u8> {
+        parts.concat()
+    }
+
+    /// `BINENC-FR-004`: every `Request` variant's wire bytes, pinned. A
+    /// variant is its `u32` index (declaration order) then its fields;
+    /// appending a variant keeps every line below true, and any other
+    /// change to `Request`/`ScanValue`/`TransactionOp` breaks one — that
+    /// is a wire-format change, per `STORAGE-018`'s evolution rules.
+    #[test]
+    fn every_request_variant_encodes_to_its_pinned_bytes() {
+        let id = Uuid::from_u128(1);
+        assert_golden(
+            "GetById",
+            &Request::GetById { id },
+            &bytes(&[&[0x00, 0x00, 0x00, 0x00], &ID1]),
+        );
+        assert_golden(
+            "FilterEq",
+            &Request::FilterEq {
+                field: 1,
+                value: ScanValue::U32(42),
+            },
+            &[
+                0x01, 0x00, 0x00, 0x00, // FilterEq
+                0x01, 0x00, // field
+                0x00, 0x00, 0x00, 0x00, // ScanValue::U32
+                0x2a, 0x00, 0x00, 0x00,
+            ],
+        );
+        assert_golden(
+            "ScanField",
+            &Request::ScanField { field: 2 },
+            &[0x02, 0x00, 0x00, 0x00, 0x02, 0x00],
+        );
+        assert_golden(
+            "UpdateField",
+            &Request::UpdateField {
+                id,
+                field: 1,
+                value: ScanValue::I64(-1),
+            },
+            &bytes(&[
+                &[0x03, 0x00, 0x00, 0x00],
+                &ID1,
+                &[0x01, 0x00],
+                &[0x01, 0x00, 0x00, 0x00], // ScanValue::I64
+                &[0xff; 8],
+            ]),
+        );
+        assert_golden(
+            "Parent",
+            &Request::Parent { id },
+            &bytes(&[&[0x04, 0x00, 0x00, 0x00], &ID1]),
+        );
+        assert_golden(
+            "Children",
+            &Request::Children { id },
+            &bytes(&[&[0x05, 0x00, 0x00, 0x00], &ID1]),
+        );
+        assert_golden(
+            "Neighbors",
+            &Request::Neighbors { id },
+            &bytes(&[&[0x06, 0x00, 0x00, 0x00], &ID1]),
+        );
+        assert_golden(
+            "DescribeSchema",
+            &Request::DescribeSchema,
+            &[0x07, 0x00, 0x00, 0x00],
+        );
+        assert_golden(
+            "Authenticate",
+            &Request::Authenticate {
+                token: "s3cr3t".into(),
+            },
+            &[
+                0x08, 0x00, 0x00, 0x00, // Authenticate
+                0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // token len
+                b's', b'3', b'c', b'r', b'3', b't',
+            ],
+        );
+        assert_golden(
+            "Transaction",
+            &Request::Transaction {
+                updates: vec![TransactionOp {
+                    id: Uuid::from_u128(2),
+                    field: 1,
+                    value: ScanValue::Bool(true),
+                }],
+            },
+            &bytes(&[
+                &[0x09, 0x00, 0x00, 0x00],
+                &LEN1,
+                &ID2,
+                &[0x01, 0x00],
+                &[0x02, 0x00, 0x00, 0x00], // ScanValue::Bool
+                &[0x01],
+            ]),
+        );
+    }
+
+    /// `BINENC-FR-004`: every `Response` variant's wire bytes, pinned —
+    /// same reading as the `Request` test.
+    #[test]
+    fn every_response_variant_encodes_to_its_pinned_bytes() {
+        let id = Uuid::from_u128(1);
+        assert_golden_eq(
+            "Record",
+            &Response::Record {
+                id,
+                fields: vec![(0, ScanValue::Str("labrador".into()))],
+            },
+            &bytes(&[
+                &[0x00, 0x00, 0x00, 0x00],
+                &ID1,
+                &LEN1,
+                &[0x00, 0x00],             // field tag
+                &[0x03, 0x00, 0x00, 0x00], // ScanValue::Str
+                &[0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+                b"labrador",
+            ]),
+        );
+        assert_golden_eq(
+            "RecordList",
+            &Response::RecordList {
+                records: vec![id, Uuid::from_u128(2)],
+            },
+            &bytes(&[
+                &[0x01, 0x00, 0x00, 0x00],
+                &[0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+                &ID1,
+                &ID2,
+            ]),
+        );
+        assert_golden_eq(
+            "ScanValues",
+            &Response::ScanValues {
+                values: vec![ScanValue::U32(3)],
+            },
+            &bytes(&[
+                &[0x02, 0x00, 0x00, 0x00],
+                &LEN1,
+                &[0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00],
+            ]),
+        );
+        assert_golden_eq(
+            "Id",
+            &Response::Id {
+                id: Uuid::from_u128(2),
+            },
+            &bytes(&[&[0x03, 0x00, 0x00, 0x00], &ID2]),
+        );
+        assert_golden_eq(
+            "Schema",
+            &Response::Schema(DomainSchema {
+                fields: vec![FieldDescriptor {
+                    tag: 1,
+                    name: "age".into(),
+                    value_kind: ValueKind::U32,
+                    capabilities: FieldCapabilities {
+                        filter_eq: true,
+                        scan: true,
+                        update: true,
+                    },
+                }],
+                relations: RelationCapabilities {
+                    parent_children: false,
+                    neighbors: true,
+                },
+            }),
+            &bytes(&[
+                &[0x04, 0x00, 0x00, 0x00],
+                &LEN1,
+                &[0x01, 0x00], // tag
+                &[0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+                b"age",
+                &[0x00, 0x00, 0x00, 0x00], // ValueKind::U32
+                &[0x01, 0x01, 0x01],       // capabilities
+                &[0x00, 0x01],             // relations
+            ]),
+        );
+        assert_golden_eq("NotFound", &Response::NotFound, &[0x05, 0x00, 0x00, 0x00]);
+        assert_golden_eq("NoParent", &Response::NoParent, &[0x06, 0x00, 0x00, 0x00]);
+        assert_golden_eq("Ok", &Response::Ok, &[0x07, 0x00, 0x00, 0x00]);
+        assert_golden_eq(
+            "Err",
+            &Response::Err {
+                code: ErrorCode::UnknownField,
+                message: "x".into(),
+            },
+            &bytes(&[
+                &[0x08, 0x00, 0x00, 0x00],
+                &[0x00, 0x00, 0x00, 0x00], // ErrorCode::UnknownField
+                &LEN1,
+                b"x",
+            ]),
+        );
+        assert_golden_eq(
+            "TransactionFailed",
+            &Response::TransactionFailed {
+                index: 1,
+                code: ErrorCode::RecordNotFound,
+                message: "x".into(),
+            },
+            &bytes(&[
+                &[0x09, 0x00, 0x00, 0x00],
+                &[0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], // usize: 8 bytes
+                &[0x05, 0x00, 0x00, 0x00],                         // ErrorCode::RecordNotFound
+                &LEN1,
+                b"x",
+            ]),
+        );
+    }
 
     #[test]
     fn request_and_response_round_trip_through_bincode() {

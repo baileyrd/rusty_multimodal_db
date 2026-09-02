@@ -33,3 +33,57 @@ pub fn fresh_temp_dir(label: &str) -> std::io::Result<std::path::PathBuf> {
     std::fs::create_dir_all(&dir)?;
     Ok(dir)
 }
+
+/// Format bytes as a ready-to-paste Rust byte-array literal body
+/// (`0x01, 0x02, …`), so a golden-vector test that fails prints the
+/// bytes in the exact form the pinned constant is written in.
+#[cfg(test)]
+pub(crate) fn hex_literal(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|b| format!("0x{b:02x}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The golden-vector check every `BINENC-FR-004` test makes: `value`
+/// encodes to exactly `golden`, and `golden` decodes to a value that
+/// encodes to `golden` again (the decode half stated without needing
+/// `PartialEq` — `Request` has none). `label` names the vector in the
+/// failure message, which also prints the actual bytes as a literal.
+#[cfg(test)]
+#[track_caller]
+pub(crate) fn assert_golden<T>(label: &str, value: &T, golden: &[u8])
+where
+    T: serde::Serialize + serde::de::DeserializeOwned,
+{
+    let encoded = bincode::serialize(value).unwrap();
+    assert_eq!(
+        encoded,
+        golden,
+        "{label}: encoding drifted from the pinned bytes; actual: [{}]",
+        hex_literal(&encoded)
+    );
+    let decoded: T = bincode::deserialize(golden).unwrap();
+    assert_eq!(
+        bincode::serialize(&decoded).unwrap(),
+        golden,
+        "{label}: the pinned bytes did not decode to a value that re-encodes to them"
+    );
+}
+
+/// [`assert_golden`] plus `decode(golden) == value` for types that can
+/// say so directly.
+#[cfg(test)]
+#[track_caller]
+pub(crate) fn assert_golden_eq<T>(label: &str, value: &T, golden: &[u8])
+where
+    T: serde::Serialize + serde::de::DeserializeOwned + PartialEq + std::fmt::Debug,
+{
+    assert_golden(label, value, golden);
+    let decoded: T = bincode::deserialize(golden).unwrap();
+    assert_eq!(
+        &decoded, value,
+        "{label}: the pinned bytes decode to a different value"
+    );
+}
