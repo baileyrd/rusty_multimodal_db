@@ -1,6 +1,6 @@
 # STORAGE-018 — bincode encoding stability (one `pub(crate)` codec, golden vectors, trailing bytes rejected)
 
-- Version: 0.1.0
+- Version: 0.1.1
 - Status: Accepted
 - Owners: baileyrd
 - Depends on: ADR-0021 and `docs/design/BINCODE-ENCODING-STABILITY-DESIGN.md`
@@ -299,16 +299,38 @@ to it:
 - **`Uuid` at 24 bytes.** A `[u8; 16]` newtype saves a third of every
   id and is a format change to every blob and every frame. Recorded,
   not proposed.
-- **`DOGBLOB\0` fingerprint-before-decode.** Reordering `RecordBlob::
-  read` to hash bytes first, as the generic blobs do, would make the
-  junk case a fingerprint mismatch there too and let a corrupt body
-  fail before `bincode` sees it. Not this unit — it changes what the
-  fingerprint is *over*, which is a `BLOB_VERSION` bump for a blob the
-  crate's own tests and benches rewrite freely; worth doing only with
-  a driver.
+- **`DOGBLOB\0` fingerprint-before-decode — closed as not warranted
+  (v0.1.1, owner's call).** Reordering `RecordBlob::read` to hash bytes
+  first, as the generic blobs do, would make the junk case a
+  fingerprint mismatch there too and let a corrupt body fail before
+  `bincode` sees it. Examined for a driver and found none: the `Dog`
+  blob's fingerprint is over the *decoded* fields and deliberately
+  skips `age`, so that `ProductionStore::open`'s `is_current_at`
+  (a 20-byte header read against the in-memory fingerprint) does not
+  rewrite the blob after every `update_age` — the ages file, not the
+  blob, is authoritative for ages. A byte hash includes the ages, so
+  the reorder is one of (i) a `BLOB_VERSION` 2 → 3 with a second
+  header field (byte hash checked before decode *plus* the existing
+  content fingerprint, header 20 → 28 bytes) or (ii) a v3 that zeroes
+  ages in the blob body and hashes bytes like `GENBLOB\0`; either is a
+  design-doc/ADR round for a blob only this crate's tests and benches
+  write. What it would buy: a "fingerprint mismatch" cause instead of
+  a "body does not decode" cause for a junk-tailed or corrupt body.
+  What already holds without it: the codec refuses trailing bytes
+  (criterion 6), a corrupt body fails inside `bincode` bounded by the
+  file's own length with no panic path, and a conforming writer never
+  produces either file. Re-arms only if a second writer of `DOGBLOB\0`
+  appears or the blob's read path becomes a measured cost.
 
 ## Change history
 
+- 0.1.1 (2026-09-02): Docs-only. The `DOGBLOB\0` fingerprint-before-
+  decode open question examined and closed as not warranted by the
+  owner — the reorder is a `BLOB_VERSION` 2 → 3 format change (the
+  `Dog` blob's fingerprint is over decoded, age-free content so `open`
+  does not rewrite after `update_age`; a byte hash would not be) and
+  buys only a different error cause for files no conforming writer
+  produces. No code change, no test change; re-arm trigger recorded.
 - 0.1.0 (2026-09-02): Initial accepted draft, alongside the real
   implementation (`src/codec.rs`, `src/lib.rs`, the
   `src/test_support.rs` golden helpers, 23 call-site renames across
