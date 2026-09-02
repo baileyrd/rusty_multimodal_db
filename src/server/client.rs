@@ -71,6 +71,25 @@
 //! plaintext `connect_authenticated` there fails at the `Hello`, before
 //! any token is written, so it never leaks the token.
 //!
+//! # Transaction sessions (`Begin`/`Commit`/`Rollback`), `SERVER-001-FR-024`
+//!
+//! [`SchemaDrivenClient::begin`] opens a server-side session (ADR-0024,
+//! `docs/design/SERVER-TRANSACTION-SESSION-DESIGN.md` Part A) and hands
+//! back a [`Session`]: [`Session::update`] *stages* a write — the server
+//! answers with its index in the eventual batch and applies nothing —
+//! and [`Session::commit`] applies every staged write as one batch,
+//! exactly the all-or-nothing `Request::Transaction` gives, or fails as
+//! [`ClientError::TransactionFailed`] naming that index with nothing
+//! applied; [`Session::rollback`] discards, and dropping a `Session`
+//! without either sends a best-effort `Rollback`. No lock is held on the
+//! server between round trips, so a stalled session costs nobody else
+//! anything. Reads made while a session is open — through the client
+//! that owns it or any other — see committed state only; a write is
+//! never visible before `commit` returns `Ok`. The session requests are
+//! protocol version 3, so `begin` is the client's first version-gated
+//! API (compatibility rule 4): against a server that negotiated below 3
+//! it is [`ClientError::Unsupported`] with no frame sent.
+//!
 //! # Transport encryption (`TlsConfig`), `SERVER-001-FR-022`
 //!
 //! A `TlsConfig`-configured server completes a TLS handshake before it
@@ -137,6 +156,15 @@ pub enum ClientError {
     UnknownField(String),
     Unsupported(&'static str),
     Server(ErrorCode, String),
+    /// A session's [`Session::commit`] was rejected: `index` names the
+    /// first staged write that failed its precondition (the value
+    /// [`Session::update`] returned for it) and nothing was applied
+    /// (`SESS-FR-002`, `FR-024`).
+    TransactionFailed {
+        index: usize,
+        code: ErrorCode,
+        message: String,
+    },
     UnexpectedResponse(&'static str),
 }
 
@@ -152,6 +180,14 @@ impl fmt::Display for ClientError {
                 write!(f, "{what} is not supported by this domain's schema")
             }
             ClientError::Server(code, message) => write!(f, "server error {code:?}: {message}"),
+            ClientError::TransactionFailed {
+                index,
+                code,
+                message,
+            } => write!(
+                f,
+                "transaction rejected at staged write {index}: {code:?}: {message}"
+            ),
             ClientError::UnexpectedResponse(expected) => {
                 write!(f, "expected a {expected} response, got a different shape")
             }
@@ -335,6 +371,84 @@ impl Write for Transport {
     }
 }
 
+/// An open transaction session on a [`SchemaDrivenClient`] (`FR-024`,
+/// ADR-0024) — see this module's own "Transaction sessions" section.
+/// Borrows the client for its lifetime; [`Session::commit`] and
+/// [`Session::rollback`] consume it, and `Drop` rolls back a session
+/// neither was called on (best effort: an I/O error there is ignored,
+/// since the server discards the session on disconnect anyway).
+pub struct Session<'a> {
+    client: &'a mut SchemaDrivenClient,
+    open: bool,
+}
+
+impl Session<'_> {
+    /// Stage a write (`SESS-FR-002`): the same client-side capability
+    /// checks as [`SchemaDrivenClient::update`], then `Request::UpdateField`
+    /// answered `Response::Staged` — the returned index is the write's
+    /// position in the batch [`Session::commit`] will apply, and the one a
+    /// `TransactionFailed` would name. Nothing is applied here; the
+    /// server validates at commit. `ErrorCode::SessionFull` once
+    /// `MAX_STAGED_OPS` are staged (the session stays open).
+    pub fn update(
+        &mut self,
+        id: RecordId,
+        field_name: &str,
+        value: ScanValue,
+    ) -> Result<u32, ClientError> {
+        let field = self.client.field(field_name)?;
+        if !field.capabilities.update {
+            return Err(ClientError::Unsupported("update on this field"));
+        }
+        let tag = field.tag;
+        match self.client.roundtrip(Request::UpdateField {
+            id,
+            field: tag,
+            value,
+        })? {
+            Response::Staged { index } => Ok(index),
+            Response::Err { code, message } => Err(ClientError::Server(code, message)),
+            _ => Err(ClientError::UnexpectedResponse("Staged")),
+        }
+    }
+
+    /// Apply every staged write as one all-or-nothing batch and close the
+    /// session. `Ok(())` means every write is now visible to every
+    /// connection; [`ClientError::TransactionFailed`] means none is.
+    pub fn commit(mut self) -> Result<(), ClientError> {
+        self.open = false;
+        match self.client.roundtrip(Request::Commit)? {
+            Response::Ok => Ok(()),
+            Response::TransactionFailed {
+                index,
+                code,
+                message,
+            } => Err(ClientError::TransactionFailed {
+                index,
+                code,
+                message,
+            }),
+            Response::Err { code, message } => Err(ClientError::Server(code, message)),
+            _ => Err(ClientError::UnexpectedResponse("Ok or TransactionFailed")),
+        }
+    }
+
+    /// Discard every staged write and close the session.
+    pub fn rollback(mut self) -> Result<(), ClientError> {
+        self.open = false;
+        let resp = self.client.roundtrip(Request::Rollback)?;
+        SchemaDrivenClient::expect_ok(resp)
+    }
+}
+
+impl Drop for Session<'_> {
+    fn drop(&mut self) {
+        if self.open {
+            let _ = self.client.roundtrip(Request::Rollback);
+        }
+    }
+}
+
 /// A real client to one server/query-layer domain, built entirely from
 /// what [`Request::DescribeSchema`] reports at connect time — see this
 /// module's own doc comment.
@@ -487,6 +601,26 @@ impl SchemaDrivenClient {
     /// `PROTOCOL_VERSION` against a server from the same build.
     pub fn server_protocol_version(&self) -> u32 {
         self.server_protocol_version
+    }
+
+    /// Open a transaction session on this connection (`FR-024`; see this
+    /// module's own "Transaction sessions" section). Requires a server
+    /// that negotiated protocol version 3 or later —
+    /// `ClientError::Unsupported("session")` otherwise, before any frame is
+    /// sent (compatibility rule 4). The server refuses a second `Begin`
+    /// while one is open (`ErrorCode::SessionOpen`); the returned
+    /// [`Session`] borrows this client mutably, so that cannot happen from
+    /// safe use of this API.
+    pub fn begin(&mut self) -> Result<Session<'_>, ClientError> {
+        if self.server_protocol_version < 3 {
+            return Err(ClientError::Unsupported("session"));
+        }
+        let resp = self.roundtrip(Request::Begin)?;
+        Self::expect_ok(resp)?;
+        Ok(Session {
+            client: self,
+            open: true,
+        })
     }
 
     /// The schema discovered at connect time — every field's name, wire

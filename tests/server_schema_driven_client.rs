@@ -24,7 +24,7 @@ use rusty_multimodal_db::server::client::{ClientError, SchemaDrivenClient};
 use rusty_multimodal_db::server::dog::DogConnectionStore;
 use rusty_multimodal_db::server::employee::EmployeeConnectionStore;
 use rusty_multimodal_db::server::order::OrderConnectionStore;
-use rusty_multimodal_db::server::protocol::{ParentLookup, ScanValue};
+use rusty_multimodal_db::server::protocol::{ErrorCode, ParentLookup, ScanValue};
 use rusty_multimodal_db::server::{serve, AuthConfig};
 use rusty_multimodal_db::ProductionStore;
 use std::net::{SocketAddr, TcpListener};
@@ -299,4 +299,124 @@ fn an_unknown_field_name_is_a_client_side_error_no_round_trip_needed() {
         client.update(Uuid::from_u128(1), "nonexistent_field", ScanValue::U32(0)),
         Err(ClientError::UnknownField(_))
     ));
+}
+
+fn value_of(client: &mut SchemaDrivenClient, id: Uuid, field: &str) -> ScanValue {
+    client
+        .get(id)
+        .unwrap()
+        .unwrap()
+        .into_iter()
+        .find_map(|(name, value)| (name == field).then_some(value))
+        .unwrap_or_else(|| panic!("no field {field:?}"))
+}
+
+/// `SESS-FR-008` (design criterion 7, `SERVER-001-FR-024`): `begin` →
+/// `Session::update` (the staged index) → `commit` applies; `rollback`
+/// and a dropped `Session` discard; a rejected commit is
+/// `ClientError::TransactionFailed` naming the staged index with nothing
+/// applied; the client-side capability check still runs before staging.
+/// All three domains, by field name only.
+#[test]
+fn sessions_stage_commit_and_roll_back_on_every_domain() {
+    let mut dog = SchemaDrivenClient::connect(start_dog_server()).unwrap();
+    assert_eq!(dog.server_protocol_version(), 3);
+
+    let mut s = dog.begin().unwrap();
+    assert_eq!(
+        s.update(Uuid::from_u128(1), "age", ScanValue::U32(7))
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        s.update(Uuid::from_u128(2), "age", ScanValue::U32(8))
+            .unwrap(),
+        1
+    );
+    s.commit().unwrap();
+    assert_eq!(
+        value_of(&mut dog, Uuid::from_u128(1), "age"),
+        ScanValue::U32(7)
+    );
+    assert_eq!(
+        value_of(&mut dog, Uuid::from_u128(2), "age"),
+        ScanValue::U32(8)
+    );
+
+    let mut s = dog.begin().unwrap();
+    s.update(Uuid::from_u128(1), "age", ScanValue::U32(99))
+        .unwrap();
+    s.rollback().unwrap();
+    assert_eq!(
+        value_of(&mut dog, Uuid::from_u128(1), "age"),
+        ScanValue::U32(7)
+    );
+
+    {
+        let mut s = dog.begin().unwrap();
+        s.update(Uuid::from_u128(1), "age", ScanValue::U32(99))
+            .unwrap();
+        // Dropped without commit or rollback: rolled back best-effort.
+    }
+    assert_eq!(
+        value_of(&mut dog, Uuid::from_u128(1), "age"),
+        ScanValue::U32(7)
+    );
+
+    let mut s = dog.begin().unwrap();
+    assert!(matches!(
+        s.update(Uuid::from_u128(1), "breed", ScanValue::Str("x".into())),
+        Err(ClientError::Unsupported(_))
+    ));
+    assert!(matches!(
+        s.update(Uuid::from_u128(1), "nonexistent", ScanValue::U32(0)),
+        Err(ClientError::UnknownField(_))
+    ));
+    assert_eq!(
+        s.update(Uuid::from_u128(99), "age", ScanValue::U32(1))
+            .unwrap(),
+        0
+    );
+    match s.commit() {
+        Err(ClientError::TransactionFailed {
+            index: 0,
+            code: ErrorCode::RecordNotFound,
+            ..
+        }) => {}
+        other => panic!("expected TransactionFailed at staged index 0, got {other:?}"),
+    }
+    assert_eq!(
+        value_of(&mut dog, Uuid::from_u128(1), "age"),
+        ScanValue::U32(7)
+    );
+
+    let mut order = SchemaDrivenClient::connect(start_order_server()).unwrap();
+    let mut s = order.begin().unwrap();
+    assert_eq!(
+        s.update(Uuid::from_u128(1), "amount_cents", ScanValue::I64(9_000))
+            .unwrap(),
+        0
+    );
+    s.commit().unwrap();
+    assert_eq!(
+        value_of(&mut order, Uuid::from_u128(1), "amount_cents"),
+        ScanValue::I64(9_000)
+    );
+
+    let mut employee = SchemaDrivenClient::connect(start_employee_server()).unwrap();
+    let mut s = employee.begin().unwrap();
+    assert_eq!(
+        s.update(
+            Uuid::from_u128(1),
+            "salary_cents",
+            ScanValue::I64(1_500_000)
+        )
+        .unwrap(),
+        0
+    );
+    s.commit().unwrap();
+    assert_eq!(
+        value_of(&mut employee, Uuid::from_u128(1), "salary_cents"),
+        ScanValue::I64(1_500_000)
+    );
 }

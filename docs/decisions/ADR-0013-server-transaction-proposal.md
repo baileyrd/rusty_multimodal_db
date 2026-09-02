@@ -215,6 +215,10 @@ interfaces" section for the full reasoning. Summarized:
   session — a real, larger design (idle timeouts, a forced-abort policy,
   probably a cap of one open transaction per connection, a real fairness
   story) would need its own proposal, not a small extension of this one.
+  *Taken: `ADR-0024` / `SERVER-TRANSACTION-SESSION-DESIGN.md` Part A,
+  implemented as `SERVER-001` v0.14.0 / FR-024 in the PR after #138 — the
+  session is buffered, not lock-held, so none of the liveness machinery
+  listed here was needed; no change to this decision.*
 - Revisit if: crash-atomicity across a batch becomes a real need — would
   need a combined-journal or two-phase-commit-style mechanism, a real
   durability redesign, not a small extension of this proposal's

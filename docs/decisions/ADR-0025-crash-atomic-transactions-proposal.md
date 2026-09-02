@@ -207,4 +207,4 @@ Proposed: option 1. Concretely, at implementation:
 - 2026-09-02: accepted as proposed (option (a); (b) and (c) declined).
   Implemented after `ADR-0024`'s unit, as `SERVER-001` v0.15.0 /
   FR-025, per `docs/design/SERVER-TRANSACTION-SESSION-DESIGN.md` Part
-  B. (This PR.)
+  B. (PR #138.)

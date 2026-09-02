@@ -192,7 +192,9 @@ Accepted: option 3. Concretely, at implementation:
 - Revisit if: the first version-3 variant is proposed — that change
   adds the per-connection negotiated version and rule (iii)'s branch,
   bumps `PROTOCOL_VERSION` to 3, and extends the table; its ADR cites
-  this one.
+  this one. *Taken: `ADR-0024` (transaction sessions), implemented as
+  `SERVER-001` v0.14.0 / FR-024 in the PR after #138 — exactly that
+  change, as predicted; no change to this decision.*
 - Revisit if: a change cannot be expressed by appending — a major
   protocol break. That is a new design (a `min_supported` in the hello,
   or a new magic), not a bump; nothing here anticipates it beyond

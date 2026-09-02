@@ -513,6 +513,10 @@ v0.2.0 with an ADR-0009 addendum rather than being folded silently into
   liveness-management design it would need is entirely the owner's call,
   not decided here — this document only records why it's out of scope
   *for this proposal*, not that it's permanently off the table.
+  *Resolved: `SERVER-TRANSACTION-SESSION-DESIGN.md` Part A / `ADR-0024`,
+  implemented as `SERVER-001` v0.14.0 / FR-024 — a *buffered* session
+  that holds no lock across round trips, so the liveness-management
+  design this question anticipated was never needed.*
 
 ## Change history
 

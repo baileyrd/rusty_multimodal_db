@@ -108,11 +108,13 @@
 //! is `ErrorCode::Malformed` and the connection stays open
 //! (`PROTO-FR-004`). A client that never says `Hello` speaks version 1
 //! (the `SERVER-001` v0.9.1 shape) and is served exactly as before — no
-//! existing client, test, or bench changed (`PROTO-FR-002`). No
-//! negotiated-version state is stored at version 2: there is no
-//! version-gated variant yet to consult it (rule 3 in
-//! [`crate::server::protocol`] names where that state goes when the first
-//! one arrives).
+//! existing client, test, or bench changed (`PROTO-FR-002`). Since
+//! protocol version 3 (`SERVER-001` FR-024, ADR-0024) the negotiated
+//! version *is* kept per connection, because the first gated variants —
+//! the transaction-session requests — consult it: rule 3 in
+//! [`crate::server::protocol`] got its first branch exactly where
+//! ADR-0022 said it would (see `handle_connection`'s own "Transaction
+//! sessions" section).
 
 pub mod client;
 pub mod dog;
@@ -126,7 +128,7 @@ pub mod protocol;
 
 use protocol::{
     DomainSchema, ErrorCode, FieldRef, ParentLookup, RecordId, Request, Response, ScanValue,
-    TransactionOp, PROTOCOL_VERSION,
+    TransactionOp, MAX_STAGED_OPS, PROTOCOL_VERSION,
 };
 use std::cell::RefCell;
 use std::io::{self, BufReader, BufWriter, Read, Write};
@@ -218,6 +220,9 @@ fn error_message(code: ErrorCode) -> &'static str {
         ErrorCode::Unauthenticated => "this connection has not presented a recognized token",
         ErrorCode::Unauthorized => "this connection's token does not permit this operation",
         ErrorCode::RecordNotFound => "this operation's id has no record",
+        ErrorCode::NoSession => "no transaction session is open on this connection",
+        ErrorCode::SessionOpen => "a transaction session is already open on this connection",
+        ErrorCode::SessionFull => "this session already holds the maximum number of staged writes",
     }
 }
 
@@ -623,6 +628,11 @@ pub fn dispatch<S: ConnectionStore + ?Sized>(store: &S, req: Request) -> Respons
         // negotiation `handle_connection` answers itself (`PROTO-FR-003`),
         // and a store has nothing to say about it.
         Request::Hello { .. } => err_response(ErrorCode::Unsupported),
+        // Protocol 3, `SESS-FR-006`: a session is per-connection state
+        // `handle_connection` owns; a store has nothing to say about it.
+        Request::Begin | Request::Commit | Request::Rollback => {
+            err_response(ErrorCode::Unsupported)
+        }
         Request::Transaction { updates } => match store.apply_transaction(&updates) {
             Ok(()) => Response::Ok,
             Err((index, code)) => Response::TransactionFailed {
@@ -690,6 +700,27 @@ fn send_response(writer: &mut BufWriter<WriteHalf>, resp: &Response) -> bool {
 /// `min(client, PROTOCOL_VERSION)`; otherwise `ErrorCode::Malformed`,
 /// with the connection left open. A connection whose first frame is not
 /// a `Hello` is served at version 1 with no other change (`PROTO-FR-002`).
+///
+/// # Transaction sessions (`SESS-FR-002`–`SESS-FR-006`), ADR-0024
+///
+/// Protocol 3 adds the first per-connection state after `authenticated`:
+/// the *negotiated version* (kept at last — `ADR-0022` deferred it until
+/// a gated variant existed) and an optional *session*, a buffer of
+/// staged `TransactionOp`s. `Begin` opens it; while it is open every
+/// `UpdateField` the gates admit is pushed and answered `Staged { index }`
+/// — nothing applied, no lock taken, no validation (commit validates);
+/// `Commit` hands the buffer to `ConnectionStore::apply_transaction`
+/// exactly as a `Request::Transaction` would and closes the session
+/// either way; `Rollback` or a disconnect discards it. No lock is ever
+/// held between round trips — the only lock a session takes is
+/// `apply_transaction`'s own, at `Commit`, for the same interval a
+/// `Transaction` of the same batch holds it (`SESS-FR-003`). The three
+/// requests sit *after* the auth and `ReadOnly` gates (`Commit` joins
+/// `UpdateField`/`Transaction` in the latter) and are `Malformed` on a
+/// connection negotiated below 3 — a silent client included — so no
+/// version-3 response shape is ever sent on an older connection
+/// (compatibility rule 3). Misuse (`NoSession`, `SessionOpen`,
+/// `SessionFull`) is a typed error with the connection open.
 fn handle_connection<S: ConnectionStore + ?Sized>(
     stream: TcpStream,
     store: &S,
@@ -737,11 +768,14 @@ fn handle_connection<S: ConnectionStore + ?Sized>(
         Some(TokenClass::ReadWrite)
     };
 
-    // `PROTO-FR-004`: only the very first frame may be a `Hello`. This is
-    // the one piece of per-connection version state at protocol version 2
-    // — the negotiated version itself is not kept, because nothing yet
-    // consults it (see `protocol`'s compatibility rule 3).
+    // `PROTO-FR-004`: only the very first frame may be a `Hello`. Since
+    // protocol 3 the negotiated version is kept too (`SESS-FR-006`): the
+    // session requests consult it, exactly the moment `ADR-0022` said the
+    // state would appear. A silent client is version 1.
     let mut first_frame = true;
+    let mut negotiated: u32 = 1;
+    // `SESS-FR-002`: the staged writes of an open session, if any.
+    let mut session: Option<Vec<TransactionOp>> = None;
 
     loop {
         let req: Request = match framing::read_message(&mut reader) {
@@ -753,8 +787,9 @@ fn handle_connection<S: ConnectionStore + ?Sized>(
             let resp = if !first_frame || *protocol_version == 0 {
                 err_response(ErrorCode::Malformed)
             } else {
+                negotiated = (*protocol_version).min(PROTOCOL_VERSION);
                 Response::Hello {
-                    protocol_version: (*protocol_version).min(PROTOCOL_VERSION),
+                    protocol_version: negotiated,
                 }
             };
             first_frame = false;
@@ -796,7 +831,7 @@ fn handle_connection<S: ConnectionStore + ?Sized>(
         if class == TokenClass::ReadOnly
             && matches!(
                 req,
-                Request::UpdateField { .. } | Request::Transaction { .. }
+                Request::UpdateField { .. } | Request::Transaction { .. } | Request::Commit
             )
         {
             if !send_response(&mut writer, &err_response(ErrorCode::Unauthorized)) {
@@ -805,7 +840,53 @@ fn handle_connection<S: ConnectionStore + ?Sized>(
             continue;
         }
 
-        let resp = dispatch(store, req);
+        // `SESS-FR-002`/`SESS-FR-004`/`SESS-FR-006`: the session intercepts.
+        let resp = match req {
+            Request::Begin | Request::Commit | Request::Rollback if negotiated < 3 => {
+                err_response(ErrorCode::Malformed)
+            }
+            Request::Begin => {
+                if session.is_some() {
+                    err_response(ErrorCode::SessionOpen)
+                } else {
+                    session = Some(Vec::new());
+                    Response::Ok
+                }
+            }
+            Request::Rollback => {
+                if session.take().is_some() {
+                    Response::Ok
+                } else {
+                    err_response(ErrorCode::NoSession)
+                }
+            }
+            Request::Commit => match session.take() {
+                None => err_response(ErrorCode::NoSession),
+                Some(batch) => match store.apply_transaction(&batch) {
+                    Ok(()) => Response::Ok,
+                    Err((index, code)) => Response::TransactionFailed {
+                        index,
+                        code,
+                        message: error_message(code).to_string(),
+                    },
+                },
+            },
+            Request::UpdateField { id, field, value } if session.is_some() => {
+                match session.as_mut() {
+                    Some(staged) if staged.len() < MAX_STAGED_OPS => {
+                        staged.push(TransactionOp { id, field, value });
+                        Response::Staged {
+                            index: (staged.len() - 1) as u32,
+                        }
+                    }
+                    _ => err_response(ErrorCode::SessionFull),
+                }
+            }
+            Request::Transaction { .. } if session.is_some() => {
+                err_response(ErrorCode::SessionOpen)
+            }
+            other => dispatch(store, other),
+        };
         if !send_response(&mut writer, &resp) {
             return;
         }
@@ -1198,6 +1279,16 @@ mod tests {
             ),
             err_response(ErrorCode::Unsupported)
         );
+    }
+
+    /// `SESS-FR-006`'s dispatch half: the session requests are
+    /// per-connection, like `Authenticate` and `Hello`.
+    #[test]
+    fn dispatch_never_routes_session_requests_to_a_store() {
+        let store = FixtureStore;
+        for req in [Request::Begin, Request::Commit, Request::Rollback] {
+            assert_eq!(dispatch(&store, req), err_response(ErrorCode::Unsupported));
+        }
     }
 
     /// Spin up `serve` over `FixtureStore` on a loopback port with
