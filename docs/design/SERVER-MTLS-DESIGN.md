@@ -1,9 +1,11 @@
-# Server Mutual TLS Design (Proposed)
+# Server Mutual TLS Design (Accepted)
 
-- Status: **Proposed** (not yet accepted; no implementation authorized).
-  Acceptance would authorize the design; implementation would follow as
-  its own unit — see ADR-0023's own "Acceptance and implementation"
-  section once it lands.
+- Status: **Accepted** (promoted from Proposed on 2026-09-02 — the owner
+  approved the design as proposed, option (a): admission gate layered
+  under `AuthConfig`; (b) hold for class-from-certificate and (c) close
+  as not warranted declined; no changes requested). Acceptance
+  authorizes the design; implementation follows as its own unit — see
+  ADR-0023's own "Acceptance and implementation" section.
 - Date: 2026-09-02
 - Related: `docs/design/SERVER-TLS-DESIGN.md` / `docs/decisions/ADR-0014-server-transport-encryption-proposal.md`
   (native TLS, Accepted and implemented as `SERVER-001` v0.9.0 / FR-019;
@@ -452,3 +454,7 @@ error it already handles. Its module doc gains the third variable.
   mTLS revisit (ADR-0014's first trigger) as the second of four next
   directions, after the legacy Evidence backfill and before the
   transaction-session design and the reconnect-without-hello fallback.
+  (PR #133.)
+- 2026-09-02: Accepted as proposed; the verification plan's throwaway
+  probe ran first and confirmed every assertion this document made from
+  reading source (see ADR-0023's acceptance log). No content change.
