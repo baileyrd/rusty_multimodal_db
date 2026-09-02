@@ -1,7 +1,8 @@
-# bincode Encoding Stability Design (Proposed)
+# bincode Encoding Stability Design (Accepted)
 
-- Status: **Proposed** (owner's call; the acceptance question is in
-  "Acceptance criteria" and the ADR's "Acceptance and implementation")
+- Status: **Accepted** (promoted from Proposed on 2026-09-02 — accepted
+  as proposed: option (a), `reject_trailing_bytes()`; spec `STORAGE-018`;
+  no changes requested)
 - Date: 2026-09-02
 - Related: `docs/decisions/ADR-0021-bincode-encoding-stability-proposal.md`
   (the decision record this document backs), `ADR-0010` and `SERVER-001`
@@ -634,7 +635,7 @@ capture time.)
 | `BINENC-FR-006` | `options()`'s trailing policy; acceptance criterion 4 |
 | `BINENC-FR-007` | `ADR-0010`, `SERVER-001`, `PROJECT-STATUS` item 33, `ADR-0019` pointers |
 | `BINENC-FR-008` | `Cargo.toml` untouched; `BLOB_VERSION`s untouched; `pub(crate)` |
-| Spec | one new spec registered at implementation — recommended `STORAGE-018` (the codec is the storage layer's shared encoding; `SERVER-001` amended to cite it) over a new `ENCODING-` category; owner's call, flagged at acceptance |
+| Spec | `STORAGE-018`, registered at implementation (the codec is the storage layer's shared encoding; `SERVER-001` amended to cite it) — approved over a new `ENCODING-` category at acceptance |
 
 ## Open questions
 
@@ -651,9 +652,11 @@ capture time.)
   this configuration. A `[u8; 16]`-serializing newtype would save a
   third of every id — and is a format change to every blob and every
   frame. Not proposed; recorded so the cost is known.
-- **Spec placement.** `STORAGE-018` (recommended) versus a new category.
-  Flagged for acceptance.
+- **Spec placement.** Resolved at acceptance: `STORAGE-018`, not a new
+  category.
 
 ## Change history
 
 - 2026-09-02: Proposed.
+- 2026-09-02: Accepted as proposed (option (a), `reject_trailing_bytes()`;
+  spec `STORAGE-018`). No changes to the design text beyond status.
