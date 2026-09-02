@@ -10,6 +10,7 @@
 //! (`Reversed` never forwarded `Neighbors`; `GenericProductionStore` had
 //! no `neighbors` method) before this adapter could even be written.
 
+use super::journal::{BatchJournal, CheckpointFlush, JournalError};
 use super::protocol::{
     DomainSchema, ErrorCode, FieldCapabilities, FieldDescriptor, FieldRef, ParentLookup, RecordId,
     RelationCapabilities, ScanValue, TransactionOp, ValueKind,
@@ -21,6 +22,8 @@ use crate::generic_spike::employee_impl::{
     CollaboratesWith, Department, DepartmentField, Employee, EmployeeProductionStack, ReportsTo,
     SalaryCents,
 };
+use std::path::Path;
+use std::sync::Mutex;
 
 pub const FIELD_NAME: FieldRef = 0;
 pub const FIELD_DEPARTMENT: FieldRef = 1;
@@ -48,11 +51,77 @@ fn department_from_u32(value: u32) -> Option<Department> {
 
 pub struct EmployeeConnectionStore {
     store: GenericProductionStore<EmployeeProductionStack>,
+    /// `JRN-FR-001` (ADR-0025) — see `DogConnectionStore::with_journal`.
+    journal: Option<Mutex<BatchJournal>>,
 }
 
 impl EmployeeConnectionStore {
     pub fn new(store: GenericProductionStore<EmployeeProductionStack>) -> Self {
-        Self { store }
+        Self {
+            store,
+            journal: None,
+        }
+    }
+
+    /// The crash-atomic variant — see `DogConnectionStore::with_journal`
+    /// for the contract; identical here.
+    pub fn with_journal(
+        store: GenericProductionStore<EmployeeProductionStack>,
+        journal_path: &Path,
+    ) -> Result<Self, JournalError> {
+        let (mut journal, batches) = BatchJournal::open(journal_path)?;
+        store.with_exclusive(|inner| -> Result<(), JournalError> {
+            for (batch_index, batch) in batches.iter().enumerate() {
+                Self::apply_batch(inner, batch).map_err(|(index, code)| JournalError::Replay {
+                    batch: batch_index,
+                    index,
+                    code,
+                })?;
+            }
+            inner.checkpoint_flush()?;
+            journal.truncate()
+        })?;
+        Ok(Self {
+            store,
+            journal: Some(Mutex::new(journal)),
+        })
+    }
+
+    /// Same validate-then-apply shape `server::dog`'s own uses —
+    /// `Employee`'s only mutable field over this protocol is
+    /// `salary_cents`. Safe under one continuously held lock: see
+    /// `docs/design/SERVER-TRANSACTION-DESIGN.md`'s own "no runtime
+    /// deletion" invariant.
+    fn validate_batch(
+        inner: &EmployeeProductionStack,
+        updates: &[TransactionOp],
+    ) -> Result<(), (usize, ErrorCode)> {
+        for (i, op) in updates.iter().enumerate() {
+            match (op.field, &op.value) {
+                (FIELD_SALARY, ScanValue::I64(_)) => {
+                    if GetById::<Employee>::get(inner, op.id).is_none() {
+                        return Err((i, ErrorCode::RecordNotFound));
+                    }
+                }
+                (FIELD_SALARY, _) => return Err((i, ErrorCode::Malformed)),
+                (FIELD_NAME | FIELD_DEPARTMENT, _) => return Err((i, ErrorCode::Unsupported)),
+                _ => return Err((i, ErrorCode::UnknownField)),
+            }
+        }
+        Ok(())
+    }
+
+    fn apply_batch(
+        inner: &mut EmployeeProductionStack,
+        updates: &[TransactionOp],
+    ) -> Result<(), (usize, ErrorCode)> {
+        for (i, op) in updates.iter().enumerate() {
+            if let ScanValue::I64(salary) = op.value {
+                UpdateField::<Employee, SalaryCents>::update(inner, op.id, salary)
+                    .map_err(|_| (i, ErrorCode::RecordNotFound))?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -177,31 +246,23 @@ impl ConnectionStore for EmployeeConnectionStore {
 
     fn apply_transaction(&self, updates: &[TransactionOp]) -> Result<(), (usize, ErrorCode)> {
         self.store.with_exclusive(|inner| {
-            // Same validate-then-apply shape `server::dog`'s own
-            // `apply_transaction` uses — `Employee`'s only mutable field
-            // over this protocol is `salary_cents`. Safe under one
-            // continuously held lock: see
-            // `docs/design/SERVER-TRANSACTION-DESIGN.md`'s own
-            // "no runtime deletion" invariant.
-            for (i, op) in updates.iter().enumerate() {
-                match (op.field, &op.value) {
-                    (FIELD_SALARY, ScanValue::I64(_)) => {
-                        if GetById::<Employee>::get(inner, op.id).is_none() {
-                            return Err((i, ErrorCode::RecordNotFound));
-                        }
+            Self::validate_batch(inner, updates)?;
+            // See `DogConnectionStore::apply_transaction` for the journal
+            // discipline (`JRN-FR-002`/`JRN-FR-004`); identical here.
+            match &self.journal {
+                None => Self::apply_batch(inner, updates),
+                Some(journal) => {
+                    let mut journal = journal.lock().map_err(|_| (0, ErrorCode::Journal))?;
+                    journal
+                        .append(updates)
+                        .map_err(|_| (0, ErrorCode::Journal))?;
+                    Self::apply_batch(inner, updates)?;
+                    if journal.needs_checkpoint() && inner.checkpoint_flush().is_ok() {
+                        let _ = journal.truncate();
                     }
-                    (FIELD_SALARY, _) => return Err((i, ErrorCode::Malformed)),
-                    (FIELD_NAME | FIELD_DEPARTMENT, _) => return Err((i, ErrorCode::Unsupported)),
-                    _ => return Err((i, ErrorCode::UnknownField)),
+                    Ok(())
                 }
             }
-            for op in updates {
-                if let ScanValue::I64(salary) = op.value {
-                    UpdateField::<Employee, SalaryCents>::update(inner, op.id, salary)
-                        .expect("already validated under the same lock acquisition above");
-                }
-            }
-            Ok(())
         })
     }
 }

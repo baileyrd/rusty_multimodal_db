@@ -57,6 +57,7 @@
 //! |---|---|---|
 //! | 1 | `SERVER-001` v0.1.0 – v0.9.1 | `Request` 0–9 (`GetById` … `Transaction`), `Response` 0–9 (`Record` … `TransactionFailed`), every `ScanValue`/`ValueKind`/`ErrorCode`/`ParentLookup` variant and every struct as of v0.9.1 |
 //! | 2 | `SERVER-001` v0.10.0 | + `Request::Hello` (index 10), `Response::Hello` (index 10) |
+//! | 4 | `SERVER-001` v0.15.0 | + `ErrorCode::Journal` (9) — a journaled adapter could not journal a batch (nothing applied); carried by `Response::TransactionFailed`, and downgraded to `Unsupported` on a connection negotiated below 4 (rule 3's "nearest older shape"). ADR-0025 |
 //! | 3 | `SERVER-001` v0.14.0 | + `Request::Begin`/`Commit`/`Rollback` (11–13), `Response::Staged` (11), `ErrorCode::NoSession`/`SessionOpen`/`SessionFull` (6–8) — the first *gated* variants: a server keeps the negotiated version per connection and answers the three requests `Malformed` below 3 (rule 3); a client sends them only after negotiating ≥ 3 (rule 4). ADR-0024 |
 //!
 //! ## Compatibility rules (`PROTO-FR-005`)
@@ -92,7 +93,7 @@ use uuid::Uuid;
 /// versions" table. Bumped by exactly one in any change that appends a
 /// variant (rule 2). Version 1 is retroactively the `SERVER-001` v0.9.1
 /// shape: what a client that never sends [`Request::Hello`] speaks.
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// The most `UpdateField`s one connection may stage between
 /// [`Request::Begin`] and [`Request::Commit`] (`SESS-FR-004`, ADR-0024):
@@ -243,6 +244,12 @@ pub enum ErrorCode {
     /// writes; this one was not staged and the session stays open
     /// (`SESS-FR-004`).
     SessionFull,
+    /// Protocol 4. A journaled adapter (`JRN-FR-001`, ADR-0025) could not
+    /// append the batch to its journal before applying it — nothing was
+    /// applied. Only reachable via [`Response::TransactionFailed`] (index
+    /// 0); on a connection negotiated below 4 the server sends
+    /// [`ErrorCode::Unsupported`] in its place.
+    Journal,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -649,6 +656,8 @@ mod tests {
             (ErrorCode::NoSession, 0x06u8),
             (ErrorCode::SessionOpen, 0x07),
             (ErrorCode::SessionFull, 0x08),
+            // Protocol 4 (`JRN-FR-008`): `Journal` at 9.
+            (ErrorCode::Journal, 0x09),
         ] {
             assert_golden_eq(
                 "Err(session code)",
@@ -667,13 +676,13 @@ mod tests {
     }
 
     /// `PROTO-FR-001`/`PROTO-FR-005` rule 2: the constant matches the
-    /// module docs' table — version 3 is the one that added the session
-    /// variants (2 added `Hello`). A change that appends a variant bumps
-    /// this by exactly one and extends the table; this test is the
-    /// reminder.
+    /// module docs' table — version 4 is the one that added
+    /// `ErrorCode::Journal` (3 added the session variants, 2 `Hello`). A
+    /// change that appends a variant bumps this by exactly one and
+    /// extends the table; this test is the reminder.
     #[test]
     fn protocol_version_is_the_one_the_table_names() {
-        assert_eq!(PROTOCOL_VERSION, 3);
+        assert_eq!(PROTOCOL_VERSION, 4);
     }
 
     /// `SESS-FR-001`: the session shapes round-trip through the codec like
@@ -698,6 +707,7 @@ mod tests {
             ErrorCode::NoSession,
             ErrorCode::SessionOpen,
             ErrorCode::SessionFull,
+            ErrorCode::Journal,
         ] {
             let resp = Response::Err {
                 code,

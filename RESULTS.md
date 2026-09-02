@@ -1017,6 +1017,28 @@ Markedly lower than both prior environments (container ~37–39 µs, `Beast` ~29
 
 **Verdict: no meaningful throughput or latency cost was found for `Request::Transaction` relative to `GetById` at this benchmark's scale (a two-op batch, a 20-id pool).** The longer-held lock the design accepted as a known, named cost (see `SERVER-TRANSACTION-DESIGN.md`'s own "Architecture" section) is real in principle but not visible against this benchmark's own network-round-trip-dominated noise floor — consistent with the original `## Server / query layer` pass's own headline finding that the network/framing layer, not the in-process operation behind it, dominates these numbers at this record-count scale.
 
+### Journaled `Request::Transaction` follow-up (FR-025): the `fsync` per batch, isolated
+
+**Added alongside `SERVER-001` v0.15.0** (ADR-0025, Accepted): a domain adapter built with `with_journal` appends every batch to a redo journal and `fsync`s it *before* the first slot write, so a batch answered `Ok` survives a crash of the server process whole (`docs/design/SERVER-TRANSACTION-SESSION-DESIGN.md` Part B). The design named the cost — one `fsync` per batch — and asked for it to be measured rather than estimated. `benches/server.rs` gained a `dog-jrnl-txn` row set: the same two-op `Request::Transaction` batches as `dog-txn` above, same 20-id pool, same `THREAD_COUNTS`/`LATENCY_ITERATIONS`/`OPS_PER_THREAD`, the only difference being that the `Dog` adapter is journaled. The difference between the two row sets is therefore exactly the `fsync`.
+
+**Environment**: the same shared container as the `Request::Transaction` follow-up above (`std::thread::available_parallelism() == 4`; `THREAD_COUNTS` `[1, 4, 32, 64]`), one run, container-class storage — the absolute `fsync` cost is this container's, not a claim about any real disk; the *shape* of the result is the finding.
+
+**Single-connection, zero-contention round-trip latency** (µs/op, average of 5,000 sequential two-op batches):
+
+| Row | Latency |
+|---|---:|
+| `dog-txn` (unjournaled) | 67.1 |
+| `dog-jrnl-txn` (journaled) | 320.7 |
+
+**Aggregate throughput vs. concurrent client connections** (ops/sec, thread-per-connection):
+
+| Row | 1 thread | 4 threads | 32 threads | 64 threads |
+|---|---:|---:|---:|---:|
+| `dog-txn` (unjournaled) | 13,723 | 203,393 | 199,230 | 191,634 |
+| `dog-jrnl-txn` (journaled) | 3,182 | 3,843 | 3,395 | 3,337 |
+
+**The `fsync` is the whole story, and it serializes.** Latency rises by roughly 254 µs per batch — this container's `fsync` — against a 67 µs network round trip, so a journaled batch is about 4.8× slower single-connection. Throughput tells the sharper part: it is flat at 3.2–3.8k batches/sec at *every* thread count, where the unjournaled rows climb to ~200k at 4 threads. The append and `fsync` run inside the same exclusive section the batch already holds, so concurrent connections queue behind one `fsync` at a time; adding connections adds nothing. That is the design's cost accepted with open eyes (opt-in, off by default, paid only by journaled adapters), and it is also the exact profile ADR-0025's revisit trigger anticipated: *if the journal's `fsync` cost dominates a real workload, a group commit — one `fsync` per several batches, across connections — is the standard answer and a separate design.* This row set is the number that decision would start from. No change to any unjournaled row: `dog-txn`, `order-txn`, and `employee-txn` are within this container's run-to-run band of the follow-up above.
+
 ## External database comparison
 
 **This section is genuinely separate from everything above it**, same as `## Generic schema library`: every prior section compares backends this crate itself implements; this one is the first comparison against real, external, general-purpose databases — SQLite (`rusqlite`), Postgres (`postgres`, a locally-run server), and DuckDB (`duckdb`) — on the same three access-pattern shapes this document has always used: `get` (full-record read by UUID), `scan_ages` (whole-table average-age aggregate), and one-hop `littermate_of` traversal (here, a depth-bounded `WITH RECURSIVE` query over an adjacency table, since none of the three speak `DogStore::neighbors` natively). See ADR-0015 (Accepted) and `docs/specifications/storage/STORAGE-013-external-database-benchmark.md` for the full scope and methodology decisions; `benches/external_db.rs` for the implementation. `ProductionStore` is re-run fresh in the same process/session as the three external engines, not read back from an older run elsewhere in this document.

@@ -80,7 +80,11 @@ satisfy `MmapFieldValue`. Variable-width mutable fields stay out of scope
   sequence are two independent writes, and a crash between them leaves
   the first applied and the second not. Named as an invariant below, not
   solved — a transactional update across fields is `ADR-0013`'s domain
-  (server-side transactions), not the storage layer's.
+  (server-side transactions), not the storage layer's. *Solved at that
+  layer: `ADR-0025` / `SERVER-001` v0.15.0 / FR-025's redo journal makes
+  a server batch crash-atomic across any number of slot files without
+  touching this design's format — `CheckpointFlush` just calls `Flush`
+  own-then-inner.*
 - Changing `GenericMmapStore`'s `.mmap` format (`GMMAPST\0`,
   `SCHEMA_VERSION` 2) or the `.records` blob (`GENBLOB\0` version 2).
   Option 1 would; the proposed option 2 does not.

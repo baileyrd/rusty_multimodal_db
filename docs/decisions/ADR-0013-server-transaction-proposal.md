@@ -223,6 +223,13 @@ interfaces" section for the full reasoning. Summarized:
   need a combined-journal or two-phase-commit-style mechanism, a real
   durability redesign, not a small extension of this proposal's
   validate-then-apply mechanism.
+  *Taken: `ADR-0025` / `SERVER-TRANSACTION-SESSION-DESIGN.md` Part B,
+  implemented as `SERVER-001` v0.15.0 / FR-025 in the PR after #140 — a
+  redo journal at the domain adapter, smaller than the redesign this
+  trigger expected because this proposal's own "no runtime deletion,
+  idempotent overwrite" invariant makes redo sufficient; opt-in, so an
+  unjournaled adapter keeps exactly this proposal's guarantee. No change
+  to this decision.*
 - Revisit if: a domain ever needs a second mutating operation kind
   beyond `UpdateField` — `TransactionOp` would need to grow beyond the
   one shape this proposal fixes.

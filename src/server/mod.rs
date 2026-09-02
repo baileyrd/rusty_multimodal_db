@@ -64,7 +64,14 @@
 //! requests — a real, unaccepted-elsewhere liveness risk) **and not
 //! crash-atomic** (a process crash mid-batch can leave a partial batch
 //! durably applied) — see that design document's own "Non-goals" for the
-//! full account.
+//! full account. Both halves were later taken by
+//! `docs/design/SERVER-TRANSACTION-SESSION-DESIGN.md`: a *buffered*
+//! session (`SERVER-001` FR-024, ADR-0024) that stages writes
+//! per connection and commits them as one batch, holding no lock across
+//! round trips; and an opt-in redo journal (`SERVER-001` FR-025,
+//! ADR-0025, [`journal`]) that an adapter built with `with_journal`
+//! appends and `fsync`s before a batch's first write and replays on the
+//! next open, so a batch answered `Ok` survives a crash whole.
 //!
 //! # A real, schema-driven client
 //!
@@ -121,6 +128,7 @@ pub mod dog;
 #[cfg(feature = "research")]
 pub mod employee;
 pub mod framing;
+pub mod journal;
 #[cfg(feature = "research")]
 pub mod order;
 mod pem;
@@ -223,6 +231,31 @@ fn error_message(code: ErrorCode) -> &'static str {
         ErrorCode::NoSession => "no transaction session is open on this connection",
         ErrorCode::SessionOpen => "a transaction session is already open on this connection",
         ErrorCode::SessionFull => "this session already holds the maximum number of staged writes",
+        ErrorCode::Journal => {
+            "the batch could not be journaled before applying it; nothing was applied"
+        }
+    }
+}
+
+/// Compatibility rule 3's "nearest older shape" (`protocol.rs`): a
+/// response carrying a variant introduced after the connection's
+/// negotiated version is rewritten before it is sent. Today exactly one
+/// case exists — `ErrorCode::Journal` (version 4, ADR-0025) inside
+/// `TransactionFailed`, which a connection below 4 sees as `Unsupported`.
+/// The session shapes (version 3) never need this: they cannot arise on a
+/// connection that could not `Begin`.
+fn downgrade_for_version(resp: Response, negotiated: u32) -> Response {
+    match resp {
+        Response::TransactionFailed {
+            index,
+            code: ErrorCode::Journal,
+            ..
+        } if negotiated < 4 => Response::TransactionFailed {
+            index,
+            code: ErrorCode::Unsupported,
+            message: error_message(ErrorCode::Unsupported).to_string(),
+        },
+        other => other,
     }
 }
 
@@ -887,6 +920,7 @@ fn handle_connection<S: ConnectionStore + ?Sized>(
             }
             other => dispatch(store, other),
         };
+        let resp = downgrade_for_version(resp, negotiated);
         if !send_response(&mut writer, &resp) {
             return;
         }
@@ -1279,6 +1313,31 @@ mod tests {
             ),
             err_response(ErrorCode::Unsupported)
         );
+    }
+
+    /// `JRN-FR-008` / compatibility rule 3: `ErrorCode::Journal` is
+    /// version 4, so a connection negotiated below 4 sees `Unsupported`
+    /// in its place; nothing else is rewritten.
+    #[test]
+    fn journal_error_code_is_downgraded_below_version_4() {
+        let failed = Response::TransactionFailed {
+            index: 0,
+            code: ErrorCode::Journal,
+            message: error_message(ErrorCode::Journal).to_string(),
+        };
+        for older in [1, 2, 3] {
+            assert_eq!(
+                downgrade_for_version(failed.clone(), older),
+                Response::TransactionFailed {
+                    index: 0,
+                    code: ErrorCode::Unsupported,
+                    message: error_message(ErrorCode::Unsupported).to_string(),
+                }
+            );
+        }
+        assert_eq!(downgrade_for_version(failed.clone(), 4), failed);
+        let untouched = err_response(ErrorCode::SessionFull);
+        assert_eq!(downgrade_for_version(untouched.clone(), 1), untouched);
     }
 
     /// `SESS-FR-006`'s dispatch half: the session requests are

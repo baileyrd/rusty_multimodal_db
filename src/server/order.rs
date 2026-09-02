@@ -29,6 +29,7 @@
 //! relation (`docs/design/GENERIC-SCHEMA-DESIGN.md` §4.3), not a
 //! convenience this adapter invents.
 
+use super::journal::{BatchJournal, CheckpointFlush, JournalError};
 use super::protocol::{
     DomainSchema, ErrorCode, FieldCapabilities, FieldDescriptor, FieldRef, ParentLookup, RecordId,
     RelationCapabilities, ScanValue, TransactionOp, ValueKind,
@@ -39,6 +40,8 @@ use crate::generic::order_customer::{
 };
 use crate::generic::production::GenericProductionStore;
 use crate::generic::query::{GetById, UpdateField};
+use std::path::Path;
+use std::sync::Mutex;
 
 pub const FIELD_AMOUNT: FieldRef = 0;
 pub const FIELD_STATUS: FieldRef = 1;
@@ -72,11 +75,79 @@ fn status_from_u32(value: u32) -> Option<OrderStatus> {
 
 pub struct OrderConnectionStore {
     store: GenericProductionStore<OrderProductionStack>,
+    /// `JRN-FR-001` (ADR-0025) — see `DogConnectionStore::with_journal`.
+    journal: Option<Mutex<BatchJournal>>,
 }
 
 impl OrderConnectionStore {
     pub fn new(store: GenericProductionStore<OrderProductionStack>) -> Self {
-        Self { store }
+        Self {
+            store,
+            journal: None,
+        }
+    }
+
+    /// The crash-atomic variant — see `DogConnectionStore::with_journal`
+    /// for the contract; identical here.
+    pub fn with_journal(
+        store: GenericProductionStore<OrderProductionStack>,
+        journal_path: &Path,
+    ) -> Result<Self, JournalError> {
+        let (mut journal, batches) = BatchJournal::open(journal_path)?;
+        store.with_exclusive(|inner| -> Result<(), JournalError> {
+            for (batch_index, batch) in batches.iter().enumerate() {
+                Self::apply_batch(inner, batch).map_err(|(index, code)| JournalError::Replay {
+                    batch: batch_index,
+                    index,
+                    code,
+                })?;
+            }
+            inner.checkpoint_flush()?;
+            journal.truncate()
+        })?;
+        Ok(Self {
+            store,
+            journal: Some(Mutex::new(journal)),
+        })
+    }
+
+    /// Same validate-then-apply shape `server::dog`'s own uses —
+    /// `Order`'s only mutable field over this protocol is `amount_cents`.
+    /// Safe under one continuously held lock: see
+    /// `docs/design/SERVER-TRANSACTION-DESIGN.md`'s own "no runtime
+    /// deletion" invariant.
+    fn validate_batch(
+        inner: &OrderProductionStack,
+        updates: &[TransactionOp],
+    ) -> Result<(), (usize, ErrorCode)> {
+        for (i, op) in updates.iter().enumerate() {
+            match (op.field, &op.value) {
+                (FIELD_AMOUNT, ScanValue::I64(_)) => {
+                    if GetById::<Order>::get(inner, op.id).is_none() {
+                        return Err((i, ErrorCode::RecordNotFound));
+                    }
+                }
+                (FIELD_AMOUNT, _) => return Err((i, ErrorCode::Malformed)),
+                (FIELD_STATUS | FIELD_CREATED_AT | FIELD_DISCOUNT, _) => {
+                    return Err((i, ErrorCode::Unsupported))
+                }
+                _ => return Err((i, ErrorCode::UnknownField)),
+            }
+        }
+        Ok(())
+    }
+
+    fn apply_batch(
+        inner: &mut OrderProductionStack,
+        updates: &[TransactionOp],
+    ) -> Result<(), (usize, ErrorCode)> {
+        for (i, op) in updates.iter().enumerate() {
+            if let ScanValue::I64(amount) = op.value {
+                UpdateField::<Order, Amount>::update(inner, op.id, amount)
+                    .map_err(|_| (i, ErrorCode::RecordNotFound))?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -200,33 +271,23 @@ impl ConnectionStore for OrderConnectionStore {
 
     fn apply_transaction(&self, updates: &[TransactionOp]) -> Result<(), (usize, ErrorCode)> {
         self.store.with_exclusive(|inner| {
-            // Same validate-then-apply shape `server::dog`'s own
-            // `apply_transaction` uses — `Order`'s only mutable field
-            // over this protocol is `amount_cents`. Safe under one
-            // continuously held lock: see
-            // `docs/design/SERVER-TRANSACTION-DESIGN.md`'s own
-            // "no runtime deletion" invariant.
-            for (i, op) in updates.iter().enumerate() {
-                match (op.field, &op.value) {
-                    (FIELD_AMOUNT, ScanValue::I64(_)) => {
-                        if GetById::<Order>::get(inner, op.id).is_none() {
-                            return Err((i, ErrorCode::RecordNotFound));
-                        }
+            Self::validate_batch(inner, updates)?;
+            // See `DogConnectionStore::apply_transaction` for the journal
+            // discipline (`JRN-FR-002`/`JRN-FR-004`); identical here.
+            match &self.journal {
+                None => Self::apply_batch(inner, updates),
+                Some(journal) => {
+                    let mut journal = journal.lock().map_err(|_| (0, ErrorCode::Journal))?;
+                    journal
+                        .append(updates)
+                        .map_err(|_| (0, ErrorCode::Journal))?;
+                    Self::apply_batch(inner, updates)?;
+                    if journal.needs_checkpoint() && inner.checkpoint_flush().is_ok() {
+                        let _ = journal.truncate();
                     }
-                    (FIELD_AMOUNT, _) => return Err((i, ErrorCode::Malformed)),
-                    (FIELD_STATUS | FIELD_CREATED_AT | FIELD_DISCOUNT, _) => {
-                        return Err((i, ErrorCode::Unsupported))
-                    }
-                    _ => return Err((i, ErrorCode::UnknownField)),
+                    Ok(())
                 }
             }
-            for op in updates {
-                if let ScanValue::I64(amount) = op.value {
-                    UpdateField::<Order, Amount>::update(inner, op.id, amount)
-                        .expect("already validated under the same lock acquisition above");
-                }
-            }
-            Ok(())
         })
     }
 }

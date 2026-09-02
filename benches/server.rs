@@ -173,6 +173,33 @@ fn start_dog_server() -> (SocketAddr, Vec<Uuid>) {
     (addr, ids)
 }
 
+/// `start_dog_server` with a batch journal (`SERVER-001` FR-025,
+/// ADR-0025): every `Request::Transaction` is appended and `fsync`'d
+/// before its first write, so the `dog-jrnl-txn` rows measure exactly
+/// the cost of crash-atomicity — one `fsync` per batch — against the
+/// unjournaled `dog-txn` rows above them.
+fn start_dog_server_journaled() -> (SocketAddr, Vec<Uuid>) {
+    let dir = fresh_temp_dir("server_bench_dog_journaled")
+        .expect("fresh temp dir for journaled dog server bench");
+    let path = dir.join("dogs.mmap");
+    let journal = dir.join("txn.journal");
+    let ids: Vec<Uuid> = (0..POOL_SIZE as u128).map(Uuid::from_u128).collect();
+    let records: Vec<DogRecord> = ids
+        .iter()
+        .map(|&id| DogRecord::new(id, "labrador", 3))
+        .collect();
+    let store = ProductionStore::create(records, Vec::new(), &path)
+        .expect("create ProductionStore for journaled dog server bench");
+    let connection_store = Arc::new(
+        DogConnectionStore::with_journal(store, &journal)
+            .expect("open the batch journal for the dog server bench"),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    thread::spawn(move || serve(listener, connection_store, AuthConfig::default(), None));
+    (addr, ids)
+}
+
 fn start_order_server() -> (SocketAddr, Vec<Uuid>) {
     let dir = fresh_temp_dir("server_bench_order").expect("fresh temp dir for order server bench");
     let path = dir.join("amount.mmap");
@@ -460,6 +487,13 @@ fn main() {
     let (addr, ids) = start_dog_server();
     bench_domain("dog", addr, ids.clone());
     bench_transaction_domain("dog", addr, ids, FIELD_AGE, |i| {
+        ScanValue::U32((i % 1_000) as u32)
+    });
+
+    // FR-025: the same two-op batches through a journaled adapter — the
+    // `fsync`-per-batch cost, isolated (`dog-jrnl-txn` vs. `dog-txn`).
+    let (addr, ids) = start_dog_server_journaled();
+    bench_transaction_domain("dog-jrnl", addr, ids, FIELD_AGE, |i| {
         ScanValue::U32((i % 1_000) as u32)
     });
 
