@@ -242,6 +242,11 @@ Accepted as proposed:
 - Revisit if: unit 4 (bincode encoding stability) concludes that the
   record layout, not just the record type, needs recording — that would
   be a second field or a different hash input, and a version 3.
+  *Unit 4's answer (`ADR-0021`, Proposed, 2026-09-02): not now — serde
+  exposes no layout description to hash, and a layout change between
+  builds is already a `BLOB_VERSION` bump by the evolution rules the
+  codec documents; the trigger stays armed for the case where that
+  discipline fails.*
 - Revisit if: a use case needs the tag readable from the file without
   the expecting build — the fixed-width string option, or the manifest.
 - Revisit if: the `.mmap` file is ever opened portably without its
