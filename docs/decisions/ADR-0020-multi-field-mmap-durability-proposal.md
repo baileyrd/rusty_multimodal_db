@@ -1,6 +1,6 @@
 # ADR-0020: More than one mutable durable field per record — a per-field `MmapScanned` layer over the existing `.mmap` format
 
-- Status: **Proposed** — awaiting the owner's call. Design only; no code.
+- Status: **Accepted** (promoted from Proposed on 2026-09-02 — the owner approved the design as proposed, option 2 with the `SlotFile` extraction, over the duplication variant, the multi-slot layout, and closing it; no changes requested)
 - Date: 2026-09-02
 - Deciders: baileyrd
 - Related: `docs/design/MULTI-FIELD-MMAP-DURABILITY-DESIGN.md` (the full
@@ -105,7 +105,7 @@ posture `ADR-0016` through `ADR-0019` all took, and the one
 
 ## Decision
 
-Proposed: option 2. Concretely, at implementation:
+Accepted: option 2. Concretely, at implementation:
 
 - `src/generic/slot_file.rs` (`pub(crate)`): the file mechanics of
   `GenericMmapStore` — constants, slot arithmetic, read/write,
@@ -195,4 +195,8 @@ Proposed: option 2. Concretely, at implementation:
 
 ## Acceptance and implementation
 
-- (pending the owner's call)
+- 2026-09-02: accepted as proposed (option 2, the per-field `MmapScanned`
+  layer with the `SlotFile` extraction; the duplication variant, the
+  multi-slot single-file layout, and closing as not worth building all
+  declined). The next unit registers `STORAGE-017` v0.1.0 and implements
+  per `docs/design/MULTI-FIELD-MMAP-DURABILITY-DESIGN.md`.

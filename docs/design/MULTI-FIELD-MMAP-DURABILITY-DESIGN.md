@@ -1,6 +1,10 @@
-# Multi-Field mmap Durability Design (Proposed)
+# Multi-Field mmap Durability Design (Accepted)
 
-- Status: **Proposed** — awaiting the owner's call. Design only; no code.
+- Status: **Accepted** (promoted from Proposed on 2026-09-02 — the owner
+  approved the design as proposed: the per-field `MmapScanned` layer with
+  the `SlotFile` extraction, over duplication, over the multi-slot
+  single-file layout, over closing as not worth building; no changes
+  requested). Implementation is the next unit, as `STORAGE-017` v0.1.0.
   See `docs/decisions/ADR-0020-multi-field-mmap-durability-proposal.md`
   for the decision record this document backs.
 - Date: 2026-09-02
@@ -498,3 +502,4 @@ touching that contract; full unification is a revisit trigger.
 ## Change history
 
 - 2026-09-02: Proposed.
+- 2026-09-02: Accepted as proposed by the owner, no changes requested.
