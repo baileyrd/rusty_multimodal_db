@@ -88,6 +88,7 @@
 //! numbers. This is the accepted cost of the correctness guarantee, not
 //! an unexamined regression.
 
+pub(crate) mod edge_blob;
 pub mod mmap_field;
 pub mod mmap_store;
 /// `Order`/`Customer` — this library's reference implementation, proving

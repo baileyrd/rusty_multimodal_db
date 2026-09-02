@@ -270,3 +270,10 @@ options" section for the full reasoning. Summarized:
 
 - 2026-09-02: accepted as proposed. The next unit registers `STORAGE-016`
   and implements per `docs/design/SYMMETRIC-EDGE-PORTABILITY-DESIGN.md`.
+- 2026-09-02: implemented as `STORAGE-016` v0.1.0 in this PR
+  (`src/generic/edge_blob.rs`, one impl block on `Symmetric` in
+  `src/generic/store.rs`, the `Employee` helper switch in
+  `src/generic_spike/employee_impl.rs`). One deviation from the design's
+  sketch, recorded in the spec's Traceability: `EdgeBlob::fingerprint`
+  returns `Result` rather than `u64`, because hashing encodes each `Id`
+  through `bincode` and that encode can fail.

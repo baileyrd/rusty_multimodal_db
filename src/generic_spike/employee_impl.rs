@@ -24,6 +24,7 @@
 //! one). Both fixed in `crate::generic::{store,production}` directly, not
 //! worked around here — see those modules' own doc comments.
 
+use crate::generic::edge_blob::edges_path;
 use crate::generic::mmap_store::GenericMmapStore;
 use crate::generic::store::{BaseStore, Indexed, Reversed, Scanned, Symmetric};
 use crate::generic::traits::{ChildOf, IndexedField, Record, ScannableField, SymmetricRelation};
@@ -124,10 +125,13 @@ pub fn build_employee_generic_store(
 
 /// The durable production stack: [`GenericMmapStore`] (owns records, the
 /// `DepartmentField` index, and `SalaryCents` — the one mmap-backed
-/// durable field) -> `Symmetric<.., CollaboratesWith>` (in-memory,
-/// rebuilt from the caller-supplied edges at every `open`, same
-/// convention every relation layer in this crate already follows) ->
-/// `Reversed<.., Employee, Employee, ReportsTo>`. The `Reversed`-outside-
+/// durable field) -> `Symmetric<.., CollaboratesWith>` (in-memory
+/// adjacency, rebuilt from the caller-supplied edges at every `open`;
+/// since `STORAGE-016` the edge list itself is also persisted to
+/// `<path>.edges` so the stack can be rebuilt from its files alone — see
+/// [`open_employee_production_stack_portable`]) ->
+/// `Reversed<.., Employee, Employee, ReportsTo>` (rebuilt from the
+/// records, as every `Reversed` layer is). The `Reversed`-outside-
 /// `Symmetric` ordering is deliberate, not arbitrary: it's what requires
 /// `Reversed` to forward `Neighbors` (the gap this spike found) rather
 /// than the reverse ordering, which would have needed `Symmetric` to
@@ -143,11 +147,18 @@ pub type EmployeeProductionStack = Reversed<
 
 /// Build a fresh, durable production store for `Employee` at `path` — the
 /// generic analogue of `ProductionStore::create`/`create_order_production_stack`.
+/// Writes three files: `path` (the mmap file), `<path>.records` (the
+/// record blob, via [`GenericMmapStore::create`]), and `<path>.edges`
+/// (the collaboration edge list, via `Symmetric::create` —
+/// `SYMPORT-FR-007`). All three must travel together for
+/// [`open_employee_production_stack_portable`].
 ///
 /// # Errors
 ///
 /// Returns [`crate::durability::DurabilityError::Io`] under the same
-/// conditions [`GenericMmapStore::create`] does.
+/// conditions [`GenericMmapStore::create`] does, or if the edge blob
+/// can't be written; [`crate::durability::DurabilityError::Serde`] if
+/// the records or edges can't be serialized.
 pub fn create_employee_production_stack(
     employees: Vec<Employee>,
     collaboration_edges: &[(Uuid, Uuid)],
@@ -157,7 +168,11 @@ pub fn create_employee_production_stack(
         employees.clone(),
         path,
     )?;
-    let symmetric = Symmetric::<_, Employee, CollaboratesWith>::new(core, collaboration_edges);
+    let symmetric = Symmetric::<_, Employee, CollaboratesWith>::create(
+        core,
+        collaboration_edges,
+        &edges_path(path),
+    )?;
     Ok(Reversed::<_, Employee, Employee, ReportsTo>::new(
         symmetric, &employees,
     ))
@@ -165,11 +180,18 @@ pub fn create_employee_production_stack(
 
 /// Reopen an existing durable production store for `Employee` at `path` —
 /// the generic analogue of `ProductionStore::open`/`open_order_production_stack`.
+/// Keeps both companions current with the caller's arguments: the record
+/// blob via [`GenericMmapStore::open`], the edge blob via
+/// `Symmetric::open` — each rewritten only when its content changed, and
+/// a pre-`STORAGE-016` directory (no `<path>.edges` yet) gains the file
+/// on this call (`SYMPORT-FR-004`/`FR-007`).
 ///
 /// # Errors
 ///
 /// Returns [`crate::durability::DurabilityError::Io`] under the same
-/// conditions [`GenericMmapStore::open`] does.
+/// conditions [`GenericMmapStore::open`] does, or if a stale edge blob
+/// can't be rewritten; [`crate::durability::DurabilityError::Serde`] if
+/// a stale companion's content can't be serialized.
 pub fn open_employee_production_stack(
     employees: Vec<Employee>,
     collaboration_edges: &[(Uuid, Uuid)],
@@ -177,7 +199,46 @@ pub fn open_employee_production_stack(
 ) -> Result<EmployeeProductionStack, crate::durability::DurabilityError> {
     let core =
         GenericMmapStore::<Employee, DepartmentField, SalaryCents>::open(employees.clone(), path)?;
-    let symmetric = Symmetric::<_, Employee, CollaboratesWith>::new(core, collaboration_edges);
+    let symmetric = Symmetric::<_, Employee, CollaboratesWith>::open(
+        core,
+        collaboration_edges,
+        &edges_path(path),
+    )?;
+    Ok(Reversed::<_, Employee, Employee, ReportsTo>::new(
+        symmetric, &employees,
+    ))
+}
+
+/// Reopen the whole stack from its three files alone — `path`,
+/// `<path>.records`, and `<path>.edges` — with no `employees` or
+/// `collaboration_edges` argument (`SYMPORT-FR-007`). The record blob is
+/// read once and serves both [`GenericMmapStore::open`] and the
+/// `Reversed` layer (as `open_order_production_stack_portable` does); the
+/// edge blob is read once by `Symmetric::open_portable`. Because both
+/// companions' content comes from the files themselves, neither currency
+/// check finds anything stale and nothing is rewritten. `neighbors`
+/// results, order included, match the stack the files were written from
+/// (`SYMPORT-FR-008`).
+///
+/// # Errors
+///
+/// Returns [`crate::durability::DurabilityError::RecordBlobUnreadable`]
+/// naming whichever companion is missing or invalid — `<path>.records`
+/// from [`GenericMmapStore::read_portable_records`], `<path>.edges` from
+/// `Symmetric::read_portable_edges` — so a directory copied without its
+/// `.edges` file is a typed error naming that file, never a stack with
+/// silently empty adjacency; [`open_employee_production_stack`] on the
+/// same directory heals it. Otherwise everything
+/// [`GenericMmapStore::open`] can return.
+pub fn open_employee_production_stack_portable(
+    path: &std::path::Path,
+) -> Result<EmployeeProductionStack, crate::durability::DurabilityError> {
+    let employees =
+        GenericMmapStore::<Employee, DepartmentField, SalaryCents>::read_portable_records(path)?;
+    let core =
+        GenericMmapStore::<Employee, DepartmentField, SalaryCents>::open(employees.clone(), path)?;
+    let symmetric =
+        Symmetric::<_, Employee, CollaboratesWith>::open_portable(core, &edges_path(path))?;
     Ok(Reversed::<_, Employee, Employee, ReportsTo>::new(
         symmetric, &employees,
     ))
@@ -337,6 +398,217 @@ mod tests {
             vec![Uuid::from_u128(2)]
         );
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- STORAGE-016: edge-list portability, one test per acceptance
+    // criterion in docs/design/SYMMETRIC-EDGE-PORTABILITY-DESIGN.md ----
+
+    /// A richer edge list than `sample_collaboration_edges`, so that
+    /// per-id `neighbors` order (which follows edge order) is actually
+    /// observable: 2 sees [3, 1], 1 sees [2, 3].
+    fn portability_edges() -> Vec<(Uuid, Uuid)> {
+        vec![
+            (Uuid::from_u128(2), Uuid::from_u128(3)),
+            (Uuid::from_u128(1), Uuid::from_u128(2)),
+            (Uuid::from_u128(1), Uuid::from_u128(3)),
+        ]
+    }
+
+    /// Every query the acceptance criterion names, in one comparable
+    /// snapshot — including `neighbors` per id, order preserved.
+    #[derive(Debug, PartialEq)]
+    struct Snapshot {
+        records: Vec<Option<Employee>>,
+        engineering: Vec<Uuid>,
+        salaries: Vec<i64>,
+        parents: Vec<Result<Option<Uuid>, crate::generic::NotFound<Uuid>>>,
+        reports_to_1: Vec<Uuid>,
+        neighbors: Vec<Vec<Uuid>>,
+    }
+
+    fn snapshot(store: &GenericProductionStore<EmployeeProductionStack>) -> Snapshot {
+        let ids: Vec<Uuid> = (1..=3).map(Uuid::from_u128).collect();
+        let mut engineering =
+            store.filter_eq::<Employee, DepartmentField>(&Department::Engineering);
+        engineering.sort();
+        let mut reports_to_1 = store.children::<Employee, Employee, ReportsTo>(Uuid::from_u128(1));
+        reports_to_1.sort();
+        Snapshot {
+            records: ids.iter().map(|&id| store.get::<Employee>(id)).collect(),
+            engineering,
+            salaries: store.scan::<Employee, SalaryCents>(),
+            parents: ids
+                .iter()
+                .map(|&id| store.parent::<Employee, ReportsTo>(id))
+                .collect(),
+            reports_to_1,
+            neighbors: ids
+                .iter()
+                .map(|&id| store.neighbors::<Employee, CollaboratesWith>(id))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn portable_reopen_answers_every_query_identically_with_no_arguments() {
+        let dir = crate::bench_support::fresh_temp_dir("employee_portable_identical").unwrap();
+        let path = dir.join("salary.mmap");
+        let expected = {
+            let stack =
+                create_employee_production_stack(sample(), &portability_edges(), &path).unwrap();
+            let store = GenericProductionStore::new(stack);
+            store
+                .update::<Employee, SalaryCents>(Uuid::from_u128(2), 1_000_000)
+                .unwrap();
+            store.flush().unwrap();
+            snapshot(&store)
+        };
+        assert_eq!(
+            expected.neighbors,
+            vec![
+                vec![Uuid::from_u128(2), Uuid::from_u128(3)],
+                vec![Uuid::from_u128(3), Uuid::from_u128(1)],
+                vec![Uuid::from_u128(2), Uuid::from_u128(1)],
+            ],
+            "the fixture must make edge order observable"
+        );
+
+        let portable =
+            GenericProductionStore::new(open_employee_production_stack_portable(&path).unwrap());
+        let actual = snapshot(&portable);
+        assert_eq!(actual, expected);
+        // And the portable stack is fully functional, not read-only.
+        portable
+            .update::<Employee, SalaryCents>(Uuid::from_u128(1), 1_250_000)
+            .unwrap();
+        assert_eq!(
+            portable
+                .get::<Employee>(Uuid::from_u128(1))
+                .unwrap()
+                .salary_cents,
+            1_250_000
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_three_files_copied_together_reopen_elsewhere() {
+        let dir = crate::bench_support::fresh_temp_dir("employee_portable_copy_src").unwrap();
+        let copied_dir =
+            crate::bench_support::fresh_temp_dir("employee_portable_copy_dst").unwrap();
+        let path = dir.join("salary.mmap");
+        let copied = copied_dir.join("elsewhere.mmap");
+        let expected = {
+            let stack =
+                create_employee_production_stack(sample(), &portability_edges(), &path).unwrap();
+            let store = GenericProductionStore::new(stack);
+            store.flush().unwrap();
+            snapshot(&store)
+        };
+
+        std::fs::copy(&path, &copied).unwrap();
+        std::fs::copy(
+            crate::generic::record_blob::blob_path(&path),
+            crate::generic::record_blob::blob_path(&copied),
+        )
+        .unwrap();
+        std::fs::copy(edges_path(&path), edges_path(&copied)).unwrap();
+
+        let portable =
+            GenericProductionStore::new(open_employee_production_stack_portable(&copied).unwrap());
+        assert_eq!(snapshot(&portable), expected);
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&copied_dir);
+    }
+
+    #[test]
+    fn a_missing_edges_file_is_a_typed_error_that_the_existing_open_heals() {
+        let dir = crate::bench_support::fresh_temp_dir("employee_portable_missing_edges").unwrap();
+        let path = dir.join("salary.mmap");
+        let expected = {
+            let stack =
+                create_employee_production_stack(sample(), &portability_edges(), &path).unwrap();
+            let store = GenericProductionStore::new(stack);
+            store.flush().unwrap();
+            snapshot(&store)
+        };
+        let edge_file = edges_path(&path);
+        std::fs::remove_file(&edge_file).unwrap();
+
+        // The pre-STORAGE-016 directory shape: mmap + records, no edges.
+        match open_employee_production_stack_portable(&path) {
+            Err(crate::durability::DurabilityError::RecordBlobUnreadable { path: p, cause }) => {
+                assert_eq!(
+                    p, edge_file,
+                    "the error must name the edge blob, not the records"
+                );
+                assert!(cause.starts_with("cannot read file"), "{cause}");
+            }
+            Err(other) => panic!("expected RecordBlobUnreadable, got {other:?}"),
+            Ok(_) => panic!("expected RecordBlobUnreadable, got a stack"),
+        }
+
+        let healed = GenericProductionStore::new(
+            open_employee_production_stack(sample(), &portability_edges(), &path).unwrap(),
+        );
+        assert_eq!(snapshot(&healed), expected);
+        assert!(edge_file.is_file(), "open must write the missing edge blob");
+        let portable =
+            GenericProductionStore::new(open_employee_production_stack_portable(&path).unwrap());
+        assert_eq!(snapshot(&portable), expected);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn open_rewrites_the_edge_blob_only_when_the_edge_list_changed() {
+        let dir = crate::bench_support::fresh_temp_dir("employee_portable_rewrite").unwrap();
+        let path = dir.join("salary.mmap");
+        let _ = create_employee_production_stack(sample(), &portability_edges(), &path).unwrap();
+        let edge_file = edges_path(&path);
+        let bytes_before = std::fs::read(&edge_file).unwrap();
+        let mtime_before = std::fs::metadata(&edge_file).unwrap().modified().unwrap();
+
+        // Same edges, same order: nothing written.
+        let _ = open_employee_production_stack(sample(), &portability_edges(), &path).unwrap();
+        assert_eq!(std::fs::read(&edge_file).unwrap(), bytes_before);
+        assert_eq!(
+            std::fs::metadata(&edge_file).unwrap().modified().unwrap(),
+            mtime_before
+        );
+
+        // Same edges, different order: counts as changed and is
+        // observable through neighbors after a portable reopen.
+        let mut reordered = portability_edges();
+        reordered.reverse();
+        let _ = open_employee_production_stack(sample(), &reordered, &path).unwrap();
+        assert_ne!(std::fs::read(&edge_file).unwrap(), bytes_before);
+        let portable =
+            GenericProductionStore::new(open_employee_production_stack_portable(&path).unwrap());
+        assert_eq!(
+            portable.neighbors::<Employee, CollaboratesWith>(Uuid::from_u128(1)),
+            vec![Uuid::from_u128(3), Uuid::from_u128(2)]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_record_blob_at_the_edges_path_is_a_magic_error_not_a_decode_attempt() {
+        let dir = crate::bench_support::fresh_temp_dir("employee_portable_wrong_blob").unwrap();
+        let path = dir.join("salary.mmap");
+        let _ = create_employee_production_stack(sample(), &portability_edges(), &path).unwrap();
+        let edge_file = edges_path(&path);
+        // Overwrite the edge blob with the (valid) record blob.
+        std::fs::copy(crate::generic::record_blob::blob_path(&path), &edge_file).unwrap();
+
+        match open_employee_production_stack_portable(&path) {
+            Err(crate::durability::DurabilityError::RecordBlobUnreadable { path: p, cause }) => {
+                assert_eq!(p, edge_file);
+                assert!(cause.starts_with("magic number mismatch"), "{cause}");
+            }
+            Err(other) => panic!("expected RecordBlobUnreadable, got {other:?}"),
+            Ok(_) => panic!("expected RecordBlobUnreadable, got a stack"),
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
