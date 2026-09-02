@@ -263,7 +263,7 @@ options" section for the full reasoning. Summarized:
 - Revisit if: the schema-tag question is resolved for `STORAGE-015` — the
   same `BLOB_VERSION` bump applies here, at the same time. *Tripped:
   `ADR-0019` proposes exactly that, both blobs to version 2 in one unit;
-  awaiting the owner's decision.*
+  accepted as proposed.*
 - Revisit if: a caller is found assembling a durable stack with
   `Symmetric::new` and relying on portability — the by-convention gap
   would then be real, and the design's third open question (retire `new`

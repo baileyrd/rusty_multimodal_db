@@ -515,7 +515,7 @@ Resolutions of the open questions above, in order:
   `<path>.records`, `<path>.edges`.
 - Blob recording `R`: proposed in `BLOB-SCHEMA-TAG-DESIGN.md` /
   `ADR-0019` (`SchemaTag` trait, `GENBLOB\0` and `GENEDGE\0` version
-  2), awaiting the owner's decision; the `.mmap` file makes the same
+  2), accepted as proposed; the `.mmap` file makes the same
   trust assumption and is out of that proposal's scope.
 - **`open`'s fingerprint cost at 1M: measured twice — the fallback
   trigger first appeared tripped, then measured in place was not.**
