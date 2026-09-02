@@ -240,7 +240,7 @@ Accepted: option 2. Concretely, at implementation:
   approved as the spec). The next unit registers `STORAGE-018` v0.1.0
   and implements per
   `docs/design/BINCODE-ENCODING-STABILITY-DESIGN.md`.
-- 2026-09-02: implemented as `STORAGE-018` v0.1.0 in this PR —
+- 2026-09-02: implemented as `STORAGE-018` v0.1.0 in PR #120 —
   `src/codec.rs` (`encode`/`encode_into`/`decode` over the one explicit
   `Options`, docs per `BINENC-FR-005`), all 23 call sites routed, golden
   vectors captured on the pre-change code in a separate first commit

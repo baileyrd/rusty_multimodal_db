@@ -660,7 +660,7 @@ capture time.)
 - 2026-09-02: Proposed.
 - 2026-09-02: Accepted as proposed (option (a), `reject_trailing_bytes()`;
   spec `STORAGE-018`). No changes to the design text beyond status.
-- 2026-09-02: Implemented as `STORAGE-018` v0.1.0 (this PR), per the
+- 2026-09-02: Implemented as `STORAGE-018` v0.1.0 (PR #120), per the
   verification plan: capture commit then routing commit. One finding
   against `BINENC-FR-006`'s "no change for the three blobs": the
   `DOGBLOB\0` reader decodes before it fingerprints, so a junk-padded
