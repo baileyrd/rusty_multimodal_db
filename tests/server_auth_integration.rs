@@ -9,6 +9,7 @@
 //! call.
 
 use rusty_multimodal_db::record::DogRecord;
+use rusty_multimodal_db::server::client::{ClientError, SchemaDrivenClient};
 use rusty_multimodal_db::server::dog::{DogConnectionStore, FIELD_AGE};
 use rusty_multimodal_db::server::framing::{read_message, write_message};
 use rusty_multimodal_db::server::protocol::{ErrorCode, Request, Response, ScanValue};
@@ -268,4 +269,73 @@ fn no_configured_tokens_reproduces_the_original_unauthenticated_behavior() {
         ),
         Response::Ok
     );
+}
+
+/// `SERVER-001-FR-021`: `SchemaDrivenClient` against an auth-configured
+/// server. Plain `connect` fails at the schema fetch with the server's own
+/// `Unauthenticated` (`AUTH-FR-002` gates `DescribeSchema` too), and so
+/// does `connect_authenticated` with a wrong token; with a real token the
+/// schema arrives, the connection's class gates writes exactly as the raw
+/// protocol's does, and `authenticate` re-presents a token mid-connection
+/// to change that class in both directions. A rejected re-authentication
+/// leaves the class as it was.
+#[test]
+fn schema_driven_client_authenticates_at_connect_and_can_change_class_later() {
+    let addr = start_server(auth_config());
+
+    match SchemaDrivenClient::connect(addr).map(|_| ()) {
+        Err(ClientError::Server(ErrorCode::Unauthenticated, _)) => {}
+        other => panic!("expected Unauthenticated from a token-less connect, got {other:?}"),
+    }
+    match SchemaDrivenClient::connect_authenticated(addr, "wrong-token").map(|_| ()) {
+        Err(ClientError::Server(ErrorCode::Unauthenticated, _)) => {}
+        other => panic!("expected Unauthenticated from a wrong token, got {other:?}"),
+    }
+
+    let mut client = SchemaDrivenClient::connect_authenticated(addr, "read-token").unwrap();
+    assert!(client.schema().fields.iter().any(|f| f.name == "age"));
+    assert!(client.get(Uuid::from_u128(1)).unwrap().is_some());
+    match client.update(Uuid::from_u128(1), "age", ScanValue::U32(4)) {
+        Err(ClientError::Server(ErrorCode::Unauthorized, _)) => {}
+        other => panic!("expected Unauthorized for a ReadOnly write, got {other:?}"),
+    }
+
+    client.authenticate("write-token").unwrap();
+    assert!(client
+        .update(Uuid::from_u128(1), "age", ScanValue::U32(4))
+        .unwrap());
+
+    match client.authenticate("wrong-token") {
+        Err(ClientError::Server(ErrorCode::Unauthenticated, _)) => {}
+        other => panic!("expected Unauthenticated from a wrong re-authentication, got {other:?}"),
+    }
+    assert!(
+        client
+            .update(Uuid::from_u128(1), "age", ScanValue::U32(5))
+            .unwrap(),
+        "a rejected token must not demote the connection"
+    );
+
+    client.authenticate("read-token").unwrap();
+    match client.update(Uuid::from_u128(1), "age", ScanValue::U32(6)) {
+        Err(ClientError::Server(ErrorCode::Unauthorized, _)) => {}
+        other => panic!("expected Unauthorized after demoting to ReadOnly, got {other:?}"),
+    }
+    assert_eq!(client.scan("age").unwrap(), vec![ScanValue::U32(5)]);
+}
+
+/// `AUTH-FR-007` for the client library: on a server with no tokens
+/// configured, `connect_authenticated` and `authenticate` are no-ops that
+/// succeed with any token, and the connection is `ReadWrite` throughout.
+#[test]
+fn schema_driven_client_authentication_is_a_no_op_without_configured_tokens() {
+    let addr = start_server(AuthConfig::default());
+    let mut client = SchemaDrivenClient::connect_authenticated(addr, "anything-at-all").unwrap();
+    assert!(client
+        .update(Uuid::from_u128(1), "age", ScanValue::U32(7))
+        .unwrap());
+    client.authenticate("something-else").unwrap();
+    assert!(client
+        .update(Uuid::from_u128(1), "age", ScanValue::U32(8))
+        .unwrap());
 }

@@ -48,6 +48,29 @@
 //! `ClientError::Frame(FrameError::Io(..))` at end of stream — named, not
 //! mitigated (no such server is deployed; a reconnect-without-hello
 //! fallback is ADR-0022's revisit trigger for it).
+//!
+//! # Authentication (`AuthConfig`), `SERVER-001-FR-021`
+//!
+//! An `AuthConfig`-configured server rejects every request but
+//! `Authenticate` — `DescribeSchema` included (`AUTH-FR-002`) — until a
+//! recognized token is presented, so on such a server the schema fetch
+//! [`SchemaDrivenClient::connect`] does cannot succeed and `connect` fails
+//! with `ClientError::Server(ErrorCode::Unauthenticated, ..)`. That is why
+//! the token goes into a *constructor*,
+//! [`SchemaDrivenClient::connect_authenticated`], which sends
+//! `Request::Authenticate` between the `Hello` and the `DescribeSchema`,
+//! rather than only into a post-connect method. The method exists too —
+//! [`SchemaDrivenClient::authenticate`] re-presents a token on an already
+//! usable connection (changing a `ReadOnly` connection to `ReadWrite`,
+//! for instance, or a no-op on a server with no tokens configured,
+//! `AUTH-FR-007`). Neither learns the granted [`super::TokenClass`]: the
+//! server answers `Authenticate` with a bare `Response::Ok`, and a wrong
+//! token is `ErrorCode::Unauthenticated`, indistinguishable from never
+//! having authenticated (`AUTH-FR-001`). Plaintext only, as this client
+//! has always been: against a `TlsConfig`-configured server the plaintext
+//! `Hello` fails the server's TLS handshake and the connection is closed
+//! before any token is written, so `connect_authenticated` fails with
+//! `ClientError::Frame(..)` rather than leaking the token.
 
 use super::framing::{self, FrameError};
 use super::protocol::{
@@ -119,7 +142,31 @@ impl SchemaDrivenClient {
     /// comment for what a pre-hello server looks like from here), then
     /// immediately sends `Request::DescribeSchema` and keeps the result
     /// for every subsequent field-name lookup this client does.
+    ///
+    /// Against an `AuthConfig`-configured server this fails with
+    /// `ClientError::Server(ErrorCode::Unauthenticated, ..)` — the schema
+    /// fetch itself is gated (`AUTH-FR-002`); use
+    /// [`SchemaDrivenClient::connect_authenticated`] there.
     pub fn connect<A: ToSocketAddrs>(addr: A) -> Result<Self, ClientError> {
+        Self::connect_inner(addr, None)
+    }
+
+    /// [`SchemaDrivenClient::connect`] with `Request::Authenticate { token }`
+    /// sent between the `Hello` and the `DescribeSchema` (`FR-021`), so the
+    /// schema fetch runs on an authenticated connection. A token the
+    /// server does not recognize fails here with
+    /// `ClientError::Server(ErrorCode::Unauthenticated, ..)`; on a server
+    /// with no tokens configured the `Authenticate` is a no-op
+    /// (`AUTH-FR-007`) and this is exactly `connect`. See this module's
+    /// own "Authentication" doc section.
+    pub fn connect_authenticated<A: ToSocketAddrs>(
+        addr: A,
+        token: &str,
+    ) -> Result<Self, ClientError> {
+        Self::connect_inner(addr, Some(token))
+    }
+
+    fn connect_inner<A: ToSocketAddrs>(addr: A, token: Option<&str>) -> Result<Self, ClientError> {
         let stream = TcpStream::connect(addr).map_err(FrameError::from)?;
         stream.set_nodelay(true).map_err(FrameError::from)?;
         let peer = stream.try_clone().map_err(FrameError::from)?;
@@ -138,10 +185,22 @@ impl SchemaDrivenClient {
             _ => return Err(ClientError::UnexpectedResponse("Hello")),
         };
 
+        if let Some(token) = token {
+            framing::write_message(
+                &mut writer,
+                &Request::Authenticate {
+                    token: token.to_string(),
+                },
+            )?;
+            writer.flush().map_err(FrameError::from)?;
+            Self::expect_ok(framing::read_message(&mut reader)?)?;
+        }
+
         framing::write_message(&mut writer, &Request::DescribeSchema)?;
         writer.flush().map_err(FrameError::from)?;
         let schema = match framing::read_message(&mut reader)? {
             Response::Schema(schema) => schema,
+            Response::Err { code, message } => return Err(ClientError::Server(code, message)),
             _ => return Err(ClientError::UnexpectedResponse("Schema")),
         };
 
@@ -151,6 +210,35 @@ impl SchemaDrivenClient {
             schema,
             server_protocol_version,
         })
+    }
+
+    /// The server's answer to `Request::Authenticate`, folded to the
+    /// client's own error shape: `Ok` is success, a typed `Err` is the
+    /// server's verdict (a wrong token is `Unauthenticated`), anything
+    /// else is a `dispatch`-level surprise.
+    fn expect_ok(resp: Response) -> Result<(), ClientError> {
+        match resp {
+            Response::Ok => Ok(()),
+            Response::Err { code, message } => Err(ClientError::Server(code, message)),
+            _ => Err(ClientError::UnexpectedResponse("Ok")),
+        }
+    }
+
+    /// Present `token` on this already-usable connection (`FR-021`). The
+    /// server accepts `Authenticate` at any point, so this changes the
+    /// connection's class for every request that follows — a `ReadOnly`
+    /// connection becomes `ReadWrite` with a write token, and the reverse
+    /// — and on a server with no tokens configured it is a no-op
+    /// (`AUTH-FR-007`). A rejected token leaves the connection's class as
+    /// it was and returns `ClientError::Server(ErrorCode::Unauthenticated,
+    /// ..)`. This cannot make a fresh connection to an auth-configured
+    /// server usable — [`SchemaDrivenClient::connect`] has already failed
+    /// there; use [`SchemaDrivenClient::connect_authenticated`].
+    pub fn authenticate(&mut self, token: &str) -> Result<(), ClientError> {
+        let resp = self.roundtrip(Request::Authenticate {
+            token: token.to_string(),
+        })?;
+        Self::expect_ok(resp)
     }
 
     /// The protocol version negotiated at connect time —

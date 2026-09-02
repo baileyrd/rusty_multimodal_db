@@ -561,7 +561,10 @@ No change to `framing.rs`, `dog.rs`, `order.rs`, `employee.rs`,
   server still drops a new client silently.
 - Whether `SchemaDrivenClient` should gain `authenticate(token)` so it
   can be used against an auth-configured server at all. Pre-existing,
-  independent of this design; noted for a separate unit.
+  independent of this design; noted for a separate unit. *Resolved:
+  `SERVER-001` v0.11.0 / FR-021 — `connect_authenticated(addr, token)`
+  (the token has to reach the constructor, since `AUTH-FR-002` gates
+  `DescribeSchema` itself) plus `authenticate(&mut self, token)`.*
 - Whether a pre-hello server should ever be given a reconnect-without-
   hello fallback in the client library. Not while none is deployed;
   re-arm if one is.
