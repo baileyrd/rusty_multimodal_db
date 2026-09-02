@@ -224,7 +224,12 @@ companion blob.**
    `update`d value never counts as a changed record set) matters only for
    a caller that reopens with *regenerated* scan values — see "Data/state
    and invariants". Named as the fallback if that ever measures as a
-   real cost.
+   real cost. *Measured after implementation, at the owner's request,
+   and not built*: a whole-record hand-walk saves ~7 ms per million
+   `Order` records over the streamed encoding (72 ms vs. 79 ms — the
+   bytes hashed are the same, only serde's per-field dispatch goes), and
+   the fingerprint itself is ~4% of `open` at 1M once measured in place;
+   see "Implementation status".
 2. *`std::hash::Hash` through an FNV hasher.* Rejected — `Hash`'s byte
    stream is explicitly not stable across Rust versions (the same reason
    `STORAGE-014` rejected `DefaultHasher`), and this value lives on disk.
@@ -459,7 +464,10 @@ design document itself.
   file makes the same trust assumption today.
 - Whether the streamed-serialization fingerprint's `open` cost is
   acceptable at 1M — measured at implementation, with the trait-method
-  fingerprint as the named fallback.
+  fingerprint as the named fallback; then the fallback itself measured
+  and closed as not warranted (~4% of `open` at 1M for the shipped
+  fingerprint, ~7 ms saved by the fallback — see "Implementation
+  status").
 - Whether `GenericProductionStore` should grow a path-taking constructor
   of its own — not proposed; it is deliberately store-agnostic, and the
   domain helpers are where paths already live.
@@ -497,8 +505,9 @@ Resolutions of the open questions above, in order:
   gains the derives and a blob, but is not yet portable on its own.
 - Blob recording `R`: still deferred; the `.mmap` file makes the same
   trust assumption.
-- **`open`'s fingerprint cost at 1M: measured, and the fallback trigger
-  is tripped.** Throwaway release build, median of 7/7/3: `open`
+- **`open`'s fingerprint cost at 1M: measured twice — the fallback
+  trigger first appeared tripped, then measured in place was not.**
+  First round, throwaway release build, median of 7/7/3: `open`
   +80–108% at 1K (a ~0.1 ms floor), +19–33% at 100K (10–17 ms of
   streamed encoding on a ~52 ms call), −4% to +2% at 1M across three
   after-runs — but the published 20-sample Criterion
@@ -507,15 +516,37 @@ Resolutions of the open questions above, in order:
   on 1.25 s). `RESULTS.md`'s `### GenericMmapStore file portability
   (STORAGE-015)` subsection carries both and treats the Criterion figure
   as the trustworthy one. Nearer v0.1.0's +27% than v0.2.0's +0.3–4%, so
-  the trait-method fingerprint named above is the next step — the
-  owner's call, not built here (it adds to the record traits' API).
-  `create` roughly doubles at every size (the blob write, ~76 B/record,
-  3× the `.mmap` file).
+  the trait-method fingerprint named above was recorded as the next
+  step, the owner's call. **Second round (the owner asked for the
+  fallback; measured before building it): not warranted, not built.**
+  An in-place A/B — the same binary with `is_current_at`'s
+  `fingerprint()` stubbed out — puts the fingerprint at ~52 ms of a
+  1,222 ms `open` at 1M (4%); in isolation the streamed encoding is
+  79 ms, a hand-walk over every `Order` field 72 ms (−7 ms, under 1% of
+  `open`), and only hashing *fewer* fields goes lower (id + customer +
+  status 42 ms, id alone 21 ms) — the saving comes from covering less of
+  the record, which reopens the silently-stale-blob gap `ADR-0016`
+  rejected. The Criterion group re-run on unchanged code moved +8.8%
+  against itself, more than the fingerprint costs, so its +24–27% was
+  drift. Given the three-way choice (build whole-record for ~7 ms; build
+  id-only for ~50 ms and lose non-id staleness detection; close), the
+  owner chose to close: the streamed fingerprint stays, `BLOB_VERSION`
+  stays 1, `STORAGE-015` stays v0.1.0, and considered option 1 is now a
+  measured non-option at this record width rather than a fallback.
+  `RESULTS.md`'s `#### Follow-up: the trait-method fingerprint, measured
+  and not built` carries the numbers. `create` roughly doubles at every
+  size (the blob write, ~76 B/record, 3× the `.mmap` file).
 - `GenericProductionStore` path-taking constructor: not added, as
   proposed.
 
 ## Change history
 
+- 2026-09-02: Fallback measured and closed — the owner asked for the
+  trait-method fingerprint; an in-place A/B and an isolated comparison of
+  candidate fingerprints at 1M showed the shipped one at ~4% of `open`
+  and the fallback saving ~7 ms, so by the owner's choice it is not
+  built. Considered option 1, "Implementation status", and the open
+  question updated; no code change.
 - 2026-09-02: "Implementation status" addendum — implemented as
   `STORAGE-015`, open questions resolved or explicitly carried, the two
   departures from the sketch and the measured `open` cost recorded.

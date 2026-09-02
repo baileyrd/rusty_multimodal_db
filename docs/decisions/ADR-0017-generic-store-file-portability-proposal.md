@@ -91,7 +91,9 @@ options" section for the full reasoning. Summarized:
    per-type trait method hand-walking immutable fields adds one more
    easy-to-get-wrong method to a library whose forwarding boilerplate is
    already its named ergonomic cost — rejected for now, **named as the
-   fallback**. `std::hash::Hash` through FNV is unstable across Rust
+   fallback** (later measured at the owner's request and closed as not
+   warranted: −7 ms per million records; see "Acceptance and
+   implementation"). `std::hash::Hash` through FNV is unstable across Rust
    versions for an on-disk value — rejected. **Chosen: FNV-1a over the
    streamed `bincode` encoding** (an `io::Write` impl on the existing
    `Fnv1a64`): no allocation, no per-type code, one bound the blob needs
@@ -184,8 +186,13 @@ options" section for the full reasoning. Summarized:
   parallel constructor.
 - **The fingerprint includes the mmap-backed field.** A caller that
   reopens with regenerated scan values pays a spurious blob rewrite. No
-  in-crate caller does; named so it can be measured if one ever does, with
-  the trait-method fingerprint as the fallback.
+  in-crate caller does; named so it can be measured if one ever does. The
+  trait-method fingerprint was the fallback for this and for the
+  fingerprint's CPU cost; the CPU-cost case is measured and closed
+  below, and a whole-record trait walk could not exclude the mmap-backed
+  field marker-independently anyway (`Order` has three scannable
+  fields; which one a store maps is the store's `ScanMarker`, not the
+  record's to know).
 - **Two files must travel together for `open_portable`** — a typed
   `RecordBlobUnreadable`, never a partial store, and plain
   `open(records, path)` still works and heals the missing blob. Same
@@ -227,7 +234,12 @@ options" section for the full reasoning. Summarized:
 - Revisit if: `open`'s steady-state delta lands nearer `STORAGE-014`
   v0.1.0's +27% than v0.2.0's +0.3–4% at 1M — the per-type trait-method
   fingerprint (considered option 2's fallback) is the named next step, not
-  a different architecture.
+  a different architecture. *Measured in place at ~4% (2026-09-02, below):
+  on v0.2.0's side. The fallback itself saves ~7 ms per million records
+  and is closed as not warranted; this trigger now re-arms only for a
+  record type whose serialized width is far above `Order`'s ~76 B — a
+  domain with large variable-length fields — and the first step is the
+  same in-place A/B, not the trait.*
 - Revisit if: a second store type ever needs the blob to know which `R`
   it holds — a schema tag in the header is a `BLOB_VERSION` bump, not a
   redesign.
@@ -254,7 +266,8 @@ options" section for the full reasoning. Summarized:
   ever serialized, and `R`'s own derive already covers its id field), and
   no `Employee` portable helper is added (the `Symmetric` edge list is out
   of scope per this ADR; the helper waits for that decision).
-- **The `open`-cost revisit trigger above is tripped.** Release build,
+- **The `open`-cost revisit trigger above appeared tripped** (superseded
+  by the next entry). Release build,
   throwaway measurement, median of 7/7/3: `open` +80–108% at 1K (a
   ~0.1 ms floor on a 0.15 ms call), +19–33% at 100K (10–17 ms to
   stream-encode 100K records into the hasher), and −4% to +2% at 1M
@@ -275,3 +288,25 @@ options" section for the full reasoning. Summarized:
   constructors: `generic_production_create` and `generic_production_open`
   (added by the record-identity-keying round). Their numbers move by
   roughly the deltas above; `RESULTS.md` records the before/after pair.
+- 2026-09-02, **the fallback measured and closed as not warranted.** The
+  owner asked for the trait-method fingerprint; before building it this
+  round measured what it could save at 1M `Order` records (release
+  build, 5-sample medians). An in-place A/B — the same binary with
+  `is_current_at`'s `fingerprint()` stubbed to a header-only check —
+  puts `open` at 1,222 ms with the fingerprint and 1,170 ms without: the
+  shipped fingerprint is ~52 ms, **4% of `open`**, not the ~300 ms the
+  Criterion pair implied (that group, re-run on unchanged code, moved
+  +8.8% against itself — drift larger than the fingerprint). In
+  isolation: streamed bincode 79 ms; a hand-walk over every `Order`
+  field 72 ms (**−7 ms**, the same ~76 B/record hashed, only serde's
+  per-field dispatch saved); id + customer + status 42 ms; id alone
+  21 ms — each cheaper row hashes less of the record, and a reopen with
+  a changed non-hashed field would then keep the blob silently stale,
+  the gap `ADR-0016` rejected. Offered as a three-way choice (build
+  whole-record for ~7 ms; build id-only for ~50 ms at that cost; close),
+  the owner chose to close. Consequence: the streamed fingerprint of
+  considered option 2 stays, `BLOB_VERSION` stays 1, `STORAGE-015` stays
+  v0.1.0, no record-trait API is added, and the revisit trigger above is
+  re-read against the in-place figure (4%, v0.2.0's side). `RESULTS.md`'s
+  `#### Follow-up: the trait-method fingerprint, measured and not built`
+  carries the tables. No code change in this round.

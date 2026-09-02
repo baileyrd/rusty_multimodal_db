@@ -275,6 +275,8 @@ namespace, plus the two implementation decisions recorded in
   for it), reported in `RESULTS.md`, and judged against the design's
   own trigger (an `open` delta at 1M nearer `STORAGE-014` v0.1.0's +27%
   than v0.2.0's +0.3–4% would call for the trait-method fingerprint).
+  Measured in place at ~4% (see "Open questions"); the fallback measured
+  and closed as not warranted.
 
 ## Verification plan
 
@@ -321,8 +323,11 @@ purpose:
 
 ## Open questions
 
-- **`open`'s streamed-serialization fingerprint cost — measured, and
-  the design's fallback trigger is tripped.** At 1K it is +0.1 ms on a
+- **`open`'s streamed-serialization fingerprint cost — resolved: measured
+  in place at ~4% of `open` at 1M; the design's fallback (a per-type
+  trait-method fingerprint) measured at the owner's request and closed as
+  not warranted.** The first-round record, kept for the trail: at 1K it
+  is +0.1 ms on a
   0.15–0.2 ms call (one extra file open plus the hash); at 100K it is
   +19–33% (about 10–17 ms on a ~52 ms `open`, the cost of
   `bincode`-encoding 100K records into the hasher). At 1M — the cell the
@@ -336,9 +341,21 @@ purpose:
   the design's named fallback — a per-type trait-method fingerprint over
   immutable fields only, no serialization pass — is the next step, an
   owner's call (it adds to the record traits' API, its own decision).
-  Not built here. `generic_production_create` and
-  `generic_production_open` are the two published Criterion groups that
-  time these constructors; both move by roughly the deltas above.
+  `generic_production_create` and `generic_production_open` are the two
+  published Criterion groups that time these constructors. **Second
+  round**: an in-place A/B (the same binary, `is_current_at` with its
+  `fingerprint()` call stubbed out) puts `open` at 1M at 1,222 ms with the
+  fingerprint and 1,170 ms without — ~52 ms, 4%; the Criterion group
+  re-run on unchanged code moved +8.8% against itself, so its +24–27%
+  was drift. In isolation the streamed encoding is 79 ms, a hand-walk
+  over every `Order` field 72 ms (−7 ms, the same bytes hashed), and
+  only hashing fewer fields goes lower (42 ms / 21 ms) — at the cost of
+  a reopen with a changed non-hashed field keeping the blob silently
+  stale. Offered the three-way choice, the owner closed it: the shipped
+  fingerprint stays, `BLOB_VERSION` stays 1, no record-trait method is
+  added, this spec stays at 0.1.0 (no requirement changed). Numbers in
+  `RESULTS.md`'s `#### Follow-up: the trait-method fingerprint, measured
+  and not built`.
 - The spurious-rewrite case (regenerated scan values on `open`) is
   named, not measured — no call site exercises it.
 - A `Symmetric`-level edge companion, and whether the blob should record
@@ -346,6 +363,12 @@ purpose:
 
 ## Change history
 
+- 0.1.0 (2026-09-02, later the same day; no version bump — no
+  requirement changed): the `open`-cost open question resolved. The
+  design's trait-method-fingerprint fallback was measured before being
+  built (~4% of `open` at 1M for the shipped fingerprint, ~7 ms saved by
+  a whole-record trait walk) and closed as not warranted by the owner.
+  "Acceptance criteria" and "Open questions" updated; no code change.
 - 0.1.0 (2026-09-02): Initial accepted draft, alongside the real
   implementation (`src/generic/record_blob.rs`, the `pub(crate)` sharing
   refactor of `src/durability/record_blob.rs`, `src/generic/mmap_store.rs`,
