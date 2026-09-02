@@ -394,7 +394,9 @@ Implemented 2026-09-02 as `PRODUCTION-STORE-PORTABILITY` (`STORAGE-014`
 v0.1.0; `ADR-0016` "Acceptance and implementation"). Resolutions of the
 open questions above, in order:
 
-- `GenericMmapStore`: still a separate, later decision — unchanged.
+- `GenericMmapStore`: now proposed as its own decision —
+  `docs/design/GENERIC-STORE-PORTABILITY-DESIGN.md` / `ADR-0017` (design
+  only; this document is unchanged by it).
 - Naming convention: finalized as literally `<path>.records`
   (`src/durability/record_blob.rs::companion_path`), with
   `<companion>.rewrite-tmp` as the crash-safe temp file. The two files
@@ -423,6 +425,9 @@ open questions above, in order:
 
 ## Change history
 
+- 2026-09-02: "Implementation status" pointer — the `GenericMmapStore`
+  open question now has its own proposal (`GENERIC-STORE-PORTABILITY-DESIGN`
+  / `ADR-0017`).
 - 2026-09-02: "Implementation status" updated — the header-fingerprint
   follow-up is built (`STORAGE-014` v0.2.0, blob version 2); `open`'s
   steady-state cost is no longer a full serialize-and-compare.
