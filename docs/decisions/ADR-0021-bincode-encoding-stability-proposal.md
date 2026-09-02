@@ -254,3 +254,14 @@ Accepted: option 2. Concretely, at implementation:
   `RecordBlobUnreadable`. True as stated for the two generic blobs.
   No conforming writer produces such a file; recorded in the spec's
   "Traceability".
+- 2026-09-02: the one follow-up that finding opened — reorder
+  `RecordBlob::read` to fingerprint before decoding, as the generic
+  blobs do — examined and closed as not warranted by the owner
+  (`STORAGE-018` v0.1.1, docs-only, in this PR). It is a
+  `BLOB_VERSION` 2 → 3 format change, not a reorder: the `Dog` blob's
+  fingerprint is over decoded, age-free content so `ProductionStore::
+  open` does not rewrite the blob after `update_age`, and a byte hash
+  would include the ages. Either a second header field or an
+  age-zeroed body would restore that, at the cost of a design round
+  whose payoff is a "fingerprint mismatch" cause in place of a
+  "body does not decode" cause. Re-arm trigger in the spec.
