@@ -205,7 +205,7 @@ Proposed: option 2. Concretely, at implementation:
   The next unit registers `SERVER-001` v0.14.0 / FR-024 and implements
   per `docs/design/SERVER-TRANSACTION-SESSION-DESIGN.md` Part A. (PR
   #138.)
-- 2026-09-02: implemented as `SERVER-001` v0.14.0 (FR-024) in this PR
+- 2026-09-02: implemented as `SERVER-001` v0.14.0 (FR-024) in PR #139
   — `PROTOCOL_VERSION = 3`, `Begin`/`Commit`/`Rollback` at 11–13,
   `Staged` at 11, the three codes at 6–8, `MAX_STAGED_OPS`, the table
   row and seven golden vectors with every older vector unchanged;
