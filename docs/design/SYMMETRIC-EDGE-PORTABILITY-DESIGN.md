@@ -1,10 +1,12 @@
 # `Symmetric` Edge-List Portability Design (Accepted)
 
 - Status: **Accepted** (promoted from Proposed on 2026-09-02 — the owner
-  approved the design as proposed, no changes requested). Acceptance
-  authorizes the design only; implementation still requires its own unit
-  (registering `STORAGE-016` and a planning packet) before any code is
-  written — the posture `ADR-0016` and `ADR-0017` both took. See
+  approved the design as proposed, no changes requested). **Implemented**
+  as `STORAGE-016` v0.1.0 (`docs/specifications/storage/STORAGE-016-
+  symmetric-edge-list-portability.md`) in this PR — `src/generic/
+  edge_blob.rs`, the `Symmetric::create`/`open`/`read_portable_edges`/
+  `open_portable` impl block in `src/generic/store.rs`, and the `Employee`
+  helper switch in `src/generic_spike/employee_impl.rs`. See
   `ADR-0018-symmetric-edge-list-portability-proposal.md` for the decision
   record this document backs.
 - Date: 2026-09-02
@@ -412,9 +414,13 @@ first `open`.
 
 ## Traceability
 
-A new spec (next available: `STORAGE-016`) would be registered once this
-design is accepted, per the `STORAGE-015` precedent — no spec for the
-design document itself.
+Registered as `STORAGE-016` v0.1.0 (`docs/specifications/storage/
+STORAGE-016-symmetric-edge-list-portability.md`) with the implementation,
+per the `STORAGE-015` precedent — no spec for the design document itself.
+`STORAGE-016-FR-001..008` map one-to-one onto `SYMPORT-FR-001..008` above;
+the spec's own Traceability section records the single deviation from the
+sketch (`EdgeBlob::fingerprint` returns `Result`, since encoding an `Id`
+can fail).
 
 ## Open questions
 
@@ -438,3 +444,6 @@ design document itself.
   DESIGN` left.
 - 2026-09-02: Accepted as proposed by the owner, no changes requested.
   Implementation (`STORAGE-016`) is the next unit.
+- 2026-09-02: Implemented as `STORAGE-016` v0.1.0 in this PR. Status line
+  and Traceability updated; open questions unchanged (the schema-tag
+  question is the next queued unit).

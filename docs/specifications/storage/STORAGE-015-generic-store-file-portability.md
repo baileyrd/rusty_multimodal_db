@@ -358,10 +358,19 @@ purpose:
   and not built`.
 - The spurious-rewrite case (regenerated scan values on `open`) is
   named, not measured — no call site exercises it.
-- A `Symmetric`-level edge companion, and whether the blob should record
-  `R`, remain deferred per the design.
+- A `Symmetric`-level edge companion: resolved by `STORAGE-016` v0.1.0
+  (`<path>.edges`, `GENEDGE\0`, sharing this spec's header/hash/write
+  path a third time); `open_employee_production_stack_portable(path)`
+  is the `Employee` helper this spec's Traceability said would wait.
+  Whether the blob should record `R` remains deferred — the next queued
+  unit, and it applies to `GENEDGE\0` as well.
 
 ## Change history
+
+- 0.1.0 (2026-09-02, later the same day; no version bump — no
+  requirement changed): the `Symmetric`-companion open question resolved
+  by `STORAGE-016` v0.1.0 (see "Open questions"). No code in this spec's
+  scope changed.
 
 - 0.1.0 (2026-09-02, later the same day; no version bump — no
   requirement changed): the `open`-cost open question resolved. The

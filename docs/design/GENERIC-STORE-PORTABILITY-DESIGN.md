@@ -458,7 +458,9 @@ design document itself.
   (a `Symmetric`-level `<path>.edges`, or a stack-level blob) so
   `Employee`'s durable stack becomes fully portable — separate decision;
   this proposal leaves that helper honest about its one remaining
-  argument.
+  argument. **Resolved**: a `Symmetric`-level `<path>.edges` companion,
+  designed in `SYMMETRIC-EDGE-PORTABILITY-DESIGN.md` / `ADR-0018` and
+  implemented as `STORAGE-016` v0.1.0 (see "Implementation status").
 - Whether the blob should record which `R` it holds (a caller-supplied
   schema tag, or the slot widths as a weak check) — deferred; the `.mmap`
   file makes the same trust assumption today.
@@ -501,8 +503,13 @@ the "Proposed shape" above:
 
 Resolutions of the open questions above, in order:
 
-- `Symmetric` edge companion: still deferred — `Employee`'s durable stack
-  gains the derives and a blob, but is not yet portable on its own.
+- `Symmetric` edge companion: resolved by `STORAGE-016` v0.1.0
+  (`SYMMETRIC-EDGE-PORTABILITY`, this PR) — `src/generic/edge_blob.rs`
+  (`GENEDGE\0`, the `STORAGE-014` header/hash/write path a third time),
+  `Symmetric::create`/`open`/`read_portable_edges`/`open_portable`, and
+  `open_employee_production_stack_portable(path)` in `employee_impl.rs`.
+  `Employee`'s durable stack is now portable as three files: `<path>`,
+  `<path>.records`, `<path>.edges`.
 - Blob recording `R`: still deferred; the `.mmap` file makes the same
   trust assumption.
 - **`open`'s fingerprint cost at 1M: measured twice — the fallback

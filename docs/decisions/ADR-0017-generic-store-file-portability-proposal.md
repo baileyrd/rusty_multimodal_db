@@ -230,7 +230,10 @@ options" section for the full reasoning. Summarized:
   immutability assumption would need real rework.
 - Revisit if: `Symmetric`'s edge list needs persisting for a promoted
   (non-spike) domain — a `Symmetric`-level companion or a stack-level
-  blob, a separate decision.
+  blob, a separate decision. *Resolved 2026-09-02, ahead of any promoted
+  domain, as the owner's first queued follow-up: a `Symmetric`-level
+  `<path>.edges` companion (`ADR-0018`, `STORAGE-016` v0.1.0). The
+  `Employee` spike's durable stack is now portable as three files.*
 - Revisit if: `open`'s steady-state delta lands nearer `STORAGE-014`
   v0.1.0's +27% than v0.2.0's +0.3–4% at 1M — the per-type trait-method
   fingerprint (considered option 2's fallback) is the named next step, not

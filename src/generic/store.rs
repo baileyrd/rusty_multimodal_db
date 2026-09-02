@@ -15,12 +15,16 @@
 //! is generic over the whole composed stack and has no other way to reach
 //! in. Every wrapper below forwards it, same as every other capability.
 
+use super::edge_blob::{self, EdgeBlob};
 use super::query::{Children, FilterEq, GetById, Neighbors, Parent, ScanField, UpdateField};
 use super::traits::{ChildOf, IndexedField, Record, ScannableField, SymmetricRelation};
 use super::NotFound;
 use crate::durability::DurabilityError;
+use serde::de::DeserializeOwned;
+use serde::Serialize;
 use std::collections::HashMap;
 use std::marker::PhantomData;
+use std::path::Path;
 
 /// Owns the records — the base of every composed stack. The generic
 /// analogue of `CanonicalStore`'s `HashMap<Uuid, DogRecord>`.
@@ -386,6 +390,110 @@ where
     }
 }
 
+/// The edge list [`Symmetric::read_portable_edges`] returns: the pairs
+/// [`Symmetric::create`] was given, in the order it was given them.
+type PortableEdges<R> = Vec<(<R as Record>::Id, <R as Record>::Id)>;
+
+/// File portability for the edge list — `STORAGE-016`, per
+/// `docs/design/SYMMETRIC-EDGE-PORTABILITY-DESIGN.md` (Accepted) and
+/// ADR-0018. [`Symmetric::new`] builds its adjacency from a caller-supplied
+/// slice and persists nothing, which is right for the in-memory stacks
+/// but leaves a durable stack's symmetric edges living only in the
+/// caller's hands: `GenericMmapStore` carries its records in
+/// `<path>.records`, so a directory holding that pair could rebuild the
+/// core store but not the `Symmetric` layer above it. This block adds the
+/// `create`/`open`/`open_portable` triple that closes the gap — the edge
+/// list, as given and in caller order, in a companion "edge blob" at a
+/// caller-supplied `edges_path` (see `crate::generic::edge_blob`, and
+/// `edges_path` there for the `<path>.edges` single-relation convention
+/// the domain helpers use).
+///
+/// Bounded `R::Id: Serialize + DeserializeOwned` here and here only
+/// (`SYMPORT-FR-006`): `new`, the `Neighbors` impl, and every forwarding
+/// impl keep their bounds exactly, and no existing call site changes.
+/// A durable stack assembled with `new` rather than `create`/`open`
+/// writes no blob and is not portable — closed by convention in the
+/// domain helpers, not by type (the design doc's stated non-goal).
+impl<S, R, Marker> Symmetric<S, R, Marker>
+where
+    R: SymmetricRelation<Marker>,
+    R::Id: Serialize + DeserializeOwned,
+{
+    /// Write `edges` to `edges_path`, then [`Self::new`] (`SYMPORT-FR-001`).
+    /// Always writes: this is the constructor for a fresh stack, the
+    /// analogue of `GenericMmapStore::create`. `inner` is received already
+    /// built; if the blob write fails it is dropped with the error, and
+    /// its own files (if any) remain valid for a retried `create` or an
+    /// [`Self::open`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DurabilityError::Serde`] if `edges` can't be serialized,
+    /// [`DurabilityError::Io`] if the blob can't be written.
+    pub fn create(
+        inner: S,
+        edges: &[(R::Id, R::Id)],
+        edges_path: &Path,
+    ) -> Result<Self, DurabilityError> {
+        EdgeBlob::new(edges).encode()?.write(edges_path)?;
+        Ok(Self::new(inner, edges))
+    }
+
+    /// [`Self::new`] over the caller's `edges`, keeping the blob at
+    /// `edges_path` current with them (`SYMPORT-FR-004`): the header's
+    /// fingerprint is compared against `edges` first, and only if they
+    /// differ — a changed or reordered edge list, a missing, short,
+    /// foreign, or wrong-version file, a directory written before the
+    /// edge blob existed — is the blob re-encoded and rewritten. The
+    /// common reopen with the same edges never writes. The adjacency is
+    /// always built from `edges`, never from the blob, on this path.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DurabilityError::Serde`] if a stale blob's edges can't
+    /// be serialized, [`DurabilityError::Io`] if it can't be rewritten.
+    pub fn open(
+        inner: S,
+        edges: &[(R::Id, R::Id)],
+        edges_path: &Path,
+    ) -> Result<Self, DurabilityError> {
+        let blob = EdgeBlob::new(edges);
+        if !blob.is_current_at(edges_path) {
+            blob.encode()?.write(edges_path)?;
+        }
+        Ok(Self::new(inner, edges))
+    }
+
+    /// The edge list persisted at `edges_path`, in the order it was
+    /// written (`SYMPORT-FR-002`). Reads only the blob; never writes,
+    /// never touches the inner store.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DurabilityError::RecordBlobUnreadable`], naming
+    /// `edges_path`, if the blob is missing, isn't one (wrong magic — a
+    /// `GENBLOB\0` or `DOGBLOB\0` file included), was written by an
+    /// incompatible version, doesn't decode, or doesn't match its own
+    /// header fingerprint (`SYMPORT-FR-005`).
+    pub fn read_portable_edges(edges_path: &Path) -> Result<PortableEdges<R>, DurabilityError> {
+        edge_blob::read(edges_path)
+    }
+
+    /// Rebuild the layer from its blob alone — exactly
+    /// `Ok(Self::new(inner, &Self::read_portable_edges(edges_path)?))`
+    /// (`SYMPORT-FR-003`). Because the blob preserves edge order and
+    /// [`Self::new`] pushes adjacency entries in edge order, `neighbors`
+    /// returns the same sequences the original layer did
+    /// (`SYMPORT-FR-008`). Never writes.
+    ///
+    /// # Errors
+    ///
+    /// Everything [`Self::read_portable_edges`] can return.
+    pub fn open_portable(inner: S, edges_path: &Path) -> Result<Self, DurabilityError> {
+        Ok(Self::new(inner, &Self::read_portable_edges(edges_path)?))
+    }
+}
+
 impl<S, R, Marker> Neighbors<R, Marker> for Symmetric<S, R, Marker>
 where
     R: SymmetricRelation<Marker>,
@@ -607,5 +715,164 @@ where
 {
     fn neighbors(&self, id: R::Id) -> Vec<R::Id> {
         self.inner.neighbors(id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::fresh_temp_dir;
+    use std::path::PathBuf;
+
+    // The smallest record type that can sit under a `Symmetric` layer —
+    // the blob is independent of what `S` is, so nothing here needs a
+    // `.mmap` file or a real domain.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct Node {
+        id: u32,
+    }
+
+    impl Record for Node {
+        type Id = u32;
+        fn id(&self) -> u32 {
+            self.id
+        }
+    }
+
+    struct Linked;
+    impl SymmetricRelation<Linked> for Node {}
+
+    type Layer = Symmetric<BaseStore<Node>, Node, Linked>;
+
+    fn nodes() -> Vec<Node> {
+        (1..=4).map(|id| Node { id }).collect()
+    }
+
+    fn edges() -> Vec<(u32, u32)> {
+        vec![(1, 2), (2, 3), (1, 3)]
+    }
+
+    fn scratch(label: &str) -> (PathBuf, PathBuf) {
+        let dir = fresh_temp_dir(label).unwrap();
+        let edges_path = edge_blob::edges_path(&dir.join("store.mmap"));
+        (dir, edges_path)
+    }
+
+    fn all_neighbors(layer: &Layer) -> Vec<Vec<u32>> {
+        (1..=4)
+            .map(|id| Neighbors::<Node, Linked>::neighbors(layer, id))
+            .collect()
+    }
+
+    #[test]
+    fn create_then_open_portable_rebuilds_the_same_adjacency_in_the_same_order() {
+        let (dir, edges_path) = scratch("symmetric_create_open_portable");
+        let original = Layer::create(BaseStore::new(nodes()), &edges(), &edges_path).unwrap();
+        assert!(edges_path.is_file());
+
+        let portable = Layer::open_portable(BaseStore::new(nodes()), &edges_path).unwrap();
+        assert_eq!(all_neighbors(&portable), all_neighbors(&original));
+        assert_eq!(
+            Neighbors::<Node, Linked>::neighbors(&portable, 1),
+            vec![2, 3],
+            "edge order (1,2) before (1,3) must survive the round trip"
+        );
+        assert_eq!(
+            Neighbors::<Node, Linked>::neighbors(&portable, 4),
+            Vec::<u32>::new()
+        );
+        assert_eq!(Layer::read_portable_edges(&edges_path).unwrap(), edges());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn open_with_the_same_edges_does_not_rewrite_the_blob() {
+        let (dir, edges_path) = scratch("symmetric_open_no_rewrite");
+        let _ = Layer::create(BaseStore::new(nodes()), &edges(), &edges_path).unwrap();
+        let before_bytes = std::fs::read(&edges_path).unwrap();
+        let before_mtime = std::fs::metadata(&edges_path).unwrap().modified().unwrap();
+
+        let reopened = Layer::open(BaseStore::new(nodes()), &edges(), &edges_path).unwrap();
+        assert_eq!(
+            Neighbors::<Node, Linked>::neighbors(&reopened, 2),
+            vec![1, 3]
+        );
+        assert_eq!(std::fs::read(&edges_path).unwrap(), before_bytes);
+        assert_eq!(
+            std::fs::metadata(&edges_path).unwrap().modified().unwrap(),
+            before_mtime
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn open_with_changed_edges_rewrites_the_blob() {
+        let (dir, edges_path) = scratch("symmetric_open_rewrite");
+        let _ = Layer::create(BaseStore::new(nodes()), &edges(), &edges_path).unwrap();
+        let changed = vec![(1, 2), (3, 4)];
+
+        let reopened = Layer::open(BaseStore::new(nodes()), &changed, &edges_path).unwrap();
+        assert_eq!(Neighbors::<Node, Linked>::neighbors(&reopened, 3), vec![4]);
+        assert_eq!(Layer::read_portable_edges(&edges_path).unwrap(), changed);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn open_with_reordered_edges_counts_as_changed() {
+        let (dir, edges_path) = scratch("symmetric_open_reorder");
+        let _ = Layer::create(BaseStore::new(nodes()), &edges(), &edges_path).unwrap();
+        let mut reordered = edges();
+        reordered.swap(0, 2);
+
+        let reopened = Layer::open(BaseStore::new(nodes()), &reordered, &edges_path).unwrap();
+        assert_eq!(
+            Neighbors::<Node, Linked>::neighbors(&reopened, 1),
+            vec![3, 2],
+            "reordered input must be observable through neighbors"
+        );
+        assert_eq!(Layer::read_portable_edges(&edges_path).unwrap(), reordered);
+        let portable = Layer::open_portable(BaseStore::new(nodes()), &edges_path).unwrap();
+        assert_eq!(
+            Neighbors::<Node, Linked>::neighbors(&portable, 1),
+            vec![3, 2]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_missing_blob_is_a_typed_error_from_open_portable_and_healed_by_open() {
+        let (dir, edges_path) = scratch("symmetric_missing_blob");
+        match Layer::open_portable(BaseStore::new(nodes()), &edges_path) {
+            Err(DurabilityError::RecordBlobUnreadable { path, cause }) => {
+                assert_eq!(path, edges_path);
+                assert!(cause.starts_with("cannot read file"), "{cause}");
+            }
+            Err(other) => panic!("expected RecordBlobUnreadable, got {other:?}"),
+            Ok(_) => panic!("expected RecordBlobUnreadable, got a layer"),
+        }
+        assert!(matches!(
+            Layer::read_portable_edges(&edges_path),
+            Err(DurabilityError::RecordBlobUnreadable { .. })
+        ));
+
+        // The pre-feature directory case: `open` with the caller's edges
+        // writes the blob it finds missing, after which the portable
+        // path works.
+        let healed = Layer::open(BaseStore::new(nodes()), &edges(), &edges_path).unwrap();
+        assert_eq!(Neighbors::<Node, Linked>::neighbors(&healed, 1), vec![2, 3]);
+        assert!(edges_path.is_file());
+        let portable = Layer::open_portable(BaseStore::new(nodes()), &edges_path).unwrap();
+        assert_eq!(all_neighbors(&portable), all_neighbors(&healed));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn create_over_an_existing_blob_always_rewrites_it() {
+        let (dir, edges_path) = scratch("symmetric_create_overwrites");
+        let _ = Layer::create(BaseStore::new(nodes()), &edges(), &edges_path).unwrap();
+        let fresh = vec![(4, 1)];
+        let _ = Layer::create(BaseStore::new(nodes()), &fresh, &edges_path).unwrap();
+        assert_eq!(Layer::read_portable_edges(&edges_path).unwrap(), fresh);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

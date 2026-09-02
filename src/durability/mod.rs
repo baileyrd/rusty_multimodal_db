@@ -184,7 +184,10 @@ pub enum DurabilityError {
     /// from [`Self::InvalidMagic`]/[`Self::SchemaVersionMismatch`], which
     /// describe the *ages* file: a caller who copied only the `.mmap` file
     /// (a pre-`STORAGE-014` backup, say) gets told the companion is the
-    /// problem, not misled into thinking the ages file is corrupt.
+    /// problem, not misled into thinking the ages file is corrupt. The
+    /// `Symmetric` edge-list companion (`<path>.edges`, `STORAGE-016`,
+    /// `generic::edge_blob`) reports through this same variant — `path`
+    /// says which companion failed.
     #[error("record blob at {path}: {cause}")]
     RecordBlobUnreadable {
         path: std::path::PathBuf,
