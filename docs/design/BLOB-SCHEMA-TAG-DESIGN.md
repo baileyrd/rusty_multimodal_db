@@ -1,7 +1,9 @@
-# Companion Blob Schema Tag Design (Proposed)
+# Companion Blob Schema Tag Design (Accepted)
 
-- Status: **Proposed** — awaiting the owner's acceptance. Nothing in
-  this document is implemented; see
+- Status: **Accepted** (promoted from Proposed on 2026-09-02 — the owner
+  approved the design as proposed, the hashed 8-byte tag over the
+  readable 32-byte string, no changes requested). Nothing in this
+  document is implemented yet; see
   `docs/decisions/ADR-0019-blob-schema-tag-proposal.md` for the decision
   record this document backs.
 - Date: 2026-09-02
@@ -541,3 +543,4 @@ Tagged image layout, both magics:
 ## Change history
 
 - 2026-09-02: Proposed.
+- 2026-09-02: Accepted as proposed by the owner, no changes requested.

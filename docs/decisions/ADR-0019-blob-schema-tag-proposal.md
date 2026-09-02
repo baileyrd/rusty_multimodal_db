@@ -1,6 +1,6 @@
 # ADR-0019: Tag the generic companion blobs with the record type they hold — `GENBLOB\0` and `GENEDGE\0` version 2
 
-- Status: **Proposed** — awaiting the owner's acceptance
+- Status: **Accepted** (promoted from Proposed on 2026-09-02 — the owner approved the design as proposed, the hashed 8-byte tag over the readable 32-byte string, no changes requested)
 - Date: 2026-09-02
 - Deciders: baileyrd
 - Related: `docs/design/BLOB-SCHEMA-TAG-DESIGN.md` (the full design
@@ -134,7 +134,7 @@ implementation, the posture ADR-0016, ADR-0017, and ADR-0018 all took.
 
 ## Decision
 
-Proposed, subject to acceptance:
+Accepted as proposed:
 
 - A new public, opt-in trait `SchemaTag` in `src/generic/traits.rs`
   with one associated `const SCHEMA_TAG: &'static str`, re-exported
@@ -249,5 +249,7 @@ Proposed, subject to acceptance:
 
 ## Acceptance and implementation
 
-- (pending) Owner's decision: accept as proposed, prefer the readable
-  32-byte tag string, or request other changes.
+- 2026-09-02: accepted as proposed (the hashed 8-byte tag; the readable
+  32-byte string alternative declined). The next unit bumps `STORAGE-015`
+  to v0.2.0 and `STORAGE-016` to v0.2.0 and implements per
+  `docs/design/BLOB-SCHEMA-TAG-DESIGN.md`.

@@ -363,9 +363,9 @@ purpose:
   path a third time); `open_employee_production_stack_portable(path)`
   is the `Employee` helper this spec's Traceability said would wait.
   Whether the blob should record `R` is now proposed in
-  `BLOB-SCHEMA-TAG-DESIGN.md` / `ADR-0019` (this spec's v0.2.0 if
-  accepted: `GENBLOB\0` version 2 with a schema-tag header field, and
-  the same for `GENEDGE\0`); awaiting the owner's decision.
+  `BLOB-SCHEMA-TAG-DESIGN.md` / `ADR-0019` and accepted as proposed (this spec's v0.2.0,
+  next: `GENBLOB\0` version 2 with a schema-tag header field, and the
+  same for `GENEDGE\0`).
 
 ## Change history
 
