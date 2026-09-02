@@ -3,7 +3,7 @@
 - Status: **Accepted** (promoted from Proposed on 2026-09-02 — the owner
   approved the design as proposed, the hashed 8-byte tag over the
   readable 32-byte string, no changes requested). **Implemented** in
-  this PR as `STORAGE-015` v0.2.0 / `STORAGE-016` v0.2.0 (the
+  PR #108 as `STORAGE-015` v0.2.0 / `STORAGE-016` v0.2.0 (the
   `BLOB-SCHEMA-TAG` roadmap unit); see
   `docs/decisions/ADR-0019-blob-schema-tag-proposal.md` for the decision
   record this document backs and the two specs for the requirements it
@@ -546,7 +546,7 @@ Tagged image layout, both magics:
 
 - 2026-09-02: Proposed.
 - 2026-09-02: Accepted as proposed by the owner, no changes requested.
-- 2026-09-02: Implemented in this PR as `STORAGE-015` v0.2.0 /
+- 2026-09-02: Implemented in PR #108 as `STORAGE-015` v0.2.0 /
   `STORAGE-016` v0.2.0, matching the shape sketched here (the only
   addition: `TAG_OFFSET`/`TAGGED_HEADER_LEN` are `pub(crate)` so the
   edge blob's tests can build version-1 and cut-inside-the-tag images).

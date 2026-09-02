@@ -254,7 +254,7 @@ Accepted as proposed:
   to v0.2.0 and `STORAGE-016` to v0.2.0 and implements per
   `docs/design/BLOB-SCHEMA-TAG-DESIGN.md`.
 - 2026-09-02: implemented as `STORAGE-015` v0.2.0 / `STORAGE-016` v0.2.0
-  in this PR (`SchemaTag` in `src/generic/traits.rs`; the tagged-header
+  in PR #108 (`SchemaTag` in `src/generic/traits.rs`; the tagged-header
   helpers and `BLOB_VERSION = 2` in `src/generic/record_blob.rs`;
   `src/generic/edge_blob.rs` sharing them with the tag passed as a
   value; the bound on `GenericMmapStore`'s four file constructors, now

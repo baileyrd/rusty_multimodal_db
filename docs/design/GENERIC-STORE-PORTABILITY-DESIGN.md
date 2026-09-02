@@ -507,7 +507,7 @@ the "Proposed shape" above:
 Resolutions of the open questions above, in order:
 
 - `Symmetric` edge companion: resolved by `STORAGE-016` v0.1.0
-  (`SYMMETRIC-EDGE-PORTABILITY`, this PR) — `src/generic/edge_blob.rs`
+  (`SYMMETRIC-EDGE-PORTABILITY`, PR #102) — `src/generic/edge_blob.rs`
   (`GENEDGE\0`, the `STORAGE-014` header/hash/write path a third time),
   `Symmetric::create`/`open`/`read_portable_edges`/`open_portable`, and
   `open_employee_production_stack_portable(path)` in `employee_impl.rs`.
