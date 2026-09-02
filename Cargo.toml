@@ -141,6 +141,10 @@ required-features = ["server"]
 name = "server_tls_integration"
 required-features = ["server"]
 
+[[test]]
+name = "server_protocol_version"
+required-features = ["server", "research"]
+
 # Same treatment, same reason.
 [[example]]
 name = "memory_footprint"

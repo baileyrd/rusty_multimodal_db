@@ -168,7 +168,10 @@ runtime, and field-addressing choices). Summarized:
   stable across 1.x by `bincode`'s own promise "provided the same
   configuration is used"; the proposal names that configuration in one
   codec and pins it with golden vectors. Implemented as `STORAGE-018`
-  v0.1.0 (`crate::codec`; `SERVER-001` v0.9.1) — resolved.*
+  v0.1.0 (`crate::codec`; `SERVER-001` v0.9.1) — resolved.* *The
+  shape's evolution — a version and a handshake — followed as
+  `ADR-0022` / `SERVER-001` v0.10.0 (FR-020): `PROTOCOL_VERSION = 2`,
+  an optional first-frame `Hello`, append-only rules — resolved.*
 
 ## Validation and revisit triggers
 

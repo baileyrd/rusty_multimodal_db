@@ -47,6 +47,10 @@ adds none.
 - Not wire-protocol versioning. Frames still carry no protocol version
   and there is no hello handshake — a `Request`/`Response` shape change
   remains a named incompatibility, `SERVER-001`'s own concern.
+  *Since resolved there: `SERVER-001` v0.10.0 / FR-020 (`ADR-0022`)
+  adds `PROTOCOL_VERSION = 2`, an optional first-frame `Hello`, and
+  append-only compatibility rules; this spec's encoding sits unchanged
+  under that versioned shape.*
 - Not a smaller `Uuid` encoding. Every id still costs 24 bytes (an
   8-byte length prefix plus 16); recorded, not changed.
 - Not a layout fingerprint on the blobs (`ADR-0019`'s revisit trigger).
@@ -293,6 +297,8 @@ to it:
 - **Wire-protocol versioning.** Frames carry no protocol version;
   a `Request`/`Response` shape change is a named incompatibility.
   Revisit trigger: a second deployed client build (`ADR-0021`).
+  *Resolved ahead of the trigger: `SERVER-001` v0.10.0 / FR-020
+  (`ADR-0022`, `SERVER-PROTOCOL-VERSION-DESIGN`).*
 - **`bincode` 2.x.** `config::legacy()` against the golden vectors is
   the migration's acceptance test; `standard()` is a format change to
   everything. No driver now.
