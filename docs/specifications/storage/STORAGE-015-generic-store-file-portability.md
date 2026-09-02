@@ -362,8 +362,10 @@ purpose:
   (`<path>.edges`, `GENEDGE\0`, sharing this spec's header/hash/write
   path a third time); `open_employee_production_stack_portable(path)`
   is the `Employee` helper this spec's Traceability said would wait.
-  Whether the blob should record `R` remains deferred — the next queued
-  unit, and it applies to `GENEDGE\0` as well.
+  Whether the blob should record `R` is now proposed in
+  `BLOB-SCHEMA-TAG-DESIGN.md` / `ADR-0019` (this spec's v0.2.0 if
+  accepted: `GENBLOB\0` version 2 with a schema-tag header field, and
+  the same for `GENEDGE\0`); awaiting the owner's decision.
 
 ## Change history
 

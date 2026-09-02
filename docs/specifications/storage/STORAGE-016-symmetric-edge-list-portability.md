@@ -268,6 +268,9 @@ rather than swallowing it.
 - Whether the blob should record which relation (`R`, `Marker`) it holds
   — deferred together with `STORAGE-015`'s identical question, to be
   resolved together (the owner's queued follow-up 2, "blob schema tag").
+  **Proposed** in `BLOB-SCHEMA-TAG-DESIGN.md` / `ADR-0019` (this spec's
+  v0.2.0 if accepted: `GENEDGE\0` version 2 with a schema-tag header
+  field); awaiting the owner's decision.
 - Whether a stack should carry a manifest naming its files — not
   proposed; the helper's docs name the three, and a missing one is a
   typed error naming which.

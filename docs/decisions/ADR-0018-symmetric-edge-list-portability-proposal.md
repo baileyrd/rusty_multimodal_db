@@ -176,7 +176,8 @@ options" section for the full reasoning. Summarized:
 - Not decided here, deferred deliberately: a schema tag recording which
   relation a blob holds (the same open question `STORAGE-015` deferred —
   to be resolved together, and queued by the owner as follow-up 2 of the
-  same four); a stack-level manifest naming a stack's files.
+  same four — since proposed as `BLOB-SCHEMA-TAG-DESIGN.md` /
+  `ADR-0019`); a stack-level manifest naming a stack's files.
 
 ## Consequences
 
@@ -260,7 +261,9 @@ options" section for the full reasoning. Summarized:
   convention helper would need a second name, and the manifest open
   question becomes more pressing.
 - Revisit if: the schema-tag question is resolved for `STORAGE-015` — the
-  same `BLOB_VERSION` bump applies here, at the same time.
+  same `BLOB_VERSION` bump applies here, at the same time. *Tripped:
+  `ADR-0019` proposes exactly that, both blobs to version 2 in one unit;
+  awaiting the owner's decision.*
 - Revisit if: a caller is found assembling a durable stack with
   `Symmetric::new` and relying on portability — the by-convention gap
   would then be real, and the design's third open question (retire `new`
