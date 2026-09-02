@@ -320,7 +320,7 @@ interfaces" section for the full reasoning. Summarized:
   explicit client-side trust configuration** — not a plug-and-play
   upgrade for an existing plaintext client without also updating its own
   connection setup. *Taken for this crate's own client at `SERVER-001`
-  v0.12.0 / FR-022 (the PR after #129): `SchemaDrivenClient::connect_with`
+  v0.12.0 / FR-022 (PR #130): `SchemaDrivenClient::connect_with`
   + `ClientTlsConfig::new(server_name, TrustPolicy)`; no change to this
   decision.*
 - The exact call-site shape wrapping `rusty_tls::TlsServerStream`
