@@ -162,7 +162,12 @@ runtime, and field-addressing choices). Summarized:
 - `bincode`'s wire-format stability across crate versions is unverified
   for this new use (client/server version skew) — previously only mattered
   within one process's own on-disk lifetime, a materially different
-  compatibility bar.
+  compatibility bar. *Verified and scoped by `ADR-0021` /
+  `docs/design/BINCODE-ENCODING-STABILITY-DESIGN.md` (Proposed,
+  2026-09-02): the free functions pin fixint/little-endian/no-limit,
+  stable across 1.x by `bincode`'s own promise "provided the same
+  configuration is used"; the proposal names that configuration in one
+  codec and pins it with golden vectors.*
 
 ## Validation and revisit triggers
 
