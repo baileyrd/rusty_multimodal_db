@@ -349,14 +349,45 @@
 //! discovers have no persisted slot yet — the specific mechanism this
 //! module's own diagnosis round named as a real, reproducible hazard.
 //! `create`'s race is untouched here.
+//!
+//! # A companion record blob, so the files are portable on their own
+//!
+//! **Fixed in a follow-up round** (`STORAGE-015`, ADR-0017,
+//! `docs/design/GENERIC-STORE-PORTABILITY-DESIGN.md`). Everything above
+//! persists exactly one field per record — the mmap-backed
+//! [`ScannableField`] — so a `.mmap` file alone could never rebuild the
+//! records: [`GenericMmapStore::open`] has always needed the caller to
+//! hand the full `Vec<R>` back in, which is the same one-durable-field gap
+//! `ProductionStore` closed in `STORAGE-014`, and this round closes it the
+//! same way. [`GenericMmapStore::create`] now also writes the complete
+//! record set, `bincode`-serialized behind a fingerprinted header, to a
+//! companion file at `<path>.records` (see `generic::record_blob`, which
+//! shares its header layout, hash, and atomic write with the `Dog` blob);
+//! [`GenericMmapStore::open`] checks that companion's 20-byte header
+//! against a fingerprint of the records it was given and rewrites the
+//! blob only when they differ — so a directory written before this round
+//! (mmap file only) heals on its first `open`, and the steady-state
+//! reopen with the same dataset costs one fingerprint pass and one small
+//! read, never a file write. Two new constructors read the companion
+//! back: [`GenericMmapStore::read_portable_records`] (the persisted
+//! `Vec<R>`, in its original order — relationship layers built above the
+//! store need that order to be deterministic) and
+//! [`GenericMmapStore::open_portable`] (`open` fed from it, so the pair
+//! of files is a complete, copyable store). The `.mmap` file's format,
+//! header, slot layout, and reconciliation are untouched; the one visible
+//! change to the type is the `Serialize + DeserializeOwned` bound on `R`,
+//! which a record must satisfy for the blob to exist at all.
 
 use super::mmap_field::MmapFieldValue;
 use super::query::{FilterEq, GetById, ScanField, UpdateField};
+use super::record_blob::{self, blob_path, GenericRecordBlob};
 use super::store::Flush;
 use super::traits::{IndexedField, Record, ScannableField};
 use super::NotFound;
 use crate::durability::DurabilityError;
 use memmap2::MmapMut;
+use serde::de::DeserializeOwned;
+use serde::Serialize;
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{Seek, Write};
@@ -443,7 +474,11 @@ type PersistedSlots<R, ScanMarker> =
 
 impl<R, IndexMarker, ScanMarker> GenericMmapStore<R, IndexMarker, ScanMarker>
 where
-    R: IndexedField<IndexMarker> + ScannableField<ScanMarker> + Clone,
+    R: IndexedField<IndexMarker>
+        + ScannableField<ScanMarker>
+        + Clone
+        + Serialize
+        + DeserializeOwned,
     R::Id: MmapFieldValue,
     R::ScanValue: MmapFieldValue,
 {
@@ -643,16 +678,24 @@ where
     /// file at `path` — the versioned header first, then one `(id, value)`
     /// slot per record in `records`' own order — and memory-map it.
     /// Mirrors `MmapAgeStore::create`'s overall shape, generically, with
-    /// the header and id prefix this module's own docs describe.
+    /// the header and id prefix this module's own docs describe. Also
+    /// writes the full record set to the companion blob at
+    /// `<path>.records` (see module docs, "A companion record blob") —
+    /// encoded before the mmap file is touched, installed after it is
+    /// complete, so a failure in either step never leaves a blob that
+    /// describes a store which doesn't exist (`STORAGE-015-FR-002`).
     ///
     /// # Errors
     ///
     /// Returns [`DurabilityError::Io`] if `path`'s parent can't be
-    /// created, the file can't be created/sized, or the mapping fails.
+    /// created, the file can't be created/sized, the mapping fails, or
+    /// the companion blob can't be written; [`DurabilityError::Serde`] if
+    /// `records` can't be serialized.
     pub fn create(records: Vec<R>, path: &Path) -> Result<Self, DurabilityError> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
+        let encoded_blob = GenericRecordBlob::new(&records).encode()?;
         let slot_width = Self::slot_width();
         let indexes = Self::build_indexes(&records);
 
@@ -677,6 +720,7 @@ where
             position_index.insert(record.id(), position);
         }
         mmap.flush()?;
+        encoded_blob.write(&blob_path(path))?;
 
         Ok(Self {
             records: indexes.records,
@@ -699,14 +743,34 @@ where
     /// [`Self::append_committed_slot`], not written at a locally-computed
     /// position; see module docs' "next free slot" race section for why.
     ///
+    /// Also keeps the companion blob at `<path>.records` current with
+    /// `records`: its header fingerprint is compared against `records`
+    /// first, and only if they differ (a changed dataset, a missing or
+    /// foreign file, a directory written before the blob existed) is the
+    /// blob re-encoded and — after the mmap file has opened and
+    /// reconciled successfully — rewritten in place. The common reopen
+    /// with the same dataset never writes (`STORAGE-015-FR-003`).
+    ///
     /// # Errors
     ///
     /// Returns [`DurabilityError::Io`] if `path` doesn't exist, can't be
-    /// mapped, or a new slot can't be appended; [`DurabilityError::InvalidMagic`]
+    /// mapped, a new slot can't be appended, or a stale companion blob
+    /// can't be rewritten; [`DurabilityError::InvalidMagic`]
     /// or [`DurabilityError::SchemaVersionMismatch`] if the file's header
     /// doesn't check out — see this module's own doc comment. Either
     /// header failure returns before any slot data is read.
+    /// [`DurabilityError::Serde`] if a stale blob's records can't be
+    /// serialized.
     pub fn open(records: Vec<R>, path: &Path) -> Result<Self, DurabilityError> {
+        let companion = blob_path(path);
+        let stale_blob = {
+            let blob = GenericRecordBlob::new(&records);
+            if blob.is_current_at(&companion) {
+                None
+            } else {
+                Some(blob.encode()?)
+            }
+        };
         let indexes = Self::build_indexes(&records);
         let slot_width = Self::slot_width();
         let id_width = R::Id::BYTE_WIDTH;
@@ -789,6 +853,13 @@ where
         // SAFETY: see `create`.
         let mmap = unsafe { MmapMut::map_mut(&file)? };
 
+        // Only now that the mmap file has opened and reconciled cleanly:
+        // an error above must never replace a valid blob with one
+        // describing a store this call failed to produce.
+        if let Some(encoded) = stale_blob {
+            encoded.write(&companion)?;
+        }
+
         Ok(Self {
             records: indexes.records,
             index: indexes.index,
@@ -798,11 +869,46 @@ where
             _marker: PhantomData,
         })
     }
+
+    /// The record set persisted in the companion blob at `<path>.records`,
+    /// in the order it was written — the `Vec<R>` a later [`Self::open`]
+    /// (or a relationship layer built above the store, which needs that
+    /// order to be deterministic) would otherwise have had to be handed
+    /// by the caller. Reads only the blob; never touches the mmap file,
+    /// never writes anything.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DurabilityError::RecordBlobUnreadable`], naming the
+    /// companion path, if the blob is missing, isn't one (wrong magic —
+    /// a `ProductionStore` companion included), was written by an
+    /// incompatible version, doesn't decode, or doesn't match its own
+    /// header fingerprint (`STORAGE-015-FR-005`).
+    pub fn read_portable_records(path: &Path) -> Result<Vec<R>, DurabilityError> {
+        record_blob::read(&blob_path(path))
+    }
+
+    /// Reopen a store from its two files alone — exactly
+    /// `open(read_portable_records(path)?, path)`. Because the records
+    /// come from the blob itself, `open`'s currency check always passes
+    /// and nothing is rewritten (`STORAGE-015-FR-004`).
+    ///
+    /// # Errors
+    ///
+    /// Everything [`Self::read_portable_records`] and [`Self::open`] can
+    /// return.
+    pub fn open_portable(path: &Path) -> Result<Self, DurabilityError> {
+        Self::open(Self::read_portable_records(path)?, path)
+    }
 }
 
 impl<R, IndexMarker, ScanMarker> GetById<R> for GenericMmapStore<R, IndexMarker, ScanMarker>
 where
-    R: IndexedField<IndexMarker> + ScannableField<ScanMarker> + Clone,
+    R: IndexedField<IndexMarker>
+        + ScannableField<ScanMarker>
+        + Clone
+        + Serialize
+        + DeserializeOwned,
     R::Id: MmapFieldValue,
     R::ScanValue: MmapFieldValue,
 {
@@ -821,7 +927,11 @@ where
 impl<R, IndexMarker, ScanMarker> FilterEq<R, IndexMarker>
     for GenericMmapStore<R, IndexMarker, ScanMarker>
 where
-    R: IndexedField<IndexMarker> + ScannableField<ScanMarker> + Clone,
+    R: IndexedField<IndexMarker>
+        + ScannableField<ScanMarker>
+        + Clone
+        + Serialize
+        + DeserializeOwned,
     R::Id: MmapFieldValue,
     R::ScanValue: MmapFieldValue,
 {
@@ -833,7 +943,11 @@ where
 impl<R, IndexMarker, ScanMarker> ScanField<R, ScanMarker>
     for GenericMmapStore<R, IndexMarker, ScanMarker>
 where
-    R: IndexedField<IndexMarker> + ScannableField<ScanMarker> + Clone,
+    R: IndexedField<IndexMarker>
+        + ScannableField<ScanMarker>
+        + Clone
+        + Serialize
+        + DeserializeOwned,
     R::Id: MmapFieldValue,
     R::ScanValue: MmapFieldValue,
 {
@@ -881,7 +995,11 @@ where
 impl<R, IndexMarker, ScanMarker> UpdateField<R, ScanMarker>
     for GenericMmapStore<R, IndexMarker, ScanMarker>
 where
-    R: IndexedField<IndexMarker> + ScannableField<ScanMarker> + Clone,
+    R: IndexedField<IndexMarker>
+        + ScannableField<ScanMarker>
+        + Clone
+        + Serialize
+        + DeserializeOwned,
     R::Id: MmapFieldValue,
     R::ScanValue: MmapFieldValue,
 {
@@ -894,7 +1012,11 @@ where
 
 impl<R, IndexMarker, ScanMarker> Flush for GenericMmapStore<R, IndexMarker, ScanMarker>
 where
-    R: IndexedField<IndexMarker> + ScannableField<ScanMarker> + Clone,
+    R: IndexedField<IndexMarker>
+        + ScannableField<ScanMarker>
+        + Clone
+        + Serialize
+        + DeserializeOwned,
     R::Id: MmapFieldValue,
     R::ScanValue: MmapFieldValue,
 {
@@ -1182,6 +1304,209 @@ mod tests {
                 .amount_cents,
             2_500,
             "an untouched slot must be unaffected by a neighboring slot's corruption"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- companion record blob / portability (STORAGE-015) ----
+
+    #[test]
+    fn create_writes_the_companion_blob_and_open_portable_round_trips_every_field() {
+        let dir = crate::bench_support::fresh_temp_dir("generic_mmap_portable").unwrap();
+        let path = dir.join("amount.mmap");
+        {
+            let mut store =
+                GenericMmapStore::<Order, Status, Amount>::create(sample(), &path).unwrap();
+            UpdateField::update(&mut store, uuid::Uuid::from_u128(1), 77_000).unwrap();
+            Flush::flush(&store).unwrap();
+        }
+        assert!(
+            blob_path(&path).is_file(),
+            "create must write <path>.records"
+        );
+
+        // Records come back in creation order, every field intact.
+        let records =
+            GenericMmapStore::<Order, Status, Amount>::read_portable_records(&path).unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].id, uuid::Uuid::from_u128(1));
+        assert_eq!(records[1].id, uuid::Uuid::from_u128(2));
+        assert_eq!(records[1].status, OrderStatus::Pending);
+        assert_eq!(records[1].created_at_unix_ms, 2_000);
+
+        let reopened = GenericMmapStore::<Order, Status, Amount>::open_portable(&path).unwrap();
+        let first = GetById::get(&reopened, uuid::Uuid::from_u128(1)).unwrap();
+        // The mmap-backed field reads from the mmap file (the update
+        // survived), the non-durable fields from the blob.
+        assert_eq!(first.amount_cents, 77_000);
+        assert_eq!(first.status, OrderStatus::Shipped);
+        assert_eq!(first.customer_id, uuid::Uuid::from_u128(100));
+        assert_eq!(first.created_at_unix_ms, 1_000);
+        assert_eq!(
+            FilterEq::filter_eq(&reopened, &OrderStatus::Pending),
+            vec![uuid::Uuid::from_u128(2)]
+        );
+        let mut scanned = ScanField::scan(&reopened);
+        scanned.sort_unstable();
+        assert_eq!(scanned, vec![4_200, 77_000]);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn copying_both_files_to_a_fresh_directory_reopens_portably() {
+        let dir = crate::bench_support::fresh_temp_dir("generic_mmap_portable_copy").unwrap();
+        let path = dir.join("amount.mmap");
+        {
+            let mut store =
+                GenericMmapStore::<Order, Status, Amount>::create(sample(), &path).unwrap();
+            UpdateField::update(&mut store, uuid::Uuid::from_u128(2), 1).unwrap();
+            Flush::flush(&store).unwrap();
+        }
+
+        let elsewhere = dir.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let copied = elsewhere.join("renamed.mmap");
+        std::fs::copy(&path, &copied).unwrap();
+        std::fs::copy(blob_path(&path), blob_path(&copied)).unwrap();
+
+        let reopened = GenericMmapStore::<Order, Status, Amount>::open_portable(&copied).unwrap();
+        assert_eq!(
+            GetById::get(&reopened, uuid::Uuid::from_u128(2))
+                .unwrap()
+                .amount_cents,
+            1
+        );
+        assert_eq!(
+            GetById::get(&reopened, uuid::Uuid::from_u128(1))
+                .unwrap()
+                .status,
+            OrderStatus::Shipped
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_missing_companion_is_unreadable_naming_its_path_and_plain_open_heals_it() {
+        let dir = crate::bench_support::fresh_temp_dir("generic_mmap_portable_missing").unwrap();
+        let path = dir.join("amount.mmap");
+        GenericMmapStore::<Order, Status, Amount>::create(sample(), &path).unwrap();
+        let companion = blob_path(&path);
+        std::fs::remove_file(&companion).unwrap();
+
+        // Both portable entry points fail distinctly, without touching the
+        // mmap file, and without a panic.
+        match GenericMmapStore::<Order, Status, Amount>::read_portable_records(&path) {
+            Err(DurabilityError::RecordBlobUnreadable { path: p, .. }) => assert_eq!(p, companion),
+            other => panic!("expected RecordBlobUnreadable, got {other:?}"),
+        }
+        assert!(matches!(
+            GenericMmapStore::<Order, Status, Amount>::open_portable(&path),
+            Err(DurabilityError::RecordBlobUnreadable { .. })
+        ));
+        assert!(!companion.exists(), "a failed read must not create a blob");
+
+        // The caller-supplied path (the pre-feature contract) heals it.
+        GenericMmapStore::<Order, Status, Amount>::open(sample(), &path).unwrap();
+        assert!(companion.is_file());
+        let healed = GenericMmapStore::<Order, Status, Amount>::open_portable(&path).unwrap();
+        assert_eq!(
+            GetById::get(&healed, uuid::Uuid::from_u128(1))
+                .unwrap()
+                .amount_cents,
+            2_500
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn open_rewrites_the_companion_only_when_the_record_set_changed() {
+        let dir = crate::bench_support::fresh_temp_dir("generic_mmap_portable_stale").unwrap();
+        let path = dir.join("amount.mmap");
+        GenericMmapStore::<Order, Status, Amount>::create(sample(), &path).unwrap();
+        let companion = blob_path(&path);
+        let before = std::fs::read(&companion).unwrap();
+        let mtime_before = std::fs::metadata(&companion).unwrap().modified().unwrap();
+
+        // Same dataset: no write at all — bytes and mtime unchanged.
+        GenericMmapStore::<Order, Status, Amount>::open(sample(), &path).unwrap();
+        GenericMmapStore::<Order, Status, Amount>::open_portable(&path).unwrap();
+        assert_eq!(std::fs::read(&companion).unwrap(), before);
+        assert_eq!(
+            std::fs::metadata(&companion).unwrap().modified().unwrap(),
+            mtime_before
+        );
+
+        // A changed non-durable field: rewritten, and the new value is what
+        // `open_portable` sees afterwards.
+        let mut changed = sample();
+        changed[0].status = OrderStatus::Refunded;
+        GenericMmapStore::<Order, Status, Amount>::open(changed, &path).unwrap();
+        assert_ne!(std::fs::read(&companion).unwrap(), before);
+        let reopened = GenericMmapStore::<Order, Status, Amount>::open_portable(&path).unwrap();
+        assert_eq!(
+            GetById::get(&reopened, uuid::Uuid::from_u128(1))
+                .unwrap()
+                .status,
+            OrderStatus::Refunded
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_production_store_blob_at_the_companion_path_is_a_magic_error() {
+        let dir = crate::bench_support::fresh_temp_dir("generic_mmap_portable_dog_blob").unwrap();
+        let path = dir.join("amount.mmap");
+        GenericMmapStore::<Order, Status, Amount>::create(sample(), &path).unwrap();
+        let companion = blob_path(&path);
+        crate::durability::record_blob::RecordBlob {
+            records: crate::durability::test_support::sample_records(),
+            edges: crate::durability::test_support::sample_edges(),
+        }
+        .write(&companion)
+        .unwrap();
+
+        match GenericMmapStore::<Order, Status, Amount>::read_portable_records(&path) {
+            Err(DurabilityError::RecordBlobUnreadable { cause, .. }) => {
+                assert!(cause.starts_with("magic number mismatch"), "{cause}");
+            }
+            other => panic!("expected RecordBlobUnreadable, got {other:?}"),
+        }
+        // A foreign file counts as stale: plain `open` replaces it.
+        GenericMmapStore::<Order, Status, Amount>::open(sample(), &path).unwrap();
+        GenericMmapStore::<Order, Status, Amount>::open_portable(&path).unwrap();
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_stray_temp_file_is_not_a_companion_and_the_mmap_file_alone_is_not_portable() {
+        let dir = crate::bench_support::fresh_temp_dir("generic_mmap_portable_mmap_only").unwrap();
+        let path = dir.join("amount.mmap");
+        GenericMmapStore::<Order, Status, Amount>::create(sample(), &path).unwrap();
+        let companion = blob_path(&path);
+        std::fs::remove_file(&companion).unwrap();
+        // The mmap file is still a perfectly good mmap file on its own...
+        GenericMmapStore::<Order, Status, Amount>::open(sample(), &path).unwrap();
+        // ...and now has a blob again; the mmap file's own header errors are
+        // untouched by all of this (a truncated mmap file is still InvalidMagic).
+        std::fs::write(&path, [0u8; 4]).unwrap();
+        assert!(matches!(
+            GenericMmapStore::<Order, Status, Amount>::open_portable(&path),
+            Err(DurabilityError::InvalidMagic)
+        ));
+        assert!(matches!(
+            GenericMmapStore::<Order, Status, Amount>::open(sample(), &path),
+            Err(DurabilityError::InvalidMagic)
+        ));
+        // ...and the failed `open` did not touch the (still-current) blob.
+        assert!(
+            GenericMmapStore::<Order, Status, Amount>::read_portable_records(&path).is_ok(),
+            "an mmap-file failure must leave a valid companion untouched"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

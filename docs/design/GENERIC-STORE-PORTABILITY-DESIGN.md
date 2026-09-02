@@ -466,11 +466,59 @@ design document itself.
 
 ## Implementation status
 
-Not implemented. Proposed 2026-09-02; accepted as proposed 2026-09-02.
-Implementation (`STORAGE-015`) is the next unit.
+Implemented 2026-09-02 as `GENERIC-STORE-PORTABILITY` (`STORAGE-015`
+v0.1.0; `ADR-0017` "Acceptance and implementation"). What landed, against
+the "Proposed shape" above:
+
+- `src/generic/record_blob.rs` (new): `GENBLOB\0`, `BLOB_VERSION = 1`,
+  `GenericRecordBlob<'a, R>` borrowing `&[R]`, `fingerprint()` streaming
+  `bincode::serialize_into` a `Fnv1a64` that `impl`s `io::Write`,
+  `encode()`, `is_current_at(path)`, free `read(path) -> Vec<R>` and
+  `blob_path(path)`. `STORAGE-014`'s header, hash, and temp-then-rename
+  helpers became `pub(crate)` at their second call site; `RecordBlob`'s
+  12 tests unchanged.
+- `GenericMmapStore::create` encodes the blob before consuming the
+  records and writes it after the `.mmap` flush; `open` reads the 20-byte
+  header, encodes only when stale, and writes after the existing open;
+  `read_portable_records(path)` and `open_portable(path)` (= `open(
+  read_portable_records(path)?, path)`) are additive. The `.mmap` slot
+  format is untouched — the diff removes only the six bound lines.
+- `open_order_production_stack_portable(path)` in `order_customer.rs`;
+  serde derives on `Order`/`OrderStatus`/`Customer` and on `Employee`/
+  `Department`.
+- Two departures from the sketch, on purpose: no bound on `R::Id` (only
+  `Vec<R>` is serialized; `R`'s derive already covers the id field), and
+  no `Employee` portable helper (its `Symmetric` edge list is the deferred
+  decision below; the helper waits for it).
+
+Resolutions of the open questions above, in order:
+
+- `Symmetric` edge companion: still deferred — `Employee`'s durable stack
+  gains the derives and a blob, but is not yet portable on its own.
+- Blob recording `R`: still deferred; the `.mmap` file makes the same
+  trust assumption.
+- **`open`'s fingerprint cost at 1M: measured, and the fallback trigger
+  is tripped.** Throwaway release build, median of 7/7/3: `open`
+  +80–108% at 1K (a ~0.1 ms floor), +19–33% at 100K (10–17 ms of
+  streamed encoding on a ~52 ms call), −4% to +2% at 1M across three
+  after-runs — but the published 20-sample Criterion
+  `generic_production_open` group, run twice against a `git
+  stash`-isolated before-run, puts the 1M delta at +24–27% (about 300 ms
+  on 1.25 s). `RESULTS.md`'s `### GenericMmapStore file portability
+  (STORAGE-015)` subsection carries both and treats the Criterion figure
+  as the trustworthy one. Nearer v0.1.0's +27% than v0.2.0's +0.3–4%, so
+  the trait-method fingerprint named above is the next step — the
+  owner's call, not built here (it adds to the record traits' API).
+  `create` roughly doubles at every size (the blob write, ~76 B/record,
+  3× the `.mmap` file).
+- `GenericProductionStore` path-taking constructor: not added, as
+  proposed.
 
 ## Change history
 
+- 2026-09-02: "Implementation status" addendum — implemented as
+  `STORAGE-015`, open questions resolved or explicitly carried, the two
+  departures from the sketch and the measured `open` cost recorded.
 - 2026-09-02: Accepted as proposed by the owner, no changes requested.
 - 2026-09-02: Initial proposal, follow-up (b) of `PROJECT-STATUS.md` item
   63 — the owner's "1 then 2" after `PRODUCTION-STORE-PORTABILITY`.

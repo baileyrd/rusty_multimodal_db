@@ -77,6 +77,16 @@
 //! was at the companion path (a prior generation, or nothing) untouched;
 //! a crash after leaves the new, complete file. There is never a window
 //! where the companion path holds a partial blob (`STORAGE-014-FR-004`).
+//!
+//! # Shared with the generic store's blob
+//!
+//! `GenericMmapStore` carries its own companion (`STORAGE-015`, module
+//! `generic::record_blob`) in the *same* header layout under a different
+//! magic. The pieces that don't depend on `DogRecord` — [`Fnv1a64`], the
+//! [`HEADER_LEN`]-byte header's [`parse_header`]/[`encode_image`],
+//! [`companion_path`], and [`EncodedRecordBlob`]'s atomic write — are
+//! `pub(crate)` and parameterized by magic/version so both blobs share one
+//! implementation rather than two copies that could drift.
 
 use super::DurabilityError;
 use crate::record::DogRecord;
@@ -107,40 +117,61 @@ const VERSION_OFFSET: usize = MAGIC.len();
 /// the header.
 const FINGERPRINT_OFFSET: usize = VERSION_OFFSET + 4;
 
-/// [`MAGIC`], then [`BLOB_VERSION`] as a little-endian `u32`, then the
-/// fingerprint as a little-endian `u64`: 20 bytes.
-const HEADER_LEN: usize = FINGERPRINT_OFFSET + 8;
+/// Magic, then the blob version as a little-endian `u32`, then the
+/// fingerprint as a little-endian `u64`: 20 bytes. The one header layout
+/// every companion blob in this crate uses (see module docs, "Shared
+/// with the generic store's blob").
+pub(crate) const HEADER_LEN: usize = FINGERPRINT_OFFSET + 8;
 
-/// FNV-1a 64 — see module docs for why this hash, and why inline.
-struct Fnv1a64(u64);
+/// FNV-1a 64 — see module docs for why this hash, and why inline. Also
+/// an [`io::Write`](std::io::Write) sink, so a `serde` encoder can stream
+/// straight into it (the generic blob fingerprints its records that way).
+pub(crate) struct Fnv1a64(u64);
 
 impl Fnv1a64 {
     const OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
     const PRIME: u64 = 0x0000_0100_0000_01b3;
 
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self(Self::OFFSET_BASIS)
     }
 
-    fn update(&mut self, bytes: &[u8]) {
+    pub(crate) fn update(&mut self, bytes: &[u8]) {
         for &b in bytes {
             self.0 ^= u64::from(b);
             self.0 = self.0.wrapping_mul(Self::PRIME);
         }
     }
 
-    fn finish(&self) -> u64 {
+    pub(crate) fn finish(&self) -> u64 {
         self.0
     }
 }
 
-/// Validate the fixed header and return the fingerprint it records.
-/// Shared by [`RecordBlob::read`] (which then decodes the body) and
-/// [`RecordBlob::is_current_at`] (which needs nothing else). `bytes` may
-/// be the whole file or just its first [`HEADER_LEN`] bytes. Errors are
-/// the `cause` half of a [`DurabilityError::RecordBlobUnreadable`].
-fn parse_header(bytes: &[u8]) -> Result<u64, String> {
-    if bytes.len() < HEADER_LEN || bytes[0..MAGIC.len()] != MAGIC {
+impl Write for Fnv1a64 {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.update(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Validate a fixed [`HEADER_LEN`]-byte header against the `magic` and
+/// `expected_version` of the blob kind the caller is reading, and return
+/// the fingerprint it records. Shared by [`RecordBlob::read`] (which then
+/// decodes the body) and [`RecordBlob::is_current_at`] (which needs
+/// nothing else), and by the generic blob under its own magic. `bytes`
+/// may be the whole file or just its first [`HEADER_LEN`] bytes. Errors
+/// are the `cause` half of a [`DurabilityError::RecordBlobUnreadable`].
+pub(crate) fn parse_header(
+    bytes: &[u8],
+    magic: &[u8; 8],
+    expected_version: u32,
+) -> Result<u64, String> {
+    if bytes.len() < HEADER_LEN || bytes[0..magic.len()] != magic[..] {
         return Err(
             "magic number mismatch or file too short for a header — not a record blob".to_owned(),
         );
@@ -151,14 +182,32 @@ fn parse_header(bytes: &[u8]) -> Result<u64, String> {
     let mut version = [0u8; 4];
     version.copy_from_slice(&bytes[VERSION_OFFSET..FINGERPRINT_OFFSET]);
     let found = u32::from_le_bytes(version);
-    if found != BLOB_VERSION {
+    if found != expected_version {
         return Err(format!(
-            "blob version mismatch: file has {found}, this build expects {BLOB_VERSION}"
+            "blob version mismatch: file has {found}, this build expects {expected_version}"
         ));
     }
     let mut fingerprint = [0u8; 8];
     fingerprint.copy_from_slice(&bytes[FINGERPRINT_OFFSET..HEADER_LEN]);
     Ok(u64::from_le_bytes(fingerprint))
+}
+
+/// Assemble a complete on-disk image: the [`HEADER_LEN`]-byte header
+/// (`magic`, `version`, `fingerprint`, little-endian) followed by `body`.
+/// The inverse of [`parse_header`] for the header half; shared for the
+/// same reason.
+pub(crate) fn encode_image(
+    magic: &[u8; 8],
+    version: u32,
+    fingerprint: u64,
+    body: &[u8],
+) -> Vec<u8> {
+    let mut image = Vec::with_capacity(HEADER_LEN + body.len());
+    image.extend_from_slice(magic);
+    image.extend_from_slice(&version.to_le_bytes());
+    image.extend_from_slice(&fingerprint.to_le_bytes());
+    image.extend_from_slice(body);
+    image
 }
 
 /// Suffix appended to the ages file's path to derive the companion
@@ -177,7 +226,9 @@ const TEMP_SUFFIX: &str = ".rewrite-tmp";
 /// files are portable as a unit — copy both, reopen with one path
 /// (`STORAGE-014-FR-001`). Appending (rather than replacing the
 /// extension) means the convention never collides with or depends on
-/// whatever extension the caller chose for the ages file.
+/// whatever extension the caller chose for the ages file. The generic
+/// store uses the same derivation for its own companion
+/// (`STORAGE-015-FR-001`).
 pub(crate) fn companion_path(ages_path: &Path) -> PathBuf {
     let mut companion = ages_path.as_os_str().to_owned();
     companion.push(COMPANION_SUFFIX);
@@ -231,12 +282,9 @@ impl RecordBlob {
     /// Returns [`DurabilityError::Serde`] if serialization fails.
     pub(crate) fn encode(&self) -> Result<EncodedRecordBlob, DurabilityError> {
         let body = bincode::serialize(self)?;
-        let mut image = Vec::with_capacity(HEADER_LEN + body.len());
-        image.extend_from_slice(&MAGIC);
-        image.extend_from_slice(&BLOB_VERSION.to_le_bytes());
-        image.extend_from_slice(&self.fingerprint().to_le_bytes());
-        image.extend_from_slice(&body);
-        Ok(EncodedRecordBlob { image })
+        Ok(EncodedRecordBlob {
+            image: encode_image(&MAGIC, BLOB_VERSION, self.fingerprint(), &body),
+        })
     }
 
     /// Write `self` at `path` in the *version-1* layout (no fingerprint)
@@ -288,7 +336,7 @@ impl RecordBlob {
 
         let bytes =
             std::fs::read(path).map_err(|e| unreadable(format!("cannot read file: {e}")))?;
-        let claimed = parse_header(&bytes).map_err(unreadable)?;
+        let claimed = parse_header(&bytes, &MAGIC, BLOB_VERSION).map_err(unreadable)?;
         let blob: Self = bincode::deserialize(&bytes[HEADER_LEN..])
             .map_err(|e| unreadable(format!("body does not decode: {e}")))?;
         let actual = blob.fingerprint();
@@ -313,15 +361,17 @@ impl RecordBlob {
     pub(crate) fn is_current_at(&self, path: &Path) -> bool {
         let mut header = [0u8; HEADER_LEN];
         let read_header = File::open(path).and_then(|mut file| file.read_exact(&mut header));
-        read_header.is_ok() && parse_header(&header) == Ok(self.fingerprint())
+        read_header.is_ok() && parse_header(&header, &MAGIC, BLOB_VERSION) == Ok(self.fingerprint())
     }
 }
 
 /// A [`RecordBlob`] already serialized to its on-disk image — what
 /// `ProductionStore::create`/`open` hold onto after moving the live
-/// `records`/`edges` into `MmapAgeStore`.
+/// `records`/`edges` into `MmapAgeStore`. Nothing here is
+/// `DogRecord`-specific: the generic blob encodes into the same type to
+/// share [`Self::write`].
 pub(crate) struct EncodedRecordBlob {
-    image: Vec<u8>,
+    pub(crate) image: Vec<u8>,
 }
 
 impl EncodedRecordBlob {

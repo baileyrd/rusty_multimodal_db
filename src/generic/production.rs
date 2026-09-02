@@ -65,9 +65,13 @@ const LOCK_POISONED: &str =
 /// use rusty_multimodal_db::generic::mmap_store::GenericMmapStore;
 /// use rusty_multimodal_db::generic::production::GenericProductionStore;
 /// use rusty_multimodal_db::generic::traits::{IndexedField, Record, ScannableField};
+/// use serde::{Deserialize, Serialize};
 /// use uuid::Uuid;
 ///
-/// #[derive(Clone)]
+/// // `Serialize`/`Deserialize` are what let the store persist the whole
+/// // record set next to its mmap file, so the pair of files reopens on
+/// // its own (see `open_portable` below).
+/// #[derive(Clone, Serialize, Deserialize)]
 /// struct Widget {
 ///     id: Uuid,
 ///     category: u32,
@@ -126,6 +130,15 @@ const LOCK_POISONED: &str =
 ///
 /// store.update::<Widget, Price>(a, 750)?;
 /// assert_eq!(store.get::<Widget>(a).unwrap().price_cents, 750);
+///
+/// // The two files at `path` (`widgets.mmap` + `widgets.mmap.records`) are
+/// // a complete store: reopen from the path alone, no records needed.
+/// drop(store);
+/// let reopened = GenericProductionStore::new(
+///     GenericMmapStore::<Widget, Category, Price>::open_portable(&path)?,
+/// );
+/// assert_eq!(reopened.get::<Widget>(a).unwrap().price_cents, 750);
+/// assert_eq!(reopened.get::<Widget>(b).unwrap().category, 10);
 ///
 /// # std::fs::remove_dir_all(&dir).ok();
 /// # Ok(())
