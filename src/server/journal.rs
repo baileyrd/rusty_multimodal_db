@@ -198,10 +198,9 @@ impl BatchJournal {
 
         let mut entries = Vec::new();
         let mut pos = HEADER_LEN as usize;
-        loop {
-            let Some(len_bytes) = bytes.get(pos..pos + 4) else {
-                break; // torn tail (or exactly the end)
-            };
+        // Stops at the first incomplete entry — a torn tail, or exactly the
+        // end of the file.
+        while let Some(len_bytes) = bytes.get(pos..pos + 4) {
             let len = u32::from_le_bytes([len_bytes[0], len_bytes[1], len_bytes[2], len_bytes[3]])
                 as usize;
             let Some(payload) = bytes.get(pos + 4..pos + 4 + len) else {
