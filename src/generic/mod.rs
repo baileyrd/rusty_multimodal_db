@@ -99,14 +99,15 @@ pub mod mmap_store;
 pub mod order_customer;
 pub mod production;
 pub mod query;
+pub(crate) mod record_blob;
 pub mod store;
 pub mod traits;
 
 pub use mmap_store::GenericMmapStore;
 #[cfg(feature = "research")]
 pub use order_customer::{
-    build_order_generic_store, create_order_production_stack, open_order_production_stack, Order,
-    OrderGenericStore, OrderProductionStack,
+    build_order_generic_store, create_order_production_stack, open_order_production_stack,
+    open_order_production_stack_portable, Order, OrderGenericStore, OrderProductionStack,
 };
 pub use production::GenericProductionStore;
 

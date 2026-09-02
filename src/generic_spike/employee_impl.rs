@@ -27,16 +27,19 @@
 use crate::generic::mmap_store::GenericMmapStore;
 use crate::generic::store::{BaseStore, Indexed, Reversed, Scanned, Symmetric};
 use crate::generic::traits::{ChildOf, IndexedField, Record, ScannableField, SymmetricRelation};
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+// `Serialize`/`Deserialize`: required by `GenericMmapStore`'s companion
+// record blob (`STORAGE-015-FR-006`); nothing else about them changed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Department {
     Engineering,
     Sales,
     Support,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Employee {
     pub id: Uuid,
     pub name: String,

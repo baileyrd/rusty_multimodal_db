@@ -21,9 +21,13 @@
 use super::mmap_store::GenericMmapStore;
 use super::store::{BaseStore, Indexed, Reversed, Scanned};
 use super::traits::{ChildOf, IndexedField, Record, ScannableField};
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+// `Serialize`/`Deserialize` on the three domain types: what
+// `GenericMmapStore` needs to persist its companion record blob
+// (`STORAGE-015-FR-006`) — nothing else about them changed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum OrderStatus {
     Pending,
     Shipped,
@@ -32,7 +36,7 @@ pub enum OrderStatus {
     Refunded,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Order {
     pub id: Uuid,
     pub customer_id: Uuid,
@@ -42,7 +46,7 @@ pub struct Order {
     pub discount_cents: i64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Customer {
     pub id: Uuid,
     pub name: String,
@@ -192,6 +196,27 @@ pub fn open_order_production_stack(
     Ok(Reversed::<_, Customer, Order, BelongsToCustomer>::new(
         core, &orders,
     ))
+}
+
+/// Reopen an existing durable production store for `Order`/`Customer`
+/// from its two files alone — no `orders` argument — the generic
+/// analogue of `ProductionStore::open_portable` (`STORAGE-015-FR-008`).
+/// Reads the record set back from the companion blob
+/// ([`GenericMmapStore::read_portable_records`]) and then builds the
+/// stack exactly as [`open_order_production_stack`] does, so the
+/// `Reversed` layer's per-customer child order follows the blob's
+/// persisted (creation) order.
+///
+/// # Errors
+///
+/// Returns [`crate::durability::DurabilityError::RecordBlobUnreadable`]
+/// if the companion blob is missing or unreadable, plus everything
+/// [`open_order_production_stack`] can return.
+pub fn open_order_production_stack_portable(
+    path: &std::path::Path,
+) -> Result<OrderProductionStack, crate::durability::DurabilityError> {
+    let orders = GenericMmapStore::<Order, Status, Amount>::read_portable_records(path)?;
+    open_order_production_stack(orders, path)
 }
 
 #[cfg(test)]
@@ -407,6 +432,69 @@ mod tests {
                 .amount_cents,
             55_555
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `STORAGE-015-FR-008`: the two files alone are enough to rebuild the
+    /// whole stack — the `Reversed` relation layer (parent/children), the
+    /// non-durable `created_at`/`discount_cents` fields, and the durable
+    /// `Amount` value as last flushed — with no `orders` argument.
+    #[test]
+    fn open_portable_rebuilds_the_full_stack_from_the_two_files_alone() {
+        let dir = crate::bench_support::fresh_temp_dir("order_production_portable").unwrap();
+        let path = dir.join("amount.mmap");
+
+        {
+            use super::super::store::Flush;
+            let mut stack = create_order_production_stack(sample(), &path).unwrap();
+            UpdateField::<Order, Amount>::update(&mut stack, Uuid::from_u128(2), 77_777).unwrap();
+            Flush::flush(&stack).unwrap();
+        }
+
+        let reopened = open_order_production_stack_portable(&path).unwrap();
+
+        // Durable field: the flushed value wins over the blob's snapshot.
+        let order_2 = GetById::<Order>::get(&reopened, Uuid::from_u128(2)).unwrap();
+        assert_eq!(order_2.amount_cents, 77_777);
+        // Non-durable fields come back from the blob exactly as created.
+        assert_eq!(order_2.created_at_unix_ms, 2_000);
+        assert_eq!(order_2.discount_cents, 0);
+        assert_eq!(order_2.status, OrderStatus::Pending);
+        assert_eq!(order_2.customer_id, Uuid::from_u128(100));
+
+        // The in-memory relation layer is rebuilt from the blob's records.
+        assert_eq!(
+            Parent::<Order, BelongsToCustomer>::parent(&reopened, Uuid::from_u128(3)),
+            Ok(Some(Uuid::from_u128(200)))
+        );
+        let mut customer_100_orders = Children::<Customer, Order, BelongsToCustomer>::children(
+            &reopened,
+            Uuid::from_u128(100),
+        );
+        customer_100_orders.sort();
+        assert_eq!(
+            customer_100_orders,
+            vec![Uuid::from_u128(1), Uuid::from_u128(2)]
+        );
+
+        // And the index over the non-durable `status` field.
+        let mut shipped = FilterEq::<Order, Status>::filter_eq(&reopened, &OrderStatus::Shipped);
+        shipped.sort();
+        assert_eq!(shipped, vec![Uuid::from_u128(1), Uuid::from_u128(3)]);
+
+        // Without the companion, the portable path fails naming it; the
+        // caller-supplied path still works.
+        let companion = super::super::record_blob::blob_path(&path);
+        std::fs::remove_file(&companion).unwrap();
+        match open_order_production_stack_portable(&path) {
+            Err(crate::durability::DurabilityError::RecordBlobUnreadable { path: p, .. }) => {
+                assert_eq!(p, companion)
+            }
+            Err(other) => panic!("expected RecordBlobUnreadable, got {other:?}"),
+            Ok(_) => panic!("expected RecordBlobUnreadable, got a store"),
+        }
+        assert!(open_order_production_stack(sample(), &path).is_ok());
 
         let _ = std::fs::remove_dir_all(&dir);
     }

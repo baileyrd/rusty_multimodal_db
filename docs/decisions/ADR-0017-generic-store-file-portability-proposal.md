@@ -236,3 +236,42 @@ options" section for the full reasoning. Summarized:
 
 - 2026-09-02: accepted as proposed. The next unit registers `STORAGE-015`
   and implements per `docs/design/GENERIC-STORE-PORTABILITY-DESIGN.md`.
+- 2026-09-02: implemented as `GENERIC-STORE-PORTABILITY` (`STORAGE-015`
+  v0.1.0). `src/generic/record_blob.rs` (new — `GENBLOB\0`, blob version
+  1, `GenericRecordBlob<'a, R>` borrowing the record slice, streamed
+  `bincode`-into-`Fnv1a64` fingerprint, `read`/`blob_path`);
+  `STORAGE-014`'s `HEADER_LEN`/`Fnv1a64`/`parse_header`/`encode_image`/
+  `companion_path`/`EncodedRecordBlob` became `pub(crate)` at their
+  second call site, `RecordBlob`'s 12 tests unchanged;
+  `GenericMmapStore::create`/`open` write/refresh the blob and gain the
+  `R: Serialize + DeserializeOwned` bound; `read_portable_records(path)`
+  and `open_portable(path)` added; `open_order_production_stack_portable
+  (path)` in `order_customer.rs`; serde derives on `Order`/`OrderStatus`/
+  `Customer`/`Employee`/`Department`. The `.mmap` slot format is untouched
+  (the diff removes only the six bound lines).
+- Two deliberate departures from the design's sketch, recorded in the
+  spec's "Traceability": no bound is added on `R::Id` (only `Vec<R>` is
+  ever serialized, and `R`'s own derive already covers its id field), and
+  no `Employee` portable helper is added (the `Symmetric` edge list is out
+  of scope per this ADR; the helper waits for that decision).
+- **The `open`-cost revisit trigger above is tripped.** Release build,
+  throwaway measurement, median of 7/7/3: `open` +80–108% at 1K (a
+  ~0.1 ms floor on a 0.15 ms call), +19–33% at 100K (10–17 ms to
+  stream-encode 100K records into the hasher), and −4% to +2% at 1M
+  across three after-runs — but the published 20-sample Criterion
+  `generic_production_open` group, run twice in the same session against
+  a `git stash`-isolated before-run, puts the 1M delta at +24–27% (about
+  300 ms on 1.25 s). `RESULTS.md`'s `### GenericMmapStore file
+  portability (STORAGE-015)` subsection records both and treats the
+  Criterion figure as the trustworthy one (20 samples over 3; the linear
+  extrapolation from 100K lands on its side of zero). That is nearer
+  v0.1.0's +27% than v0.2.0's +0.3–4%, so the named next step — the
+  per-type trait-method fingerprint of considered option 2's fallback,
+  not a different architecture — is now the owner's call; not built
+  here, since it adds to the record traits' API. `create` roughly doubles
+  at every size, the blob write itself (~76 B/record, 3× the `.mmap`
+  file).
+- Unlike `STORAGE-014`, two published Criterion groups *do* time these
+  constructors: `generic_production_create` and `generic_production_open`
+  (added by the record-identity-keying round). Their numbers move by
+  roughly the deltas above; `RESULTS.md` records the before/after pair.
