@@ -66,11 +66,41 @@
 //! `AUTH-FR-007`). Neither learns the granted [`super::TokenClass`]: the
 //! server answers `Authenticate` with a bare `Response::Ok`, and a wrong
 //! token is `ErrorCode::Unauthenticated`, indistinguishable from never
-//! having authenticated (`AUTH-FR-001`). Plaintext only, as this client
-//! has always been: against a `TlsConfig`-configured server the plaintext
-//! `Hello` fails the server's TLS handshake and the connection is closed
-//! before any token is written, so `connect_authenticated` fails with
-//! `ClientError::Frame(..)` rather than leaking the token.
+//! having authenticated (`AUTH-FR-001`). Against a `TlsConfig`-configured
+//! server the token has to travel inside TLS — see the next section; a
+//! plaintext `connect_authenticated` there fails at the `Hello`, before
+//! any token is written, so it never leaks the token.
+//!
+//! # Transport encryption (`TlsConfig`), `SERVER-001-FR-022`
+//!
+//! A `TlsConfig`-configured server completes a TLS handshake before it
+//! reads a single frame (`TLS-FR-002`), so a plaintext client's `Hello`
+//! is garbage to it and the connection is closed — `connect` fails with
+//! `ClientError::Frame(..)`. [`SchemaDrivenClient::connect_with`] takes
+//! [`ConnectOptions`], whose [`ConnectOptions::tls`] carries a
+//! [`ClientTlsConfig`]: the server name the certificate must match (and
+//! the SNI sent) plus a `rusty_tls` [`TrustPolicy`] — the OS trust store,
+//! pinned anchors, or, for a throwaway self-signed certificate,
+//! `DangerNoVerification` — exactly the explicit client-side trust
+//! configuration ADR-0014's Consequences said a self-signed certificate
+//! would need. The client-side half is `rusty_tls::TlsStream`, the same
+//! ecosystem-wide `rustls` wrapper the server's `TlsConfig` uses, so this
+//! crate still never touches `rustls` directly (ADR-0014's seam); the
+//! `TrustPolicy` type is re-exported here so a caller does not have to
+//! depend on `rusty_tls` to name one. `rusty_tls::TlsStream::new` performs
+//! no I/O — the handshake runs lazily under the first frame — so a policy
+//! or server-name the library rejects outright is
+//! [`ClientError::Tls`] before anything is sent, while a certificate the
+//! policy rejects, or a server that does not speak TLS at all, surfaces
+//! under the `Hello` as `ClientError::Frame(FrameError::Io(..))`. Named,
+//! not mitigated: a TLS client against a *plaintext* server can block
+//! rather than fail, since the server reads the ClientHello as a
+//! length-prefixed frame and waits for a payload the client never sends —
+//! the same for any `rusty_tls` client, not specific to this one. Every
+//! request after the handshake, `Authenticate` included, travels
+//! encrypted, and nothing else about the client changes: the `Hello`,
+//! the token, the schema fetch, and every method are transport-agnostic
+//! (the private `Transport` enum is the only place the two differ).
 
 use super::framing::{self, FrameError};
 use super::protocol::{
@@ -78,8 +108,13 @@ use super::protocol::{
     PROTOCOL_VERSION,
 };
 use std::fmt;
-use std::io::{BufReader, BufWriter, Write};
+use std::io::{self, BufReader, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
+
+/// The client-side trust policy for [`ClientTlsConfig`], re-exported
+/// from `rusty_tls` so a caller can name one without depending on
+/// `rusty_tls` itself (`FR-022`).
+pub use rusty_tls::TrustPolicy;
 
 /// Everything that can go wrong driving a [`SchemaDrivenClient`]: framing/
 /// I/O failure, a field name the discovered schema doesn't have, an
@@ -91,6 +126,12 @@ use std::net::{TcpStream, ToSocketAddrs};
 #[derive(Debug)]
 pub enum ClientError {
     Frame(FrameError),
+    /// `rusty_tls` rejected the [`ClientTlsConfig`] before any I/O — an
+    /// invalid server name, or a [`TrustPolicy`] that could not be built
+    /// (no usable OS trust anchors, for instance). Handshake failures
+    /// happen later, under the first frame, and are `Frame(Io(..))`; see
+    /// this module's own "Transport encryption" section (`FR-022`).
+    Tls(rusty_tls::Error),
     UnknownField(String),
     Unsupported(&'static str),
     Server(ErrorCode, String),
@@ -101,6 +142,7 @@ impl fmt::Display for ClientError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ClientError::Frame(e) => write!(f, "framing error: {e}"),
+            ClientError::Tls(e) => write!(f, "tls configuration error: {e}"),
             ClientError::UnknownField(name) => {
                 write!(f, "no field named {name:?} in this domain's schema")
             }
@@ -115,7 +157,15 @@ impl fmt::Display for ClientError {
     }
 }
 
-impl std::error::Error for ClientError {}
+impl std::error::Error for ClientError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            ClientError::Frame(e) => Some(e),
+            ClientError::Tls(e) => Some(e),
+            _ => None,
+        }
+    }
+}
 
 impl From<FrameError> for ClientError {
     fn from(e: FrameError) -> Self {
@@ -123,12 +173,108 @@ impl From<FrameError> for ClientError {
     }
 }
 
+/// How [`SchemaDrivenClient::connect_with`] should reach a server whose
+/// `serve` was given a `TlsConfig` (`FR-022`; see this module's own
+/// "Transport encryption" section): the name the server's certificate
+/// must carry (also sent as SNI) and the [`TrustPolicy`] it is verified
+/// under. A self-signed development certificate needs
+/// `TrustPolicy::DangerNoVerification` or `PinnedAnchors`; a real one
+/// works under `TrustPolicy::System`.
+#[derive(Debug, Clone)]
+pub struct ClientTlsConfig {
+    server_name: String,
+    trust: TrustPolicy,
+}
+
+impl ClientTlsConfig {
+    pub fn new(server_name: impl Into<String>, trust: TrustPolicy) -> Self {
+        Self {
+            server_name: server_name.into(),
+            trust,
+        }
+    }
+
+    pub fn server_name(&self) -> &str {
+        &self.server_name
+    }
+
+    pub fn trust(&self) -> &TrustPolicy {
+        &self.trust
+    }
+}
+
+/// Everything [`SchemaDrivenClient::connect_with`] can be told beyond the
+/// address: an `Authenticate` token (`FR-021`) and a [`ClientTlsConfig`]
+/// (`FR-022`), each optional and independent. `ConnectOptions::new()`
+/// (or `default()`) is exactly [`SchemaDrivenClient::connect`].
+#[derive(Debug, Clone, Default)]
+pub struct ConnectOptions {
+    token: Option<String>,
+    tls: Option<ClientTlsConfig>,
+}
+
+impl ConnectOptions {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Present `token` between the `Hello` and the `DescribeSchema`, as
+    /// [`SchemaDrivenClient::connect_authenticated`] does.
+    pub fn token(mut self, token: impl Into<String>) -> Self {
+        self.token = Some(token.into());
+        self
+    }
+
+    /// Complete a TLS handshake (as `tls` describes) before the `Hello`.
+    pub fn tls(mut self, tls: ClientTlsConfig) -> Self {
+        self.tls = Some(tls);
+        self
+    }
+}
+
+/// The one place plaintext and TLS differ. `rusty_tls::TlsStream` cannot
+/// be split into independent read/write halves the way `TcpStream::try_clone`
+/// allows (the same finding `src/server/mod.rs`'s `ReadHalf`/`WriteHalf`
+/// resolved server-side), so the client keeps a single stream and writes
+/// each frame through the `BufReader`'s `get_mut` — a request/response
+/// protocol never reads and writes at once, and each frame is assembled
+/// into one buffer first so the stream sees one `write_all` per request,
+/// exactly what the pre-v0.12.0 `BufWriter` + `flush` produced.
+enum Transport {
+    Plain(TcpStream),
+    Tls(Box<rusty_tls::TlsStream<TcpStream>>),
+}
+
+impl Read for Transport {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match self {
+            Transport::Plain(s) => s.read(buf),
+            Transport::Tls(s) => s.read(buf),
+        }
+    }
+}
+
+impl Write for Transport {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match self {
+            Transport::Plain(s) => s.write(buf),
+            Transport::Tls(s) => s.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match self {
+            Transport::Plain(s) => s.flush(),
+            Transport::Tls(s) => s.flush(),
+        }
+    }
+}
+
 /// A real client to one server/query-layer domain, built entirely from
 /// what [`Request::DescribeSchema`] reports at connect time — see this
 /// module's own doc comment.
 pub struct SchemaDrivenClient {
-    reader: BufReader<TcpStream>,
-    writer: BufWriter<TcpStream>,
+    stream: BufReader<Transport>,
     schema: DomainSchema,
     server_protocol_version: u32,
 }
@@ -148,7 +294,7 @@ impl SchemaDrivenClient {
     /// fetch itself is gated (`AUTH-FR-002`); use
     /// [`SchemaDrivenClient::connect_authenticated`] there.
     pub fn connect<A: ToSocketAddrs>(addr: A) -> Result<Self, ClientError> {
-        Self::connect_inner(addr, None)
+        Self::connect_with(addr, ConnectOptions::new())
     }
 
     /// [`SchemaDrivenClient::connect`] with `Request::Authenticate { token }`
@@ -163,53 +309,72 @@ impl SchemaDrivenClient {
         addr: A,
         token: &str,
     ) -> Result<Self, ClientError> {
-        Self::connect_inner(addr, Some(token))
+        Self::connect_with(addr, ConnectOptions::new().token(token))
     }
 
-    fn connect_inner<A: ToSocketAddrs>(addr: A, token: Option<&str>) -> Result<Self, ClientError> {
-        let stream = TcpStream::connect(addr).map_err(FrameError::from)?;
-        stream.set_nodelay(true).map_err(FrameError::from)?;
-        let peer = stream.try_clone().map_err(FrameError::from)?;
-        let mut reader = BufReader::new(stream);
-        let mut writer = BufWriter::new(peer);
+    /// The general constructor (`FR-022`): [`SchemaDrivenClient::connect`]
+    /// and [`SchemaDrivenClient::connect_authenticated`] are this with
+    /// `ConnectOptions::new()` and `ConnectOptions::new().token(..)`.
+    /// With [`ConnectOptions::tls`] set, the TCP connection is wrapped in
+    /// a `rusty_tls::TlsStream` first, so the `Hello`, any token, the
+    /// schema fetch, and every later request travel encrypted; the
+    /// handshake itself runs under the `Hello` (see this module's own
+    /// "Transport encryption" section for how each failure surfaces).
+    pub fn connect_with<A: ToSocketAddrs>(
+        addr: A,
+        options: ConnectOptions,
+    ) -> Result<Self, ClientError> {
+        let tcp = TcpStream::connect(addr).map_err(FrameError::from)?;
+        tcp.set_nodelay(true).map_err(FrameError::from)?;
+        let transport = match &options.tls {
+            None => Transport::Plain(tcp),
+            Some(tls) => Transport::Tls(Box::new(
+                rusty_tls::TlsStream::new(tcp, &tls.server_name, &tls.trust)
+                    .map_err(ClientError::Tls)?,
+            )),
+        };
+        let mut stream = BufReader::new(transport);
 
-        framing::write_message(
-            &mut writer,
+        let server_protocol_version = match Self::exchange(
+            &mut stream,
             &Request::Hello {
                 protocol_version: PROTOCOL_VERSION,
             },
-        )?;
-        writer.flush().map_err(FrameError::from)?;
-        let server_protocol_version = match framing::read_message(&mut reader)? {
+        )? {
             Response::Hello { protocol_version } => protocol_version,
             _ => return Err(ClientError::UnexpectedResponse("Hello")),
         };
 
-        if let Some(token) = token {
-            framing::write_message(
-                &mut writer,
-                &Request::Authenticate {
-                    token: token.to_string(),
-                },
-            )?;
-            writer.flush().map_err(FrameError::from)?;
-            Self::expect_ok(framing::read_message(&mut reader)?)?;
+        if let Some(token) = options.token {
+            Self::expect_ok(Self::exchange(
+                &mut stream,
+                &Request::Authenticate { token },
+            )?)?;
         }
 
-        framing::write_message(&mut writer, &Request::DescribeSchema)?;
-        writer.flush().map_err(FrameError::from)?;
-        let schema = match framing::read_message(&mut reader)? {
+        let schema = match Self::exchange(&mut stream, &Request::DescribeSchema)? {
             Response::Schema(schema) => schema,
             Response::Err { code, message } => return Err(ClientError::Server(code, message)),
             _ => return Err(ClientError::UnexpectedResponse("Schema")),
         };
 
         Ok(Self {
-            reader,
-            writer,
+            stream,
             schema,
             server_protocol_version,
         })
+    }
+
+    /// One request, one response: the frame is assembled in memory and
+    /// written through the reader's underlying stream in a single
+    /// `write_all` (see [`Transport`]), then the reply is read back.
+    fn exchange(stream: &mut BufReader<Transport>, req: &Request) -> Result<Response, ClientError> {
+        let mut frame = Vec::new();
+        framing::write_message(&mut frame, req)?;
+        let transport = stream.get_mut();
+        transport.write_all(&frame).map_err(FrameError::from)?;
+        transport.flush().map_err(FrameError::from)?;
+        Ok(framing::read_message(stream)?)
     }
 
     /// The server's answer to `Request::Authenticate`, folded to the
@@ -265,9 +430,7 @@ impl SchemaDrivenClient {
     }
 
     fn roundtrip(&mut self, req: Request) -> Result<Response, ClientError> {
-        framing::write_message(&mut self.writer, &req)?;
-        self.writer.flush().map_err(FrameError::from)?;
-        Ok(framing::read_message(&mut self.reader)?)
+        Self::exchange(&mut self.stream, &req)
     }
 
     /// Full-record read, `None` if `id` has no record. Fields come back
