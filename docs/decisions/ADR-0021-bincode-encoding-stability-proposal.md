@@ -1,6 +1,6 @@
 # ADR-0021: `bincode` encoding stability — name the configuration, route every call site through one codec, pin the bytes with golden vectors
 
-- Status: **Proposed** (owner's call — see "Acceptance and implementation")
+- Status: **Accepted** (promoted from Proposed on 2026-09-02 — the owner approved the design as proposed, option 2 with `reject_trailing_bytes()`, over the `allow_trailing_bytes()` variant and document-only; spec placement `STORAGE-018` approved over a new category; no changes requested)
 - Date: 2026-09-02
 - Deciders: baileyrd
 - Related: `docs/design/BINCODE-ENCODING-STABILITY-DESIGN.md` (the full
@@ -122,7 +122,7 @@ posture `ADR-0016` through `ADR-0020` all took, and the one
 
 ## Decision
 
-Proposed: option 2. Concretely, at implementation:
+Accepted: option 2. Concretely, at implementation:
 
 - `src/codec.rs` (`pub(crate)`, no feature gate): private `options()`;
   `encode<T: Serialize + ?Sized>(&T) -> Result<Vec<u8>, bincode::Error>`,
@@ -146,11 +146,11 @@ Proposed: option 2. Concretely, at implementation:
   `Response` variant (`protocol.rs`, behind `server`); one `DOGBLOB\0`,
   one `GENBLOB\0`, one `GENEDGE\0` body (their modules). Each asserts
   `encode(&v) == GOLDEN` and `decode(GOLDEN) == v`.
-- Trailing bytes: `reject_trailing_bytes()` proposed (frames with junk
-  after a valid message become `FrameError::Encoding` instead of a
-  silent discard; the blobs' fingerprint already refuses such a body;
-  research reads are exact-length). `allow_trailing_bytes()` offered as
-  the alternative for a purely no-behavior-change round.
+- Trailing bytes: `reject_trailing_bytes()` (frames with junk after a
+  valid message become `FrameError::Encoding` instead of a silent
+  discard; the blobs' fingerprint already refuses such a body; research
+  reads are exact-length). `allow_trailing_bytes()` was offered as the
+  alternative for a purely no-behavior-change round and declined.
 - Size limit stays a framing concern (`MAX_FRAME_BYTES` on the length
   prefix, before allocation); the codec is `with_no_limit()`.
 - No format change: `BLOB_VERSION` 2 for all three blobs, frame layout
@@ -160,9 +160,9 @@ Proposed: option 2. Concretely, at implementation:
   pointer to this ADR and the spec. `ADR-0019`'s conclusion: no layout
   fingerprint needed now; the trigger stays armed.
 - A new spec carrying `BINENC-FR-001` to `-008`, registered at
-  implementation — recommended `STORAGE-018` (the codec is the storage
-  layer's shared encoding; `SERVER-001` amended to cite it) over a new
-  category; flagged at acceptance.
+  implementation as `STORAGE-018` (the codec is the storage layer's
+  shared encoding; `SERVER-001` amended to cite it) — approved over a
+  new category at acceptance.
 
 ## Consequences
 
@@ -229,11 +229,14 @@ Proposed: option 2. Concretely, at implementation:
 
 ## Acceptance and implementation
 
-- Owner's call. Options offered: **(a)** accept as proposed, with
+- Options offered at proposal: **(a)** accept as proposed, with
   `reject_trailing_bytes()` (recommended); **(b)** accept with
   `allow_trailing_bytes()` — the pin with zero reader change; **(c)**
   document only — record the findings, route nothing, pin nothing.
   Also flagged: spec placement, `STORAGE-018` (recommended) versus a
-  new category. On acceptance, the next unit registers the spec at
-  v0.1.0 and implements per
+  new category.
+- 2026-09-02: accepted as proposed (option (a): option 2 with
+  `reject_trailing_bytes()`; (b) and (c) declined; `STORAGE-018`
+  approved as the spec). The next unit registers `STORAGE-018` v0.1.0
+  and implements per
   `docs/design/BINCODE-ENCODING-STABILITY-DESIGN.md`.
