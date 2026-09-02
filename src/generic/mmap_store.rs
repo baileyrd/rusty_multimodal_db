@@ -363,10 +363,10 @@
 //! record set, `bincode`-serialized behind a fingerprinted header, to a
 //! companion file at `<path>.records` (see `generic::record_blob`, which
 //! shares its header layout, hash, and atomic write with the `Dog` blob);
-//! [`GenericMmapStore::open`] checks that companion's 20-byte header
-//! against a fingerprint of the records it was given and rewrites the
-//! blob only when they differ — so a directory written before this round
-//! (mmap file only) heals on its first `open`, and the steady-state
+//! [`GenericMmapStore::open`] checks that companion's 28-byte tagged
+//! header against a fingerprint of the records it was given and rewrites
+//! the blob only when they differ — so a directory written before this
+//! round (mmap file only) heals on its first `open`, and the steady-state
 //! reopen with the same dataset costs one fingerprint pass and one small
 //! read, never a file write. Two new constructors read the companion
 //! back: [`GenericMmapStore::read_portable_records`] (the persisted
@@ -374,15 +374,21 @@
 //! store need that order to be deterministic) and
 //! [`GenericMmapStore::open_portable`] (`open` fed from it, so the pair
 //! of files is a complete, copyable store). The `.mmap` file's format,
-//! header, slot layout, and reconciliation are untouched; the one visible
-//! change to the type is the `Serialize + DeserializeOwned` bound on `R`,
-//! which a record must satisfy for the blob to exist at all.
+//! header, slot layout, and reconciliation are untouched; the visible
+//! changes to the type are the `Serialize + DeserializeOwned` bound on
+//! `R`, which a record must satisfy for the blob to exist at all, and —
+//! on the four file constructors only — the [`SchemaTag`] bound, which
+//! names the record type in the blob's header so a companion written for
+//! one `R` is refused by name when opened as another instead of being
+//! decoded as whatever it happens to deserialize to (`STORAGE-015`
+//! v0.2.0, `SCHTAG-FR-001`/`-002`; see `generic::record_blob`'s "The
+//! schema tag" section).
 
 use super::mmap_field::MmapFieldValue;
 use super::query::{FilterEq, GetById, ScanField, UpdateField};
 use super::record_blob::{self, blob_path, GenericRecordBlob};
 use super::store::Flush;
-use super::traits::{IndexedField, Record, ScannableField};
+use super::traits::{IndexedField, Record, ScannableField, SchemaTag};
 use super::NotFound;
 use crate::durability::DurabilityError;
 use memmap2::MmapMut;
@@ -673,7 +679,24 @@ where
             index,
         }
     }
+}
 
+/// The four file constructors, and only they, add the [`SchemaTag`] bound
+/// (`SCHTAG-FR-002`): the tag is written into and checked against the
+/// companion blob's header, and nothing else on the type touches the
+/// blob. Every query impl, and every in-memory record type without a
+/// tag, is unaffected.
+impl<R, IndexMarker, ScanMarker> GenericMmapStore<R, IndexMarker, ScanMarker>
+where
+    R: IndexedField<IndexMarker>
+        + ScannableField<ScanMarker>
+        + Clone
+        + Serialize
+        + DeserializeOwned
+        + SchemaTag,
+    R::Id: MmapFieldValue,
+    R::ScanValue: MmapFieldValue,
+{
     /// Build fresh: create a new `HEADER_LEN + slot_width() * records.len()`-byte
     /// file at `path` — the versioned header first, then one `(id, value)`
     /// slot per record in `records`' own order — and memory-map it.
@@ -746,8 +769,10 @@ where
     /// Also keeps the companion blob at `<path>.records` current with
     /// `records`: its header fingerprint is compared against `records`
     /// first, and only if they differ (a changed dataset, a missing or
-    /// foreign file, a directory written before the blob existed) is the
-    /// blob re-encoded and — after the mmap file has opened and
+    /// foreign file, a blob carrying another record type's schema tag or
+    /// the untagged version-1 layout, a directory written before the blob
+    /// existed — `SCHTAG-FR-004`) is the blob re-encoded and — after the
+    /// mmap file has opened and
     /// reconciled successfully — rewritten in place. The common reopen
     /// with the same dataset never writes (`STORAGE-015-FR-003`).
     ///
@@ -882,8 +907,10 @@ where
     /// Returns [`DurabilityError::RecordBlobUnreadable`], naming the
     /// companion path, if the blob is missing, isn't one (wrong magic —
     /// a `ProductionStore` companion included), was written by an
-    /// incompatible version, doesn't decode, or doesn't match its own
-    /// header fingerprint (`STORAGE-015-FR-005`).
+    /// incompatible version, carries another record type's schema tag
+    /// (`SCHTAG-FR-003` — the error names both the expected tag and the
+    /// hash found), doesn't decode, or doesn't match its own header
+    /// fingerprint (`STORAGE-015-FR-005`).
     pub fn read_portable_records(path: &Path) -> Result<Vec<R>, DurabilityError> {
         record_blob::read(&blob_path(path))
     }
@@ -1037,6 +1064,7 @@ where
 mod tests {
     use super::*;
     use crate::generic::order_customer::{Amount, Order, OrderStatus, Status};
+    use crate::generic_spike::employee_impl::{Department, DepartmentField, Employee, SalaryCents};
 
     fn sample() -> Vec<Order> {
         vec![
@@ -1508,6 +1536,104 @@ mod tests {
             GenericMmapStore::<Order, Status, Amount>::read_portable_records(&path).is_ok(),
             "an mmap-file failure must leave a valid companion untouched"
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn employees() -> Vec<Employee> {
+        vec![Employee {
+            id: uuid::Uuid::from_u128(7),
+            name: "Ada".into(),
+            department: Department::Engineering,
+            salary_cents: 1_200_000,
+            manager_id: None,
+        }]
+    }
+
+    #[test]
+    fn an_employee_blob_read_as_orders_is_a_tag_error_and_plain_open_heals_it() {
+        let dir = crate::bench_support::fresh_temp_dir("generic_mmap_portable_other_tag").unwrap();
+        let path = dir.join("store.mmap");
+        // Both stores are `Uuid`-keyed with an `i64` scannable field, so
+        // the mmap file itself is interchangeable; only the companion's
+        // tag says whose records it holds.
+        GenericMmapStore::<Employee, DepartmentField, SalaryCents>::create(employees(), &path)
+            .unwrap();
+
+        // Acceptance criterion 1: refused by name, before any decode.
+        match GenericMmapStore::<Order, Status, Amount>::read_portable_records(&path) {
+            Err(DurabilityError::RecordBlobUnreadable { path: p, cause }) => {
+                assert_eq!(p, blob_path(&path));
+                assert!(
+                    cause.starts_with(
+                        "schema tag mismatch: this store expects `order_customer::Order`"
+                    ),
+                    "{cause}"
+                );
+            }
+            other => panic!("expected RecordBlobUnreadable, got {other:?}"),
+        }
+        assert!(matches!(
+            GenericMmapStore::<Order, Status, Amount>::open_portable(&path),
+            Err(DurabilityError::RecordBlobUnreadable { .. })
+        ));
+        // Criterion 5: the same file is current for the type that wrote it.
+        assert!(GenericRecordBlob::new(&employees()).is_current_at(&blob_path(&path)));
+        assert!(!GenericRecordBlob::new(&sample()).is_current_at(&blob_path(&path)));
+
+        // Criterion 2: `open` with the caller's `Order`s treats the
+        // wrong-tag blob as stale and rewrites it.
+        let store = GenericMmapStore::<Order, Status, Amount>::open(sample(), &path).unwrap();
+        assert_eq!(
+            store.get(uuid::Uuid::from_u128(1)).map(|o| o.amount_cents),
+            Some(2_500)
+        );
+        let reopened = GenericMmapStore::<Order, Status, Amount>::open_portable(&path).unwrap();
+        assert_eq!(
+            reopened
+                .get(uuid::Uuid::from_u128(2))
+                .map(|o| o.amount_cents),
+            Some(4_200)
+        );
+        assert_eq!(
+            GenericMmapStore::<Order, Status, Amount>::read_portable_records(&path).unwrap(),
+            sample()
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_version_1_companion_is_a_version_error_and_plain_open_heals_it() {
+        let dir = crate::bench_support::fresh_temp_dir("generic_mmap_portable_v1_blob").unwrap();
+        let path = dir.join("amount.mmap");
+        GenericMmapStore::<Order, Status, Amount>::create(sample(), &path).unwrap();
+        let companion = blob_path(&path);
+        // The exact image STORAGE-015 v0.1.0 wrote: version 1, the shared
+        // 20-byte header, no tag before the body.
+        let current = std::fs::read(&companion).unwrap();
+        let mut v1 = current[..20].to_vec();
+        v1.extend_from_slice(&current[28..]);
+        v1[8..12].copy_from_slice(&1u32.to_le_bytes());
+        std::fs::write(&companion, &v1).unwrap();
+
+        // Criterion 3: version mismatch on the read-only path...
+        match GenericMmapStore::<Order, Status, Amount>::read_portable_records(&path) {
+            Err(DurabilityError::RecordBlobUnreadable { cause, .. }) => {
+                assert!(
+                    cause.starts_with("blob version mismatch: file has 1, this build expects 2"),
+                    "{cause}"
+                );
+            }
+            other => panic!("expected RecordBlobUnreadable, got {other:?}"),
+        }
+        // Criterion 5: ...and not current for `open`'s check...
+        assert!(!GenericRecordBlob::new(&sample()).is_current_at(&companion));
+        // ...so `open` rewrites it as a version-2 blob, byte-for-byte the
+        // one `create` wrote.
+        GenericMmapStore::<Order, Status, Amount>::open(sample(), &path).unwrap();
+        assert_eq!(std::fs::read(&companion).unwrap(), current);
+        GenericMmapStore::<Order, Status, Amount>::open_portable(&path).unwrap();
 
         let _ = std::fs::remove_dir_all(&dir);
     }

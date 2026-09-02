@@ -20,7 +20,7 @@
 
 use super::mmap_store::GenericMmapStore;
 use super::store::{BaseStore, Indexed, Reversed, Scanned};
-use super::traits::{ChildOf, IndexedField, Record, ScannableField};
+use super::traits::{ChildOf, IndexedField, Record, ScannableField, SchemaTag};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -57,6 +57,13 @@ impl Record for Order {
     fn id(&self) -> Uuid {
         self.id
     }
+}
+
+// The name written into every `Order` companion blob's header
+// (`SCHTAG-FR-007`). Part of the on-disk format: renaming it is a format
+// change for every existing `.records`/`.edges` file holding `Order`s.
+impl SchemaTag for Order {
+    const SCHEMA_TAG: &'static str = "order_customer::Order";
 }
 
 impl Record for Customer {

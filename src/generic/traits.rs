@@ -22,6 +22,28 @@ pub trait Record {
     fn id(&self) -> Self::Id;
 }
 
+/// A stable, domain-chosen name for a record type, written (as its
+/// FNV-1a 64 hash) into the header of every generic companion blob that
+/// holds `Self` — `GenericMmapStore`'s `<path>.records` and `Symmetric`'s
+/// `<path>.edges` — and checked before the blob's body is decoded, so a
+/// blob written from one `R` is refused, by name, when read as another
+/// rather than handed to `bincode` (`SCHTAG-FR-001`, `-003`). See
+/// `docs/design/BLOB-SCHEMA-TAG-DESIGN.md` (Accepted) and ADR-0019.
+///
+/// Not a supertrait of [`Record`]: only types persisted through those
+/// blobs implement it — in this crate, `Order` and `Employee`. The
+/// in-memory stacks, `Symmetric::new`, and every query trait need no tag.
+///
+/// The tag is part of the on-disk format, not a `type_name`: choose a
+/// name that survives refactors, and treat renaming it as a format change
+/// — every existing blob for the type becomes a tag mismatch on the
+/// read-only paths and is rewritten by `open`. Two types sharing a tag
+/// string share a tag; the domain owns that namespace as it owns the
+/// paths.
+pub trait SchemaTag {
+    const SCHEMA_TAG: &'static str;
+}
+
 /// `R` has an equality-indexable field, identified by the zero-sized marker
 /// type `Marker` (one marker per field). See
 /// [`super::production::GenericProductionStore`]'s doc comment for a

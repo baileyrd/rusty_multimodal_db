@@ -27,7 +27,9 @@
 use crate::generic::edge_blob::edges_path;
 use crate::generic::mmap_store::GenericMmapStore;
 use crate::generic::store::{BaseStore, Indexed, Reversed, Scanned, Symmetric};
-use crate::generic::traits::{ChildOf, IndexedField, Record, ScannableField, SymmetricRelation};
+use crate::generic::traits::{
+    ChildOf, IndexedField, Record, ScannableField, SchemaTag, SymmetricRelation,
+};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -58,6 +60,13 @@ impl Record for Employee {
     fn id(&self) -> Uuid {
         self.id
     }
+}
+
+// The name written into every `Employee` companion blob's header —
+// `<path>.records` and `<path>.edges` alike (`SCHTAG-FR-007`). Part of
+// the on-disk format; see `Order`'s impl for the same caveat.
+impl SchemaTag for Employee {
+    const SCHEMA_TAG: &'static str = "employee::Employee";
 }
 
 pub struct DepartmentField;

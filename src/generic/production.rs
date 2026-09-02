@@ -64,7 +64,7 @@ const LOCK_POISONED: &str =
 /// ```
 /// use rusty_multimodal_db::generic::mmap_store::GenericMmapStore;
 /// use rusty_multimodal_db::generic::production::GenericProductionStore;
-/// use rusty_multimodal_db::generic::traits::{IndexedField, Record, ScannableField};
+/// use rusty_multimodal_db::generic::traits::{IndexedField, Record, ScannableField, SchemaTag};
 /// use serde::{Deserialize, Serialize};
 /// use uuid::Uuid;
 ///
@@ -89,6 +89,13 @@ const LOCK_POISONED: &str =
 ///     fn id(&self) -> Uuid {
 ///         self.id
 ///     }
+/// }
+///
+/// // The name the record blob's header carries, so a `.records` file
+/// // written for some other type is refused by name instead of decoded
+/// // as `Widget`s. Pick one that survives refactors: it is on-disk format.
+/// impl SchemaTag for Widget {
+///     const SCHEMA_TAG: &'static str = "doctest::Widget";
 /// }
 ///
 /// impl IndexedField<Category> for Widget {
