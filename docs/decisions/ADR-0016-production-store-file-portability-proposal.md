@@ -233,3 +233,7 @@ options" section for the full reasoning. Summarized:
   version mismatch and are upgraded in place by `open`; `open_portable` on
   a never-reopened version-1 blob is a typed error, the one documented
   cost of the bump. The `GenericMmapStore` revisit bullet is unchanged.
+- 2026-09-02: the `GenericMmapStore` revisit trigger is now exercised —
+  the identical treatment is proposed (design only, no code) in
+  `docs/design/GENERIC-STORE-PORTABILITY-DESIGN.md` / `ADR-0017`. This ADR
+  is unchanged by it.
