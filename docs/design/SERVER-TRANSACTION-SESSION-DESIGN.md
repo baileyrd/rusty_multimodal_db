@@ -1,11 +1,14 @@
-# Server Transaction Session and Crash-Atomic Batch Design (Proposed)
+# Server Transaction Session and Crash-Atomic Batch Design (Accepted)
 
-- Status: **Proposed** (not yet accepted; no implementation authorized).
-  Two decisions, each acceptable on its own: **Part A**, a
-  multi-round-trip transaction session (`ADR-0024`); **Part B**,
-  crash-atomicity for a committed batch (`ADR-0025`). Acceptance of
-  either authorizes that part's design; implementation follows as its
-  own unit — see each ADR's "Acceptance and implementation" section.
+- Status: **Accepted** (both parts promoted from Proposed on 2026-09-02 —
+  the owner approved each as proposed, option (a) of both `ADR-0024`
+  and `ADR-0025`; the lock-held session, closing either, and always-on
+  journaling declined; no changes requested). Two decisions, each
+  accepted on its own: **Part A**, a multi-round-trip transaction
+  session (`ADR-0024`); **Part B**, crash-atomicity for a committed
+  batch (`ADR-0025`). Acceptance authorizes each design; implementation
+  follows as its own unit per part — see each ADR's "Acceptance and
+  implementation" section.
 - Date: 2026-09-02
 - Related: `docs/design/SERVER-TRANSACTION-DESIGN.md` / `ADR-0013`
   (`Request::Transaction`, `SERVER-001` v0.7.0 / FR-017 — whose first
@@ -629,3 +632,7 @@ addition, gated like any appended code. `dog_server` gains an optional
   transaction-session / crash-atomicity design round as the third of
   four next directions, after mTLS (`ADR-0023`, implemented as
   `SERVER-001` v0.13.0) and before the reconnect-without-hello fallback.
+  (PR #137.)
+- 2026-09-02: Both parts accepted as proposed ("1, 1"). No content
+  change. Implementation order: Part A as `SERVER-001` v0.14.0 /
+  FR-024, then Part B as v0.15.0 / FR-025.
