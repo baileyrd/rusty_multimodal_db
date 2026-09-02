@@ -240,3 +240,17 @@ Accepted: option 2. Concretely, at implementation:
   approved as the spec). The next unit registers `STORAGE-018` v0.1.0
   and implements per
   `docs/design/BINCODE-ENCODING-STABILITY-DESIGN.md`.
+- 2026-09-02: implemented as `STORAGE-018` v0.1.0 in this PR —
+  `src/codec.rs` (`encode`/`encode_into`/`decode` over the one explicit
+  `Options`, docs per `BINENC-FR-005`), all 23 call sites routed, golden
+  vectors captured on the pre-change code in a separate first commit
+  and passing unchanged after routing, the trailing-junk frame test,
+  the four resolution pointers (`ADR-0010`, `SERVER-001` v0.9.1,
+  `PROJECT-STATUS` item 33, `ADR-0019`). One correction to this ADR's
+  claim that option (a) is "no change for the three blobs": the `Dog`
+  blob decodes its body *before* fingerprinting (its fingerprint is
+  over the decoded records, not the bytes), so a junk-padded
+  `DOGBLOB\0` body — silently accepted before — is now a decode-cause
+  `RecordBlobUnreadable`. True as stated for the two generic blobs.
+  No conforming writer produces such a file; recorded in the spec's
+  "Traceability".

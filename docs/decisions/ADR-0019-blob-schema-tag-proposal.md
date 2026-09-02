@@ -246,7 +246,9 @@ Accepted as proposed:
   exposes no layout description to hash, and a layout change between
   builds is already a `BLOB_VERSION` bump by the evolution rules the
   codec documents; the trigger stays armed for the case where that
-  discipline fails.*
+  discipline fails. Implemented as `STORAGE-018` v0.1.0, which records
+  the rules on `crate::codec` and pins every blob body with a golden
+  vector.*
 - Revisit if: a use case needs the tag readable from the file without
   the expecting build — the fixed-width string option, or the manifest.
 - Revisit if: the `.mmap` file is ever opened portably without its

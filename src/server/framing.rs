@@ -58,7 +58,7 @@ impl From<io::Error> for FrameError {
 /// payload exceeds [`MAX_FRAME_BYTES`], or [`FrameError::Io`] if the
 /// underlying write fails.
 pub fn write_message<W: Write, T: Serialize>(w: &mut W, msg: &T) -> Result<(), FrameError> {
-    let payload = bincode::serialize(msg).map_err(FrameError::Encoding)?;
+    let payload = crate::codec::encode(msg).map_err(FrameError::Encoding)?;
     let len = u32::try_from(payload.len()).unwrap_or(u32::MAX);
     if len > MAX_FRAME_BYTES {
         return Err(FrameError::FrameTooLarge { len });
@@ -88,7 +88,7 @@ pub fn read_message<R: Read, T: DeserializeOwned>(r: &mut R) -> Result<T, FrameE
     }
     let mut buf = vec![0u8; len as usize];
     r.read_exact(&mut buf)?;
-    bincode::deserialize(&buf).map_err(FrameError::Encoding)
+    crate::codec::decode(&buf).map_err(FrameError::Encoding)
 }
 
 #[cfg(test)]
@@ -116,6 +116,33 @@ mod tests {
         let mut cursor = &buf[..];
         let result: Result<String, FrameError> = read_message(&mut cursor);
         assert!(matches!(result, Err(FrameError::FrameTooLarge { .. })));
+    }
+
+    /// `BINENC-FR-002`/`STORAGE-018` acceptance criterion 4: a frame whose
+    /// length prefix covers a valid `Request` *plus* two junk bytes is an
+    /// `Encoding` error, not a silently-accepted request — the codec
+    /// rejects trailing bytes. The same frame without the junk decodes.
+    #[test]
+    fn a_frame_with_bytes_after_the_message_is_an_encoding_error() {
+        use crate::server::protocol::Request;
+        let payload = crate::codec::encode(&Request::DescribeSchema).unwrap();
+        let mut clean = Vec::new();
+        clean.extend_from_slice(&u32::try_from(payload.len()).unwrap().to_le_bytes());
+        clean.extend_from_slice(&payload);
+        let mut cursor = &clean[..];
+        let decoded: Request = read_message(&mut cursor).unwrap();
+        assert!(matches!(decoded, Request::DescribeSchema));
+
+        let mut padded = Vec::new();
+        padded.extend_from_slice(&u32::try_from(payload.len() + 2).unwrap().to_le_bytes());
+        padded.extend_from_slice(&payload);
+        padded.extend_from_slice(&[0xaa, 0xbb]);
+        let mut cursor = &padded[..];
+        let result: Result<Request, FrameError> = read_message(&mut cursor);
+        assert!(
+            matches!(result, Err(FrameError::Encoding(_))),
+            "expected Encoding, got {result:?}"
+        );
     }
 
     #[test]

@@ -79,7 +79,7 @@ impl SnapshotRebuildStore {
     /// `path` doesn't exist or can't be deserialized.
     pub fn open(path: &Path) -> Result<Self, DurabilityError> {
         let bytes = std::fs::read(path)?;
-        let snapshot: CanonicalOnlySnapshot = bincode::deserialize(&bytes)?;
+        let snapshot: CanonicalOnlySnapshot = crate::codec::decode(&bytes)?;
         let edges = snapshot.edges.clone();
         let state = CanonicalCachedState::new(snapshot.records, snapshot.edges);
         Ok(Self {
@@ -101,7 +101,7 @@ impl SnapshotRebuildStore {
             records: self.state.records_snapshot(),
             edges: self.edges.clone(),
         };
-        let bytes = bincode::serialize(&snapshot)?;
+        let bytes = crate::codec::encode(&snapshot)?;
         std::fs::write(&self.path, bytes)?;
         Ok(())
     }

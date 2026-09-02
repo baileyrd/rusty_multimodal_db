@@ -167,7 +167,8 @@ runtime, and field-addressing choices). Summarized:
   2026-09-02): the free functions pin fixint/little-endian/no-limit,
   stable across 1.x by `bincode`'s own promise "provided the same
   configuration is used"; the proposal names that configuration in one
-  codec and pins it with golden vectors.*
+  codec and pins it with golden vectors. Implemented as `STORAGE-018`
+  v0.1.0 (`crate::codec`; `SERVER-001` v0.9.1) — resolved.*
 
 ## Validation and revisit triggers
 
