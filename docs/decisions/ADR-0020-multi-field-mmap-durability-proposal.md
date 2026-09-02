@@ -200,7 +200,7 @@ Accepted: option 2. Concretely, at implementation:
   multi-slot single-file layout, and closing as not worth building all
   declined). The next unit registers `STORAGE-017` v0.1.0 and implements
   per `docs/design/MULTI-FIELD-MMAP-DURABILITY-DESIGN.md`.
-- 2026-09-02: implemented as `STORAGE-017` v0.1.0 in this PR —
+- 2026-09-02: implemented as `STORAGE-017` v0.1.0 in PR #114 —
   `src/generic/slot_file.rs` (the extraction), `src/generic/mmap_scanned.rs`
   (the layer), the `for Layer;` arms of `forward_scannable_pairs!`, the
   `SlotWidthMismatch` variant, and `OrderProductionStack` gaining
