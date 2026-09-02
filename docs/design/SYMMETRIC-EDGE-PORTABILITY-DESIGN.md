@@ -3,7 +3,7 @@
 - Status: **Accepted** (promoted from Proposed on 2026-09-02 — the owner
   approved the design as proposed, no changes requested). **Implemented**
   as `STORAGE-016` v0.1.0 (`docs/specifications/storage/STORAGE-016-
-  symmetric-edge-list-portability.md`) in this PR — `src/generic/
+  symmetric-edge-list-portability.md`) in PR #102 — `src/generic/
   edge_blob.rs`, the `Symmetric::create`/`open`/`read_portable_edges`/
   `open_portable` impl block in `src/generic/store.rs`, and the `Employee`
   helper switch in `src/generic_spike/employee_impl.rs`. See
@@ -452,6 +452,6 @@ can fail).
   DESIGN` left.
 - 2026-09-02: Accepted as proposed by the owner, no changes requested.
   Implementation (`STORAGE-016`) is the next unit.
-- 2026-09-02: Implemented as `STORAGE-016` v0.1.0 in this PR. Status line
+- 2026-09-02: Implemented as `STORAGE-016` v0.1.0 in PR #102. Status line
   and Traceability updated; open questions unchanged (the schema-tag
   question is the next queued unit).

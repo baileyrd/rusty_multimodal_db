@@ -274,7 +274,7 @@ options" section for the full reasoning. Summarized:
 
 - 2026-09-02: accepted as proposed. The next unit registers `STORAGE-016`
   and implements per `docs/design/SYMMETRIC-EDGE-PORTABILITY-DESIGN.md`.
-- 2026-09-02: implemented as `STORAGE-016` v0.1.0 in this PR
+- 2026-09-02: implemented as `STORAGE-016` v0.1.0 in PR #102
   (`src/generic/edge_blob.rs`, one impl block on `Symmetric` in
   `src/generic/store.rs`, the `Employee` helper switch in
   `src/generic_spike/employee_impl.rs`). One deviation from the design's
