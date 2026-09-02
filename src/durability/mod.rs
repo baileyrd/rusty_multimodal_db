@@ -193,6 +193,27 @@ pub enum DurabilityError {
         path: std::path::PathBuf,
         cause: String,
     },
+    /// Added for the per-field `MmapScanned` layer (`STORAGE-017-FR-009`,
+    /// `generic::mmap_scanned`): the slot file at `path` has a valid
+    /// header but its slot data isn't a whole number of the slots this
+    /// layer's `(Id, V)` pair would write — `body_len` bytes after the
+    /// header against a `slot_width`-byte slot. Either the file was
+    /// written for a different record shape (another field's, or another
+    /// domain's, column in a directory this stack doesn't own) or it was
+    /// truncated mid-slot. Detection only, and deliberately weak: a
+    /// foreign file whose slot width happens to divide the same body
+    /// length passes this check — the tagged record blob, read first on
+    /// the portable path, is what catches a foreign directory outright.
+    /// `GenericMmapStore` itself does *not* raise this (it ignores a
+    /// trailing partial slot, the WAL reader's permissive-truncation
+    /// convention); the layer refuses because, having no blob of its own,
+    /// this is the only check it has.
+    #[error("mmap slot file at {path}: {body_len} bytes of slot data is not a whole number of {slot_width}-byte slots (written for another record shape, or truncated mid-slot)")]
+    SlotWidthMismatch {
+        path: std::path::PathBuf,
+        body_len: usize,
+        slot_width: usize,
+    },
 }
 
 /// Lets every variant's `DogStore::update_age` impl use `?` directly on a

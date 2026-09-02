@@ -200,3 +200,22 @@ Accepted: option 2. Concretely, at implementation:
   multi-slot single-file layout, and closing as not worth building all
   declined). The next unit registers `STORAGE-017` v0.1.0 and implements
   per `docs/design/MULTI-FIELD-MMAP-DURABILITY-DESIGN.md`.
+- 2026-09-02: implemented as `STORAGE-017` v0.1.0 in this PR —
+  `src/generic/slot_file.rs` (the extraction), `src/generic/mmap_scanned.rs`
+  (the layer), the `for Layer;` arms of `forward_scannable_pairs!`, the
+  `SlotWidthMismatch` variant, and `OrderProductionStack` gaining
+  `DiscountCents`. No format change; `GenericMmapStore`'s tests textually
+  unchanged. The implementation calls the design left open (the new
+  error variant, the fast path staying in each owner, the layer refusing
+  trailing partial bytes, the macro spelling, `CreatedAt` as a
+  compile-time refusal, no heal of a missing layer file) are recorded in
+  the spec's "Traceability" section. Measured (`RESULTS.md`, `## Generic
+  schema library`): the core's `scan`/`update` unmoved by the extraction;
+  the second field costs one more slot read per `get` (+22–28% at
+  1K/100K, +67% at 1M on the two-field stack, `parent` in step) and one
+  more file per `create`/`open` (+15–42%). The `open` cost is the
+  N-reconciliation-passes tradeoff "Consequences" names; the per-`get`
+  cost is one it did not name — the same per-layer price `Scanned`'s
+  write-through fix measured for the in-memory layer (`RESULTS.md`,
+  43–88%), paid here on a slot-file read. Recorded as an amendment, not
+  folded into the accepted text.

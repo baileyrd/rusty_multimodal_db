@@ -14,7 +14,7 @@ use criterion::{black_box, criterion_group, criterion_main, BatchSize, Benchmark
 use rusty_multimodal_db::bench_support::{fresh_temp_dir, SIZES};
 use rusty_multimodal_db::generic::order_customer::{
     create_order_production_stack, open_order_production_stack, Amount, BelongsToCustomer,
-    Customer, Order, OrderStatus, Status,
+    Customer, DiscountCents, Order, OrderStatus, Status,
 };
 use rusty_multimodal_db::generic::GenericProductionStore;
 use rusty_multimodal_db::generic_spike::order_bench_support::{
@@ -266,6 +266,46 @@ fn bench_open_append(c: &mut Criterion) {
     group.finish();
 }
 
+/// `STORAGE-017`: the second durable field, owned by the `MmapScanned`
+/// layer stacked above `GenericMmapStore` (its own slot file, its own
+/// `position_index`). `bench_scan`/`bench_update` above measure `Amount`
+/// through the core; these two measure `DiscountCents` through the layer,
+/// so the cost of the layer itself — one more `HashMap` lookup on
+/// `update`, one more file on `scan` — is visible next to the core's
+/// number rather than folded into it. Everything the other groups measure
+/// (`get` now patches one more field on the way up; `create`/`open` now
+/// write/reconcile two slot files) shows up in their own existing rows.
+fn bench_scan_layer(c: &mut Criterion) {
+    let mut group = c.benchmark_group("generic_production_scan_layer");
+    for &n in &SIZES {
+        let (_dataset, store) = build_store(n, "scan_layer");
+        group.bench_with_input(BenchmarkId::new("generic_production", n), &n, |b, _| {
+            b.iter(|| {
+                let discounts: Vec<i64> = store.scan::<Order, DiscountCents>();
+                black_box(discounts)
+            });
+        });
+    }
+    group.finish();
+}
+
+fn bench_update_layer(c: &mut Criterion) {
+    let mut group = c.benchmark_group("generic_production_update_layer");
+    for &n in &SIZES {
+        let (dataset, store) = build_store(n, "update_layer");
+        let mut cursor = RoundRobin::new(dataset.sample_order_ids.len());
+        group.bench_with_input(BenchmarkId::new("generic_production", n), &n, |b, _| {
+            b.iter(|| {
+                let id = dataset.sample_order_ids[cursor.advance()];
+                store
+                    .update::<Order, DiscountCents>(black_box(id), black_box(321))
+                    .expect("update the layered field for bench");
+            });
+        });
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_get,
@@ -276,6 +316,8 @@ criterion_group!(
     bench_create,
     bench_open,
     bench_open_append,
-    bench_update
+    bench_update,
+    bench_scan_layer,
+    bench_update_layer
 );
 criterion_main!(benches);
