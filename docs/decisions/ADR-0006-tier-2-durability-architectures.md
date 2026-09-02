@@ -196,7 +196,12 @@ scope question:
 - Revisit if: a future record shape needs more than one mutable field
   persisted — at that point mmap's and `redb`'s ages-only scope-down
   would need real redesign (the string-heap/fixed-layout problem this ADR
-  chose not to solve), not just an incremental extension.
+  chose not to solve), not just an incremental extension. *Triggered
+  by `Order` (`GENERIC-SCHEMA-DESIGN` §4.2) and answered for the generic
+  library's mmap store by `docs/design/MULTI-FIELD-MMAP-DURABILITY-DESIGN.md`
+  / `ADR-0020` (Proposed): a per-field `MmapScanned` layer over the
+  existing slot format, fixed-width fields only; `redb`'s scope-down and
+  variable-width fields remain as stated here.*
 - Revisit if: LSM compaction becomes a real requirement — e.g. a
   long-running-store benchmark that actually accumulates enough flushed
   generations to show the unbounded-read-amplification cost this pass's
