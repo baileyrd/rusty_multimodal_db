@@ -257,7 +257,7 @@ Accepted: option 2. Concretely, at implementation:
 - 2026-09-02: the one follow-up that finding opened — reorder
   `RecordBlob::read` to fingerprint before decoding, as the generic
   blobs do — examined and closed as not warranted by the owner
-  (`STORAGE-018` v0.1.1, docs-only, in this PR). It is a
+  (`STORAGE-018` v0.1.1, docs-only, PR #122). It is a
   `BLOB_VERSION` 2 → 3 format change, not a reorder: the `Dog` blob's
   fingerprint is over decoded, age-free content so `ProductionStore::
   open` does not rewrite the blob after `update_age`, and a byte hash
