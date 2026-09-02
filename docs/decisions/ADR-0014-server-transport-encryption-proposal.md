@@ -319,7 +319,10 @@ interfaces" section for the full reasoning. Summarized:
 - **A self-signed certificate (the expected common case) requires
   explicit client-side trust configuration** — not a plug-and-play
   upgrade for an existing plaintext client without also updating its own
-  connection setup.
+  connection setup. *Taken for this crate's own client at `SERVER-001`
+  v0.12.0 / FR-022 (the PR after #129): `SchemaDrivenClient::connect_with`
+  + `ClientTlsConfig::new(server_name, TrustPolicy)`; no change to this
+  decision.*
 - The exact call-site shape wrapping `rusty_tls::TlsServerStream`
   (`enum Connection` vs. a generic `handle_connection<S: Read + Write>`)
   is left as an implementation-time decision — a real, if bounded,

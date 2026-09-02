@@ -22,9 +22,14 @@
 //! ADR-0014 exists to preserve.
 
 use rusty_multimodal_db::record::DogRecord;
+use rusty_multimodal_db::server::client::{
+    ClientError, ClientTlsConfig, ConnectOptions, SchemaDrivenClient,
+};
 use rusty_multimodal_db::server::dog::{DogConnectionStore, FIELD_AGE};
 use rusty_multimodal_db::server::framing::{read_message, write_message};
-use rusty_multimodal_db::server::protocol::{Request, Response, ScanValue};
+use rusty_multimodal_db::server::protocol::{
+    ErrorCode, Request, Response, ScanValue, PROTOCOL_VERSION,
+};
 use rusty_multimodal_db::server::{serve, AuthConfig, TlsConfig};
 use rusty_multimodal_db::ProductionStore;
 use rusty_tls::{TlsStream, TrustPolicy};
@@ -273,4 +278,103 @@ fn no_tls_config_reproduces_plaintext_behavior() {
         ),
         Response::Record { .. }
     ));
+}
+
+fn dev_tls() -> ClientTlsConfig {
+    ClientTlsConfig::new("localhost", TrustPolicy::DangerNoVerification)
+}
+
+/// `SERVER-001-FR-022`: `SchemaDrivenClient` reaches a `TlsConfig`-configured
+/// server through `ConnectOptions::tls` — the `Hello` negotiates the same
+/// `PROTOCOL_VERSION`, the schema is fetched, and reads, writes, and
+/// scans all work over the encrypted channel exactly as they do in
+/// plaintext (`tests/server_schema_driven_client.rs`).
+#[test]
+fn schema_driven_client_connects_over_tls() {
+    let (cert_der, key_der) = self_signed_leaf();
+    let tls = TlsConfig::new(vec![cert_der], key_der).unwrap();
+    let addr = start_server(AuthConfig::default(), Some(tls));
+
+    let mut client =
+        SchemaDrivenClient::connect_with(addr, ConnectOptions::new().tls(dev_tls())).unwrap();
+    assert_eq!(client.server_protocol_version(), PROTOCOL_VERSION);
+    assert!(client.schema().fields.iter().any(|f| f.name == "age"));
+
+    let record = client.get(Uuid::from_u128(1)).unwrap().unwrap();
+    assert!(record.contains(&("age".to_string(), ScanValue::U32(3))));
+    assert!(client
+        .update(Uuid::from_u128(1), "age", ScanValue::U32(9))
+        .unwrap());
+    assert_eq!(client.scan("age").unwrap(), vec![ScanValue::U32(9)]);
+}
+
+/// `SERVER-001-FR-022` composed with `FR-021` (`TLS-FR-007`): the token
+/// travels inside TLS. A plaintext `connect_authenticated` against the
+/// TLS server fails at the `Hello`, before the token is written; a TLS
+/// connection with no token is the server's own `Unauthenticated`; a TLS
+/// connection with a read token reads but cannot write; `authenticate`
+/// promotes it mid-connection exactly as in plaintext.
+#[test]
+fn schema_driven_client_authenticates_over_tls() {
+    let (cert_der, key_der) = self_signed_leaf();
+    let tls = TlsConfig::new(vec![cert_der], key_der).unwrap();
+    let auth = AuthConfig::new(Some("read-token".into()), Some("write-token".into()));
+    let addr = start_server(auth, Some(tls));
+
+    match SchemaDrivenClient::connect_authenticated(addr, "write-token").map(|_| ()) {
+        Err(ClientError::Frame(_)) => {}
+        other => panic!("expected the plaintext Hello to fail the TLS handshake, got {other:?}"),
+    }
+    match SchemaDrivenClient::connect_with(addr, ConnectOptions::new().tls(dev_tls())).map(|_| ()) {
+        Err(ClientError::Server(ErrorCode::Unauthenticated, _)) => {}
+        other => panic!("expected Unauthenticated over TLS without a token, got {other:?}"),
+    }
+
+    let mut client = SchemaDrivenClient::connect_with(
+        addr,
+        ConnectOptions::new().tls(dev_tls()).token("read-token"),
+    )
+    .unwrap();
+    assert_eq!(client.scan("age").unwrap(), vec![ScanValue::U32(3)]);
+    match client.update(Uuid::from_u128(1), "age", ScanValue::U32(9)) {
+        Err(ClientError::Server(ErrorCode::Unauthorized, _)) => {}
+        other => panic!("expected Unauthorized for a read-only TLS connection, got {other:?}"),
+    }
+    client.authenticate("write-token").unwrap();
+    assert!(client
+        .update(Uuid::from_u128(1), "age", ScanValue::U32(9))
+        .unwrap());
+    assert_eq!(client.scan("age").unwrap(), vec![ScanValue::U32(9)]);
+}
+
+/// `SERVER-001-FR-022`'s failure shapes, none of them a hang: a plain
+/// `connect` against a TLS server fails under the `Hello`
+/// (`ClientError::Frame`); a server name `rusty_tls` cannot parse is
+/// `ClientError::Tls` before any I/O; and a self-signed certificate
+/// under `TrustPolicy::System` is refused by the client at the handshake
+/// (`Frame(Io(..))` from the rejected certificate, or `Tls` if this host
+/// has no usable trust anchors at all) — the client never proceeds to
+/// send a frame to a server it could not verify.
+#[test]
+fn schema_driven_client_tls_failures_are_errors_not_hangs() {
+    let (cert_der, key_der) = self_signed_leaf();
+    let tls = TlsConfig::new(vec![cert_der], key_der).unwrap();
+    let addr = start_server(AuthConfig::default(), Some(tls));
+
+    match SchemaDrivenClient::connect(addr).map(|_| ()) {
+        Err(ClientError::Frame(_)) => {}
+        other => panic!("expected a plaintext connect to fail at the Hello, got {other:?}"),
+    }
+
+    let bad_name = ClientTlsConfig::new("not a server name", TrustPolicy::DangerNoVerification);
+    match SchemaDrivenClient::connect_with(addr, ConnectOptions::new().tls(bad_name)).map(|_| ()) {
+        Err(ClientError::Tls(_)) => {}
+        other => panic!("expected ClientError::Tls for an unparseable server name, got {other:?}"),
+    }
+
+    let system = ClientTlsConfig::new("localhost", TrustPolicy::System);
+    match SchemaDrivenClient::connect_with(addr, ConnectOptions::new().tls(system)).map(|_| ()) {
+        Err(ClientError::Frame(_)) | Err(ClientError::Tls(_)) => {}
+        other => panic!("expected the self-signed certificate to be refused, got {other:?}"),
+    }
 }
