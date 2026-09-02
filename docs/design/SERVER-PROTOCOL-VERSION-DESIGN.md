@@ -1,7 +1,10 @@
-# Server Protocol Version Design (Proposed)
+# Server Protocol Version Design (Accepted)
 
-- Status: **Proposed** (awaiting owner acceptance — see "Open questions"
-  for the one acceptance question and the alternatives offered)
+- Status: **Accepted** (promoted from Proposed on 2026-09-02 — the owner
+  approved the design as proposed, option (a): optional first-frame
+  `Hello`, `min` negotiation, `PROTOCOL_VERSION = 2`, rules written, no
+  gating state yet; (b) hello-required and (c) rule-only declined; no
+  changes requested)
 - Date: 2026-09-02
 - Related: `docs/decisions/ADR-0022-server-protocol-version-proposal.md`
   (the decision record this document backs),
@@ -544,7 +547,8 @@ No change to `framing.rs`, `dog.rs`, `order.rs`, `employee.rs`,
 
 ## Open questions
 
-- **Acceptance question — three options, first recommended.**
+- **Acceptance question — resolved 2026-09-02: (a) accepted.** The
+  three options as offered, first recommended:
   **(a)** Accept as proposed: optional first-frame `Hello`, `min`
   negotiation, `PROTOCOL_VERSION = 2`, rules written, no gating state
   until a gated variant exists. **(b)** Accept with a *required* hello:
@@ -564,4 +568,8 @@ No change to `framing.rs`, `dog.rs`, `order.rs`, `employee.rs`,
 
 ## Change history
 
-- 0.1.0 (2026-09-02): Proposed.
+- 0.1.0 (2026-09-02): Proposed (PR #124).
+- 2026-09-02: Accepted as proposed (option (a); (b) and (c) declined).
+  No changes to the design text beyond status. The next unit registers
+  `SERVER-001` v0.10.0 / FR-020 and implements per the verification
+  plan.

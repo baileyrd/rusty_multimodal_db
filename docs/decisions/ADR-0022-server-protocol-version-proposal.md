@@ -1,6 +1,10 @@
 # ADR-0022: Wire protocol version — a `PROTOCOL_VERSION` constant, an optional first-frame `Hello`, and append-only compatibility rules
 
-- Status: **Proposed** (awaiting owner acceptance — options at the end)
+- Status: **Accepted** (promoted from Proposed on 2026-09-02 — the owner
+  approved the design as proposed, option (a): optional first-frame
+  `Hello`, `min` negotiation, `PROTOCOL_VERSION = 2`, rules written, no
+  gating state yet; (b) hello-required and (c) rule-only declined; no
+  changes requested)
 - Date: 2026-09-02
 - Deciders: baileyrd
 - Related: `docs/design/SERVER-PROTOCOL-VERSION-DESIGN.md` (the full
@@ -105,7 +109,7 @@ posture `ADR-0016` through `ADR-0021` took.
 
 ## Decision
 
-Proposed: option 3. Concretely, at implementation:
+Accepted: option 3. Concretely, at implementation:
 
 - `src/server/protocol.rs`: `pub const PROTOCOL_VERSION: u32 = 2`;
   `Request::Hello { protocol_version: u32 }` at index 10;
@@ -207,3 +211,7 @@ Proposed: option 3. Concretely, at implementation:
   written, no gating state yet (recommended); **(b)** accept with the
   hello *required* — a first frame that is not `Hello` is `Malformed`;
   **(c)** rule only — document append-only, add no `Hello`.
+  Proposed in PR #124.
+- 2026-09-02: accepted as proposed (option (a); (b) and (c) declined).
+  The next unit registers `SERVER-001` v0.10.0 / FR-020 and implements
+  per `docs/design/SERVER-PROTOCOL-VERSION-DESIGN.md`.
