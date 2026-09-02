@@ -90,9 +90,11 @@ pub(crate) const PARALLEL_CONSTRUCTION_THRESHOLD: usize = 1_500;
 // Seven of the eight durability variants below are the benchmark
 // comparison this crate's charter set out to run — not the recommended
 // path (see `lib.rs`'s own top-level doc comment). Gated behind the
-// `research` feature; `mmap_store`/`MmapAgeStore` and `DurabilityError`
-// stay unconditional since `crate::production::ProductionStore` uses them
-// directly.
+// `research` feature; `mmap_store`/`MmapAgeStore`, `record_blob` (the
+// companion file `ProductionStore::create`/`open_portable` persist the
+// immutable half of a record set through — STORAGE-014) and
+// `DurabilityError` stay unconditional since
+// `crate::production::ProductionStore` uses them directly.
 #[cfg(feature = "research")]
 pub mod embedded_store;
 #[cfg(feature = "research")]
@@ -100,6 +102,7 @@ pub mod hybrid;
 #[cfg(feature = "research")]
 pub mod lsm_store;
 pub mod mmap_store;
+pub(crate) mod record_blob;
 #[cfg(feature = "research")]
 pub mod snapshot_full;
 #[cfg(feature = "research")]
@@ -173,6 +176,20 @@ pub enum DurabilityError {
     /// version.
     #[error("mmap durability file schema version mismatch: file has {found}, this build expects {expected}")]
     SchemaVersionMismatch { found: u32, expected: u32 },
+    /// Added for [`crate::production::ProductionStore::open_portable`]
+    /// (`STORAGE-014-FR-005`): the companion record blob
+    /// (`<ages path>.records`, see `durability::record_blob`) is missing, isn't a
+    /// record blob at all, was written by an incompatible build, or its
+    /// body doesn't decode. `cause` names which. Deliberately distinct
+    /// from [`Self::InvalidMagic`]/[`Self::SchemaVersionMismatch`], which
+    /// describe the *ages* file: a caller who copied only the `.mmap` file
+    /// (a pre-`STORAGE-014` backup, say) gets told the companion is the
+    /// problem, not misled into thinking the ages file is corrupt.
+    #[error("record blob at {path}: {cause}")]
+    RecordBlobUnreadable {
+        path: std::path::PathBuf,
+        cause: String,
+    },
 }
 
 /// Lets every variant's `DogStore::update_age` impl use `?` directly on a

@@ -76,8 +76,39 @@
 //! recover from by inspecting a `Result`. Callers who need real fallibility
 //! (a caller-supplied, persistent path) should use [`Self::create`]/
 //! [`Self::open`] directly, which return `Result` throughout.
+//!
+//! # File portability: two files, one path (STORAGE-014)
+//!
+//! `MmapAgeStore`'s file persists only `age` — the one field anything in
+//! this crate ever mutates — so on its own it can't reconstruct a store:
+//! [`ProductionStore::open`] needs the caller to supply the full record
+//! set again. Since `MMAP-AGE-STORE-IDENTITY-FIX` that has been this
+//! project's own standing "not portable the way SQLite's/DuckDB's file
+//! is" gap. `docs/design/PRODUCTION-STORE-PORTABILITY-DESIGN.md`
+//! (ADR-0016, Accepted) closes it *additively*: alongside the unchanged
+//! ages file at `path`, `create` also writes a **companion record blob**
+//! at `<path>.records` (`crate::durability::record_blob`) holding the
+//! immutable half of the state — every `id`/`breed` and every edge —
+//! and a new constructor, [`ProductionStore::open_portable`], reopens
+//! from `path` alone by reading that blob first. Copy the two files
+//! together and the store travels. Nothing about `MmapAgeStore`'s
+//! format, or about `create`/`open`'s signatures, changed.
+//!
+//! The blob is write-once at `create`; the only other time it's written
+//! is when [`ProductionStore::open`] is handed a record set that differs
+//! byte-for-byte (in `bincode` encoding) from what the blob holds — the
+//! same "the caller's dataset is the truth" reconciliation `MmapAgeStore::
+//! open` already performs for the ages file. That comparison costs one
+//! read of the companion file on every `open`; a missing or unreadable
+//! blob simply counts as stale and is (re)written, which also upgrades a
+//! pre-`STORAGE-014` directory holding only an ages file on its first
+//! `open`. Only `open_portable` ever *requires* the blob — and a missing
+//! or corrupt one there is [`DurabilityError::RecordBlobUnreadable`], a
+//! variant distinct from the ages file's own `InvalidMagic`/
+//! `SchemaVersionMismatch`, never a panic.
 
 use crate::concurrency::{ConcurrencyError, ConcurrentStore};
+use crate::durability::record_blob::{companion_path, RecordBlob};
 use crate::durability::{DurabilityError, MmapAgeStore};
 use crate::record::DogRecord;
 use crate::store::{DogStore, StoreError};
@@ -130,19 +161,34 @@ const LOCK_POISONED: &str =
 impl ProductionStore {
     /// Build fresh (matching [`MmapAgeStore::create`]'s semantics exactly):
     /// creates a new mmap-backed file at `path`, sized and initialized from
-    /// `records`' starting ages, wrapped in a `RwLock`.
+    /// `records`' starting ages, wrapped in a `RwLock` — and, new as of
+    /// `STORAGE-014`, the companion record blob at `<path>.records` that
+    /// lets [`Self::open_portable`] reopen this store from `path` alone.
+    /// See module docs ("File portability").
+    ///
+    /// The blob is encoded before `records`/`edges` move into
+    /// `MmapAgeStore` (no clone of the record set) and written after the
+    /// ages file exists, so a failure partway leaves at most an ages file
+    /// without its companion — exactly the state a later [`Self::open`]
+    /// already heals.
     ///
     /// # Errors
     ///
     /// Returns [`DurabilityError::Io`] under the same conditions
-    /// [`MmapAgeStore::create`] does.
+    /// [`MmapAgeStore::create`] does, or if the companion blob can't be
+    /// written; [`DurabilityError::Serde`] if the record set can't be
+    /// serialized (not reachable for any `DogRecord` this crate builds).
     pub fn create(
         records: Vec<DogRecord>,
         edges: Vec<(Uuid, Uuid)>,
         path: &Path,
     ) -> Result<Self, DurabilityError> {
+        let blob = RecordBlob { records, edges };
+        let encoded = blob.encode()?;
+        let inner = MmapAgeStore::create(blob.records, blob.edges, path)?;
+        encoded.write(&companion_path(path))?;
         Ok(Self {
-            inner: RwLock::new(MmapAgeStore::create(records, edges, path)?),
+            inner: RwLock::new(inner),
         })
     }
 
@@ -151,17 +197,64 @@ impl ProductionStore {
     /// rebuild the in-memory indexes, the file on disk remains the source
     /// of truth for every age.
     ///
+    /// As of `STORAGE-014` this also keeps the companion record blob at
+    /// `<path>.records` in step with the caller's record set: after the
+    /// ages file opens, the blob is read once and compared byte-for-byte
+    /// with what `records`/`edges` encode to; if it's missing, unreadable,
+    /// or different, it's (re)written. A directory holding only an ages
+    /// file written before this companion existed is therefore upgraded
+    /// on its first `open` — no migration step. The comparison runs
+    /// *after* `MmapAgeStore::open` succeeds, so an ages-file error never
+    /// clobbers a valid blob belonging to a different dataset.
+    ///
     /// # Errors
     ///
     /// Returns [`DurabilityError::Io`] under the same conditions
-    /// [`MmapAgeStore::open`] does.
+    /// [`MmapAgeStore::open`] does, or if a stale/missing companion blob
+    /// can't be rewritten.
     pub fn open(
         records: Vec<DogRecord>,
         edges: Vec<(Uuid, Uuid)>,
         path: &Path,
     ) -> Result<Self, DurabilityError> {
+        let blob = RecordBlob { records, edges };
+        let encoded = blob.encode()?;
+        let inner = MmapAgeStore::open(blob.records, blob.edges, path)?;
+        let companion = companion_path(path);
+        if !encoded.is_current_at(&companion) {
+            encoded.write(&companion)?;
+        }
         Ok(Self {
-            inner: RwLock::new(MmapAgeStore::open(records, edges, path)?),
+            inner: RwLock::new(inner),
+        })
+    }
+
+    /// Reopen from `path` alone — no `records`/`edges` needed
+    /// (`STORAGE-014-FR-002`): reads the companion record blob at
+    /// `<path>.records` for the immutable half of the state (`id`/`breed`/
+    /// edges), then opens the ages file at `path` exactly as
+    /// [`Self::open`] would with that record set. Copy both files to a
+    /// fresh location and this reopens them there; the result is
+    /// indistinguishable from the store `create` produced, including every
+    /// `breed`, every `same_breed`/`neighbors` answer, and every age the
+    /// ages file holds.
+    ///
+    /// The blob is known current here (it *is* the record set), so no
+    /// comparison or rewrite happens — this is the one constructor that
+    /// never writes the companion.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DurabilityError::RecordBlobUnreadable`] if the companion
+    /// blob is missing (e.g. only the `.mmap` file was copied), isn't a
+    /// record blob, was written by an incompatible build, or doesn't
+    /// decode — never a panic, and never the ages file's own
+    /// `InvalidMagic`/`SchemaVersionMismatch` (`STORAGE-014-FR-005`).
+    /// Otherwise, the same errors [`MmapAgeStore::open`] returns.
+    pub fn open_portable(path: &Path) -> Result<Self, DurabilityError> {
+        let blob = RecordBlob::read(&companion_path(path))?;
+        Ok(Self {
+            inner: RwLock::new(MmapAgeStore::open(blob.records, blob.edges, path)?),
         })
     }
 
@@ -376,6 +469,178 @@ mod tests {
         assert_eq!(
             DogStore::get(&reopened, Uuid::from_u128(1)).unwrap().age,
             77
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// STORAGE-014 acceptance: `create` → `open_portable` round trip with
+    /// no records/edges supplied, identical on every `DogStore` method
+    /// including `breed` (the field the ages file never held).
+    #[test]
+    fn open_portable_reconstructs_the_full_store_from_the_path_alone() {
+        let dir = fresh_temp_dir("production_portable").unwrap();
+        let path = dir.join("ages.mmap");
+
+        {
+            let mut store = ProductionStore::create(sample(), sample_edges(), &path).unwrap();
+            DogStore::update_age(&mut store, Uuid::from_u128(1), 77).unwrap();
+            store.flush().unwrap();
+        }
+        assert!(companion_path(&path).exists(), "create must write the blob");
+
+        let reopened = ProductionStore::open_portable(&path).unwrap();
+        let rex = DogStore::get(&reopened, Uuid::from_u128(1)).unwrap();
+        assert_eq!(rex.breed, "labrador");
+        assert_eq!(rex.age, 77, "the ages file, not the blob's seed, wins");
+        assert_eq!(
+            DogStore::get(&reopened, Uuid::from_u128(3)).unwrap().breed,
+            "poodle"
+        );
+        assert_eq!(
+            reopened.same_breed(Uuid::from_u128(1)),
+            vec![Uuid::from_u128(2)]
+        );
+        assert_eq!(
+            reopened.neighbors(Uuid::from_u128(1)),
+            vec![Uuid::from_u128(2)]
+        );
+        assert_eq!(DogStore::scan_ages(&reopened), vec![77, 5, 2]);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// STORAGE-014 acceptance: the two files are portable as a unit —
+    /// copy both to a fresh directory, `open_portable` there.
+    #[test]
+    fn open_portable_works_on_both_files_copied_to_a_fresh_directory() {
+        let source = fresh_temp_dir("production_portable_src").unwrap();
+        let path = source.join("ages.mmap");
+        {
+            let mut store = ProductionStore::create(sample(), sample_edges(), &path).unwrap();
+            DogStore::update_age(&mut store, Uuid::from_u128(2), 9).unwrap();
+            store.flush().unwrap();
+        }
+
+        let destination = fresh_temp_dir("production_portable_dst").unwrap();
+        // A different file name at the destination: the companion is
+        // derived from whatever path the caller opens, not remembered.
+        let moved = destination.join("dogs.db");
+        std::fs::copy(&path, &moved).unwrap();
+        std::fs::copy(companion_path(&path), companion_path(&moved)).unwrap();
+
+        let reopened = ProductionStore::open_portable(&moved).unwrap();
+        assert_eq!(DogStore::get(&reopened, Uuid::from_u128(2)).unwrap().age, 9);
+        assert_eq!(
+            DogStore::get(&reopened, Uuid::from_u128(2)).unwrap().breed,
+            "labrador"
+        );
+        assert_eq!(
+            reopened.neighbors(Uuid::from_u128(2)),
+            vec![Uuid::from_u128(1)]
+        );
+
+        let _ = std::fs::remove_dir_all(&source);
+        let _ = std::fs::remove_dir_all(&destination);
+    }
+
+    /// STORAGE-014 acceptance: only the `.mmap` file copied (a
+    /// pre-portability backup) → the distinct typed error, not a panic
+    /// and not the ages file's own `InvalidMagic`.
+    #[test]
+    fn open_portable_without_the_blob_is_a_typed_error_not_a_panic() {
+        let dir = fresh_temp_dir("production_portable_missing").unwrap();
+        let path = dir.join("ages.mmap");
+        ProductionStore::create(sample(), sample_edges(), &path).unwrap();
+        std::fs::remove_file(companion_path(&path)).unwrap();
+
+        let result = ProductionStore::open_portable(&path);
+        match result {
+            Err(DurabilityError::RecordBlobUnreadable { path: reported, .. }) => {
+                assert_eq!(reported, companion_path(&path));
+            }
+            other => panic!("expected RecordBlobUnreadable, got {:?}", other.err()),
+        }
+        // The ages file itself is untouched and still fine.
+        assert!(ProductionStore::open(sample(), sample_edges(), &path).is_ok());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An ages file from before STORAGE-014 (no companion at all) is
+    /// upgraded by the first `open` — after which `open_portable` works.
+    #[test]
+    fn open_heals_a_legacy_directory_holding_only_the_ages_file() {
+        let dir = fresh_temp_dir("production_portable_legacy").unwrap();
+        let path = dir.join("ages.mmap");
+        {
+            // Bypass `ProductionStore::create` — build the legacy layout
+            // exactly as the pre-STORAGE-014 code did.
+            let mut legacy = MmapAgeStore::create(sample(), sample_edges(), &path).unwrap();
+            legacy.update_age(Uuid::from_u128(3), 11).unwrap();
+            legacy.flush().unwrap();
+        }
+        assert!(!companion_path(&path).exists());
+        assert!(matches!(
+            ProductionStore::open_portable(&path),
+            Err(DurabilityError::RecordBlobUnreadable { .. })
+        ));
+
+        drop(ProductionStore::open(sample(), sample_edges(), &path).unwrap());
+        assert!(companion_path(&path).exists(), "open must write the blob");
+
+        let reopened = ProductionStore::open_portable(&path).unwrap();
+        assert_eq!(
+            DogStore::get(&reopened, Uuid::from_u128(3)).unwrap().age,
+            11
+        );
+        assert_eq!(
+            DogStore::get(&reopened, Uuid::from_u128(3)).unwrap().breed,
+            "poodle"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `open` with a *changed* record set (the identity-keyed
+    /// reconciliation `MMAP-AGE-STORE-IDENTITY-FIX` provides) refreshes the
+    /// blob, so a later `open_portable` sees the new set — and an `open`
+    /// with the *same* set leaves the blob's bytes alone.
+    #[test]
+    fn open_refreshes_the_blob_only_when_the_record_set_changed() {
+        let dir = fresh_temp_dir("production_portable_refresh").unwrap();
+        let path = dir.join("ages.mmap");
+        ProductionStore::create(sample(), sample_edges(), &path).unwrap();
+        let companion = companion_path(&path);
+        let original = std::fs::read(&companion).unwrap();
+        let original_modified = std::fs::metadata(&companion).unwrap().modified().unwrap();
+
+        drop(ProductionStore::open(sample(), sample_edges(), &path).unwrap());
+        assert_eq!(std::fs::read(&companion).unwrap(), original);
+        assert_eq!(
+            std::fs::metadata(&companion).unwrap().modified().unwrap(),
+            original_modified,
+            "an unchanged record set must not rewrite the blob"
+        );
+
+        let mut grown = sample();
+        grown.push(DogRecord::new(Uuid::from_u128(4), "beagle", 1));
+        let mut grown_edges = sample_edges();
+        grown_edges.push((Uuid::from_u128(3), Uuid::from_u128(4)));
+        {
+            let mut store = ProductionStore::open(grown.clone(), grown_edges, &path).unwrap();
+            DogStore::update_age(&mut store, Uuid::from_u128(4), 8).unwrap();
+            store.flush().unwrap();
+        }
+        assert_ne!(std::fs::read(&companion).unwrap(), original);
+
+        let reopened = ProductionStore::open_portable(&path).unwrap();
+        let newcomer = DogStore::get(&reopened, Uuid::from_u128(4)).unwrap();
+        assert_eq!(newcomer.breed, "beagle");
+        assert_eq!(newcomer.age, 8);
+        assert_eq!(
+            reopened.neighbors(Uuid::from_u128(3)),
+            vec![Uuid::from_u128(4)]
         );
 
         let _ = std::fs::remove_dir_all(&dir);

@@ -185,3 +185,35 @@ options" section for the full reasoning. Summarized:
   this proposal) — at that point a cheaper incremental-update format
   (rather than a full re-serialize) would be the natural next step, not
   a different architecture.
+
+## Acceptance and implementation
+
+- 2026-09-02: implemented as `PRODUCTION-STORE-PORTABILITY` (`STORAGE-014`
+  v0.1.0). `src/durability/record_blob.rs` (new), `ProductionStore::create`
+  /`open`/`open_portable` in `src/production.rs`, and
+  `DurabilityError::RecordBlobUnreadable` in `src/durability/mod.rs`;
+  `src/durability/mmap_store.rs` untouched, confirmed by an empty diff.
+- Naming convention finalized: the companion blob is literally
+  `<path>.records` (so `dogs.mmap` pairs with `dogs.mmap.records`) — the
+  two files sort adjacently and the pairing is visible without reading
+  either. The rewrite temp file is `<companion>.rewrite-tmp`.
+- **One divergence from this ADR's expectation, measured not assumed**: the
+  "Validation and revisit triggers" bullet above treated the blob's write
+  cost at `create()`/reconciling-`open()` time as unmeasured; the design
+  document's own open question predicted the common-case `open` cost to be
+  zero, on the theory that the blob rewrite could ride on `MmapAgeStore`'s
+  own rewrite decision. It cannot without touching `MmapAgeStore` (that
+  decision is private), and this round's whole point was not touching it.
+  `open` therefore serializes the record set and byte-compares it against
+  the on-disk blob on every call. Release build, median of 7 samples (3 at
+  1M): `create` +15%/+68%/+78% and `open` +27%/+30%/+27% at 1K/100K/1M
+  records; `open_portable` lands between the old and new `open`; the blob
+  is ~5.6× the ages file (~118 B/record). Full table in `RESULTS.md`'s
+  `### ProductionStore file portability (STORAGE-014)` subsection. No
+  benchmarked hot path is affected — nothing times `create`/`open` inside
+  `b.iter()`.
+- The "cheaper incremental-update format" revisit trigger is not yet
+  tripped: the named follow-up if `open`'s steady-state cost ever matters
+  is a content hash in the blob header (a `BLOB_VERSION` bump), not a
+  different architecture. Not built this round; no caller has asked.
+- `GenericMmapStore` remains out of scope, per the last revisit bullet.
