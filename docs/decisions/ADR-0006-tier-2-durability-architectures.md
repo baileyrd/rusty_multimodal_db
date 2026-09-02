@@ -199,7 +199,7 @@ scope question:
   chose not to solve), not just an incremental extension. *Triggered
   by `Order` (`GENERIC-SCHEMA-DESIGN` §4.2) and answered for the generic
   library's mmap store by `docs/design/MULTI-FIELD-MMAP-DURABILITY-DESIGN.md`
-  / `ADR-0020` (Proposed): a per-field `MmapScanned` layer over the
+  / `ADR-0020` (Accepted): a per-field `MmapScanned` layer over the
   existing slot format, fixed-width fields only; `redb`'s scope-down and
   variable-width fields remain as stated here.*
 - Revisit if: LSM compaction becomes a real requirement — e.g. a
