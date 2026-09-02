@@ -388,8 +388,36 @@ begins).
   pick, matching where the owner's original portability question was
   asked.
 
+## Implementation status
+
+Implemented 2026-09-02 as `PRODUCTION-STORE-PORTABILITY` (`STORAGE-014`
+v0.1.0; `ADR-0016` "Acceptance and implementation"). Resolutions of the
+open questions above, in order:
+
+- `GenericMmapStore`: still a separate, later decision — unchanged.
+- Naming convention: finalized as literally `<path>.records`
+  (`src/durability/record_blob.rs::companion_path`), with
+  `<companion>.rewrite-tmp` as the crash-safe temp file. The two files
+  sort adjacently, which turned out to read clearly enough on its own.
+- The reconciliation-triggered rewrite cost: **measured, and not zero.**
+  `MmapAgeStore`'s own rewrite decision is private to it, and this round
+  deliberately left `mmap_store.rs` untouched, so `open` cannot learn
+  whether the ages file was rewritten. It instead serializes the record
+  set and byte-compares it against the on-disk blob on every call,
+  rewriting only on a mismatch (which also heals a pre-`STORAGE-014`
+  directory holding only the ages file). Release build, median of 7
+  samples (3 at 1M): `open` +27%/+30%/+27% at 1K/100K/1M records, `create`
+  +15%/+68%/+78%; `open_portable` between the old and new `open`. Full
+  table and verdict in `RESULTS.md`'s `### ProductionStore file
+  portability (STORAGE-014)` subsection. Named follow-up, not built: a
+  content hash in the blob header so `open` compares a fingerprint instead
+  of a full serialization (a `BLOB_VERSION` bump).
+- Tier 1/2 durability variants: still out of scope — unchanged.
+
 ## Change history
 
+- 2026-09-02: "Implementation status" addendum — implemented, open
+  questions resolved or explicitly carried, measured `open` cost recorded.
 - 2026-09-01: Initial proposal, in response to the owner asking to
   pursue `ProductionStore` file portability from `RESULTS.md`'s/
   `PROJECT-STATUS.md`'s own standing open question.
