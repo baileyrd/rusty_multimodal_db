@@ -221,7 +221,10 @@ shared across all connection threads.
   enum shape; no explicit version negotiation exists in this proposal — a
   client and server built from different crate versions have no compat
   guarantee. A real revisit trigger if this ever needs mixed-version
-  deployments (see below).
+  deployments (see below). *Resolved: `ADR-0022` / `SERVER-001`
+  v0.10.0 (FR-020) — `PROTOCOL_VERSION = 2`, an optional first-frame
+  `Hello` negotiated to `min(client, server)`, and append-only
+  compatibility rules (`SERVER-PROTOCOL-VERSION-DESIGN`).*
 
 ## Acceptance criteria
 

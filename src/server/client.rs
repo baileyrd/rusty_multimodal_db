@@ -33,10 +33,26 @@
 //! enforces the identical rules independently, so a client that skipped
 //! this check (or a different, buggy client) would still get back a
 //! typed `Response::Err`, never undefined behavior.
+//!
+//! # Protocol version (`Hello`), ADR-0022
+//!
+//! [`SchemaDrivenClient::connect`] says `Request::Hello` with this build's
+//! [`PROTOCOL_VERSION`] before its `DescribeSchema` (`PROTO-FR-007`) and
+//! keeps the negotiated version — `min(client, server)` — behind
+//! [`SchemaDrivenClient::server_protocol_version`]. This client sends no
+//! request introduced after version 1, so at version 2 it has nothing to
+//! gate on that value; it is exposed so a caller can (compatibility rule
+//! 4 in [`super::protocol`]'s docs). A server that predates the hello
+//! (any `SERVER-001` v0.9.1 or earlier build) does not answer it: it
+//! closes the connection, which this client sees as
+//! `ClientError::Frame(FrameError::Io(..))` at end of stream — named, not
+//! mitigated (no such server is deployed; a reconnect-without-hello
+//! fallback is ADR-0022's revisit trigger for it).
 
 use super::framing::{self, FrameError};
 use super::protocol::{
     DomainSchema, ErrorCode, FieldDescriptor, ParentLookup, RecordId, Request, Response, ScanValue,
+    PROTOCOL_VERSION,
 };
 use std::fmt;
 use std::io::{BufReader, BufWriter, Write};
@@ -91,12 +107,16 @@ pub struct SchemaDrivenClient {
     reader: BufReader<TcpStream>,
     writer: BufWriter<TcpStream>,
     schema: DomainSchema,
+    server_protocol_version: u32,
 }
 
 impl SchemaDrivenClient {
     /// Connects, disables Nagle's algorithm (`SERVER-001-FR-006` — see
     /// `src/server/mod.rs`'s own doc comment for why this isn't optional
-    /// for this protocol's synchronous request/response shape), then
+    /// for this protocol's synchronous request/response shape), sends
+    /// `Request::Hello` as the very first frame and keeps the negotiated
+    /// protocol version (`PROTO-FR-007`; see this module's own doc
+    /// comment for what a pre-hello server looks like from here), then
     /// immediately sends `Request::DescribeSchema` and keeps the result
     /// for every subsequent field-name lookup this client does.
     pub fn connect<A: ToSocketAddrs>(addr: A) -> Result<Self, ClientError> {
@@ -105,6 +125,18 @@ impl SchemaDrivenClient {
         let peer = stream.try_clone().map_err(FrameError::from)?;
         let mut reader = BufReader::new(stream);
         let mut writer = BufWriter::new(peer);
+
+        framing::write_message(
+            &mut writer,
+            &Request::Hello {
+                protocol_version: PROTOCOL_VERSION,
+            },
+        )?;
+        writer.flush().map_err(FrameError::from)?;
+        let server_protocol_version = match framing::read_message(&mut reader)? {
+            Response::Hello { protocol_version } => protocol_version,
+            _ => return Err(ClientError::UnexpectedResponse("Hello")),
+        };
 
         framing::write_message(&mut writer, &Request::DescribeSchema)?;
         writer.flush().map_err(FrameError::from)?;
@@ -117,7 +149,16 @@ impl SchemaDrivenClient {
             reader,
             writer,
             schema,
+            server_protocol_version,
         })
+    }
+
+    /// The protocol version negotiated at connect time —
+    /// `min(PROTOCOL_VERSION, the server's)`, so never above this build's
+    /// own [`PROTOCOL_VERSION`] and never below 1. Equal to
+    /// `PROTOCOL_VERSION` against a server from the same build.
+    pub fn server_protocol_version(&self) -> u32 {
+        self.server_protocol_version
     }
 
     /// The schema discovered at connect time — every field's name, wire

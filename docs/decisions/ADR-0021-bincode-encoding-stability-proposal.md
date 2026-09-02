@@ -216,7 +216,8 @@ Accepted: option 2. Concretely, at implementation:
   resolution pointers in place). No benchmark: no runtime path changes.
 - Revisit if: a second deployed client build exists — a wire-protocol
   version field or hello handshake becomes `SERVER-001`'s next
-  amendment and its own ADR.
+  amendment and its own ADR. *Taken ahead of the trigger: `ADR-0022` /
+  `SERVER-001` v0.10.0 (FR-020).*
 - Revisit if: `bincode` 2.x is wanted — `config::legacy()` against the
   golden vectors is the migration's acceptance test; `standard()`
   (varint) is a format change to every blob and the protocol.

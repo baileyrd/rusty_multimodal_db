@@ -572,4 +572,10 @@ No change to `framing.rs`, `dog.rs`, `order.rs`, `employee.rs`,
 - 2026-09-02: Accepted as proposed (option (a); (b) and (c) declined).
   No changes to the design text beyond status. The next unit registers
   `SERVER-001` v0.10.0 / FR-020 and implements per the verification
-  plan.
+  plan. (PR #125.)
+- 2026-09-02: Implemented as `SERVER-001` v0.10.0 / FR-020 (this PR),
+  per the verification plan: acceptance criteria 1–9 hold as written;
+  criterion 10 (`Cargo.toml` unchanged) holds except for the one
+  `[[test]]` registration `tests/server_protocol_version.rs` needs to
+  compile under default features — no dependency change. `ADR-0022`'s
+  acceptance log carries the same note.

@@ -40,9 +40,58 @@
 //! still required for `FilterEq`/`ScanField`/`UpdateField` — this adds a
 //! runtime way to discover what a compile-time client already knows, not
 //! a new addressing scheme.
+//!
+//! # Protocol versions, ADR-0022
+//!
+//! `STORAGE-018` pins every byte *inside* a frame; this section names the
+//! *shape* — which variants exist, at which indices — so that two builds
+//! can tell each other which shape they speak
+//! (`docs/design/SERVER-PROTOCOL-VERSION-DESIGN.md`, `SERVER-001`
+//! FR-020). [`PROTOCOL_VERSION`] is the running build's; a client says
+//! its own in an optional first-frame [`Request::Hello`] and the server
+//! answers [`Response::Hello`] with `min(client, server)` — the
+//! *negotiated version* for that connection. A connection that never
+//! says hello is served at version 1.
+//!
+//! | Version | Introduced | Shape |
+//! |---|---|---|
+//! | 1 | `SERVER-001` v0.1.0 – v0.9.1 | `Request` 0–9 (`GetById` … `Transaction`), `Response` 0–9 (`Record` … `TransactionFailed`), every `ScanValue`/`ValueKind`/`ErrorCode`/`ParentLookup` variant and every struct as of v0.9.1 |
+//! | 2 | `SERVER-001` v0.10.0 | + `Request::Hello` (index 10), `Response::Hello` (index 10) |
+//!
+//! ## Compatibility rules (`PROTO-FR-005`)
+//!
+//! These specialize `STORAGE-018`'s evolution rules to the wire shape:
+//!
+//! 1. **Append-only.** No variant or field of any type in this module is
+//!    reordered, inserted, removed, retyped, or resized once shipped. A
+//!    change that needs one of those is a new variant, or a new major
+//!    protocol (not designed; nothing here anticipates it beyond the
+//!    hello's field being a `u32`).
+//! 2. **Every variant records the version that introduced it** in the
+//!    table above, and `PROTOCOL_VERSION` is bumped by exactly one in the
+//!    same change. The golden vectors below are the check: a change that
+//!    breaks an existing vector is a rule-1 violation, not a bump.
+//! 3. **The server sends a variant introduced at *N* only on a
+//!    connection negotiated at ≥ *N***, otherwise the nearest older
+//!    shape — a new `ErrorCode` → `Unsupported`; a new `Response` kind →
+//!    `Response::Err { Unsupported, .. }`; a new `ValueKind`/`ScanValue`
+//!    in a schema → that field omitted from `DomainSchema` for that
+//!    connection. At version 2 there is no such variant to gate, so
+//!    `handle_connection` stores no negotiated version yet; the first
+//!    version-3 variant adds that per-connection state and the branch.
+//! 4. **A client sends a request introduced at *N* only after
+//!    negotiating ≥ *N***, else it reports the gap locally without a
+//!    round trip — the posture [`super::client::SchemaDrivenClient`]
+//!    already takes for capability checks.
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+/// The wire shape this build speaks — see this module's own "Protocol
+/// versions" table. Bumped by exactly one in any change that appends a
+/// variant (rule 2). Version 1 is retroactively the `SERVER-001` v0.9.1
+/// shape: what a client that never sends [`Request::Hello`] speaks.
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// A record's id — every domain this crate has ever used is `Uuid`-keyed.
 pub type RecordId = Uuid;
@@ -227,6 +276,17 @@ pub enum Request {
     Transaction {
         updates: Vec<TransactionOp>,
     },
+    /// Protocol 2. Optional first frame on a connection: the client's own
+    /// [`PROTOCOL_VERSION`]. Answered by the server's `handle_connection`
+    /// itself — before authentication, like [`Request::Authenticate`],
+    /// and never through [`super::dispatch`] — with [`Response::Hello`]
+    /// carrying `min(client, server)`. A `protocol_version` of 0, or a
+    /// `Hello` that is not the connection's first frame, is answered
+    /// `Response::Err { code: Malformed, .. }` and changes nothing. See
+    /// this module's own "Protocol versions" section, ADR-0022.
+    Hello {
+        protocol_version: u32,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -261,6 +321,13 @@ pub enum Response {
         index: usize,
         code: ErrorCode,
         message: String,
+    },
+    /// Protocol 2. Answers [`Request::Hello`] with the version negotiated
+    /// for this connection: `min(client's Hello, PROTOCOL_VERSION)`. The
+    /// server's own version is never sent on its own — the minimum is
+    /// all either side needs (rules 3 and 4 above).
+    Hello {
+        protocol_version: u32,
     },
 }
 
@@ -390,6 +457,15 @@ mod tests {
                 &[0x01],
             ]),
         );
+        // Protocol 2 (`PROTO-FR-002`): appended at index 10, so every
+        // line above is exactly as it was at v0.9.1.
+        assert_golden(
+            "Hello",
+            &Request::Hello {
+                protocol_version: 2,
+            },
+            &[0x0a, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00],
+        );
     }
 
     /// `BINENC-FR-004`: every `Response` variant's wire bytes, pinned —
@@ -503,6 +579,23 @@ mod tests {
                 b"x",
             ]),
         );
+        // Protocol 2 (`PROTO-FR-002`): appended at index 10.
+        assert_golden_eq(
+            "Hello",
+            &Response::Hello {
+                protocol_version: 2,
+            },
+            &[0x0a, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00],
+        );
+    }
+
+    /// `PROTO-FR-001`/`PROTO-FR-005` rule 2: the constant matches the
+    /// module docs' table — version 2 is the one that added `Hello`. A
+    /// change that appends a variant bumps this by exactly one and
+    /// extends the table; this test is the reminder.
+    #[test]
+    fn protocol_version_is_the_one_the_table_names() {
+        assert_eq!(PROTOCOL_VERSION, 2);
     }
 
     #[test]

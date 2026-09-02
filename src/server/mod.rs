@@ -92,6 +92,27 @@
 //! already generic over `Read`/`Write`. Explicitly not mTLS — client
 //! identity remains exactly [`AuthConfig`]'s existing shared-secret token
 //! scheme, now traveling encrypted rather than plaintext.
+//!
+//! # Protocol version (`Hello`), ADR-0022
+//!
+//! `docs/design/SERVER-PROTOCOL-VERSION-DESIGN.md` gives the wire *shape*
+//! (the set of `Request`/`Response` variants) a version:
+//! [`crate::server::protocol::PROTOCOL_VERSION`], the "Protocol versions"
+//! table and the append-only compatibility rules in
+//! [`crate::server::protocol`]'s own docs. A client may send
+//! `Request::Hello { protocol_version }` as its **first** frame;
+//! `handle_connection` answers it itself — before the `Authenticate`
+//! intercept and the authentication gate, on plain and TLS connections
+//! alike — with `Response::Hello { min(client, PROTOCOL_VERSION) }`
+//! (`PROTO-FR-003`). Version 0, or a `Hello` that is not the first frame,
+//! is `ErrorCode::Malformed` and the connection stays open
+//! (`PROTO-FR-004`). A client that never says `Hello` speaks version 1
+//! (the `SERVER-001` v0.9.1 shape) and is served exactly as before — no
+//! existing client, test, or bench changed (`PROTO-FR-002`). No
+//! negotiated-version state is stored at version 2: there is no
+//! version-gated variant yet to consult it (rule 3 in
+//! [`crate::server::protocol`] names where that state goes when the first
+//! one arrives).
 
 pub mod client;
 pub mod dog;
@@ -105,7 +126,7 @@ pub mod protocol;
 
 use protocol::{
     DomainSchema, ErrorCode, FieldRef, ParentLookup, RecordId, Request, Response, ScanValue,
-    TransactionOp,
+    TransactionOp, PROTOCOL_VERSION,
 };
 use std::cell::RefCell;
 use std::io::{self, BufReader, BufWriter, Read, Write};
@@ -490,6 +511,10 @@ pub fn dispatch<S: ConnectionStore + ?Sized>(store: &S, req: Request) -> Respons
         // in the real dispatch loop; kept exhaustive rather than `_ =>`
         // so a future `Request` variant can't silently skip this decision.
         Request::Authenticate { .. } => err_response(ErrorCode::Unsupported),
+        // Same story as `Authenticate`: `Hello` is a per-connection
+        // negotiation `handle_connection` answers itself (`PROTO-FR-003`),
+        // and a store has nothing to say about it.
+        Request::Hello { .. } => err_response(ErrorCode::Unsupported),
         Request::Transaction { updates } => match store.apply_transaction(&updates) {
             Ok(()) => Response::Ok,
             Err((index, code)) => Response::TransactionFailed {
@@ -546,6 +571,17 @@ fn send_response(writer: &mut BufWriter<WriteHalf>, resp: &Response) -> bool {
 /// `Authenticate`'s token now travels over the encrypted channel rather
 /// than plaintext (`TLS-FR-007`) — the handshake above always completes
 /// before this loop ever reads a frame, so there's no ordering hazard.
+///
+/// # Protocol version negotiation (`PROTO-FR-003`/`PROTO-FR-004`), ADR-0022
+///
+/// `Request::Hello` is intercepted ahead of even the `Authenticate`
+/// intercept — a client learns the server's protocol version before it
+/// presents a token, and an unauthenticated connection can say `Hello`
+/// and nothing else. Only the first frame may be a `Hello`, and its
+/// version must be at least 1: the reply is `Response::Hello` carrying
+/// `min(client, PROTOCOL_VERSION)`; otherwise `ErrorCode::Malformed`,
+/// with the connection left open. A connection whose first frame is not
+/// a `Hello` is served at version 1 with no other change (`PROTO-FR-002`).
 fn handle_connection<S: ConnectionStore + ?Sized>(
     stream: TcpStream,
     store: &S,
@@ -593,11 +629,33 @@ fn handle_connection<S: ConnectionStore + ?Sized>(
         Some(TokenClass::ReadWrite)
     };
 
+    // `PROTO-FR-004`: only the very first frame may be a `Hello`. This is
+    // the one piece of per-connection version state at protocol version 2
+    // — the negotiated version itself is not kept, because nothing yet
+    // consults it (see `protocol`'s compatibility rule 3).
+    let mut first_frame = true;
+
     loop {
         let req: Request = match framing::read_message(&mut reader) {
             Ok(req) => req,
             Err(_) => return, // client disconnected, or a framing/decode error — end the connection
         };
+
+        if let Request::Hello { protocol_version } = &req {
+            let resp = if !first_frame || *protocol_version == 0 {
+                err_response(ErrorCode::Malformed)
+            } else {
+                Response::Hello {
+                    protocol_version: (*protocol_version).min(PROTOCOL_VERSION),
+                }
+            };
+            first_frame = false;
+            if !send_response(&mut writer, &resp) {
+                return;
+            }
+            continue;
+        }
+        first_frame = false;
 
         if let Request::Authenticate { token } = &req {
             let resp = if !auth.is_configured() {
@@ -979,6 +1037,205 @@ mod tests {
                 }
             ),
             err_response(ErrorCode::Unsupported)
+        );
+    }
+
+    /// `PROTO-FR-003`'s dispatch half (design criterion 5): like
+    /// `Authenticate`, `Hello` is answered by `handle_connection`, never
+    /// by a store.
+    #[test]
+    fn dispatch_never_routes_hello_to_a_store() {
+        let store = FixtureStore;
+        assert_eq!(
+            dispatch(
+                &store,
+                Request::Hello {
+                    protocol_version: PROTOCOL_VERSION
+                }
+            ),
+            err_response(ErrorCode::Unsupported)
+        );
+    }
+
+    /// Spin up `serve` over `FixtureStore` on a loopback port with
+    /// authentication configured, so the `Hello` intercept is exercised
+    /// exactly where it sits: ahead of the auth gate. Returns the address
+    /// and a connected, framed client stream.
+    fn hello_fixture() -> (BufReader<TcpStream>, BufWriter<TcpStream>) {
+        let listener = match TcpListener::bind("127.0.0.1:0") {
+            Ok(l) => l,
+            Err(e) => panic!("bind loopback listener: {e}"),
+        };
+        let addr = match listener.local_addr() {
+            Ok(a) => a,
+            Err(e) => panic!("listener address: {e}"),
+        };
+        let auth = AuthConfig::new(Some("ro".into()), Some("rw".into()));
+        thread::spawn(move || serve(listener, Arc::new(FixtureStore), auth, None));
+        let stream = match TcpStream::connect(addr) {
+            Ok(s) => s,
+            Err(e) => panic!("connect to fixture server: {e}"),
+        };
+        let peer = match stream.try_clone() {
+            Ok(s) => s,
+            Err(e) => panic!("clone client stream: {e}"),
+        };
+        (BufReader::new(stream), BufWriter::new(peer))
+    }
+
+    fn roundtrip(
+        reader: &mut BufReader<TcpStream>,
+        writer: &mut BufWriter<TcpStream>,
+        req: &Request,
+    ) -> Response {
+        if let Err(e) = framing::write_message(writer, req) {
+            panic!("write request: {e}");
+        }
+        if let Err(e) = writer.flush() {
+            panic!("flush request: {e}");
+        }
+        match framing::read_message(reader) {
+            Ok(resp) => resp,
+            Err(e) => panic!("read response: {e}"),
+        }
+    }
+
+    /// Design criteria 3 and 4 on one connection each: a newer client is
+    /// answered with this build's own version, an older one with its own;
+    /// `Hello` is answered on an auth-configured server *before* any
+    /// token is presented, and the gate behind it is intact — the next
+    /// non-`Hello` request is still `Unauthenticated`.
+    #[test]
+    fn hello_is_answered_unauthenticated_with_the_min_version() {
+        let (mut reader, mut writer) = hello_fixture();
+        assert_eq!(
+            roundtrip(
+                &mut reader,
+                &mut writer,
+                &Request::Hello {
+                    protocol_version: PROTOCOL_VERSION + 3
+                }
+            ),
+            Response::Hello {
+                protocol_version: PROTOCOL_VERSION
+            }
+        );
+        assert_eq!(
+            roundtrip(&mut reader, &mut writer, &Request::DescribeSchema),
+            err_response(ErrorCode::Unauthenticated)
+        );
+
+        let (mut reader, mut writer) = hello_fixture();
+        assert_eq!(
+            roundtrip(
+                &mut reader,
+                &mut writer,
+                &Request::Hello {
+                    protocol_version: 1
+                }
+            ),
+            Response::Hello {
+                protocol_version: 1
+            }
+        );
+        assert_eq!(
+            roundtrip(&mut reader, &mut writer, &Request::DescribeSchema),
+            err_response(ErrorCode::Unauthenticated)
+        );
+    }
+
+    /// `PROTO-FR-004`: version 0 and a second `Hello` are each `Malformed`,
+    /// and neither ends the connection — the client can carry on (here,
+    /// into the auth gate, which is still in place).
+    #[test]
+    fn hello_version_zero_and_a_second_hello_are_malformed_but_not_fatal() {
+        let (mut reader, mut writer) = hello_fixture();
+        assert_eq!(
+            roundtrip(
+                &mut reader,
+                &mut writer,
+                &Request::Hello {
+                    protocol_version: 0
+                }
+            ),
+            err_response(ErrorCode::Malformed)
+        );
+        // The rejected frame was still the first frame; a `Hello` after it
+        // is no longer first.
+        assert_eq!(
+            roundtrip(
+                &mut reader,
+                &mut writer,
+                &Request::Hello {
+                    protocol_version: 1
+                }
+            ),
+            err_response(ErrorCode::Malformed)
+        );
+        assert_eq!(
+            roundtrip(&mut reader, &mut writer, &Request::DescribeSchema),
+            err_response(ErrorCode::Unauthenticated)
+        );
+
+        // A valid first `Hello`, then a second valid one: the second is
+        // `Malformed` too.
+        let (mut reader, mut writer) = hello_fixture();
+        assert_eq!(
+            roundtrip(
+                &mut reader,
+                &mut writer,
+                &Request::Hello {
+                    protocol_version: PROTOCOL_VERSION
+                }
+            ),
+            Response::Hello {
+                protocol_version: PROTOCOL_VERSION
+            }
+        );
+        assert_eq!(
+            roundtrip(
+                &mut reader,
+                &mut writer,
+                &Request::Hello {
+                    protocol_version: PROTOCOL_VERSION
+                }
+            ),
+            err_response(ErrorCode::Malformed)
+        );
+        // And a `Hello` that is not the first frame at all — after an
+        // `Authenticate` — is `Malformed` regardless of the auth outcome.
+        let (mut reader, mut writer) = hello_fixture();
+        assert_eq!(
+            roundtrip(
+                &mut reader,
+                &mut writer,
+                &Request::Authenticate { token: "rw".into() }
+            ),
+            Response::Ok
+        );
+        assert_eq!(
+            roundtrip(
+                &mut reader,
+                &mut writer,
+                &Request::Hello {
+                    protocol_version: PROTOCOL_VERSION
+                }
+            ),
+            err_response(ErrorCode::Malformed)
+        );
+        // The connection is still authenticated and serving.
+        assert_eq!(
+            roundtrip(
+                &mut reader,
+                &mut writer,
+                &Request::GetById {
+                    id: RecordId::from_u128(1)
+                }
+            ),
+            Response::Record {
+                id: RecordId::from_u128(1),
+                fields: vec![(FIELD_A, ScanValue::U32(7))]
+            }
         );
     }
 

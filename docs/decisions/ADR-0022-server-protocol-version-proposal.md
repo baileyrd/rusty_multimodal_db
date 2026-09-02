@@ -214,4 +214,17 @@ Accepted: option 3. Concretely, at implementation:
   Proposed in PR #124.
 - 2026-09-02: accepted as proposed (option (a); (b) and (c) declined).
   The next unit registers `SERVER-001` v0.10.0 / FR-020 and implements
-  per `docs/design/SERVER-PROTOCOL-VERSION-DESIGN.md`.
+  per `docs/design/SERVER-PROTOCOL-VERSION-DESIGN.md`. (PR #125.)
+- 2026-09-02: implemented as `SERVER-001` v0.10.0 (FR-020) in this PR —
+  `PROTOCOL_VERSION = 2`, `Request::Hello`/`Response::Hello` at index
+  10 with golden vectors, the first-frame intercept before
+  authentication (`min`, version 0 / non-first → `Malformed`),
+  `dispatch` → `Unsupported`, the rules and version table in
+  `protocol.rs`'s module docs, `SchemaDrivenClient` saying hello first
+  and exposing `server_protocol_version()`, and
+  `tests/server_protocol_version.rs`. Every v0.9.1 golden vector, every
+  existing suite, and `benches/server.rs` unchanged. One deviation from
+  the Decision's "No `Cargo.toml` change", recorded: the new suite
+  needs a `[[test]]` `required-features = ["server", "research"]`
+  registration, as every other server suite has — one line, no
+  dependency. Full sweep green (337 lib tests, 333 + 4).
