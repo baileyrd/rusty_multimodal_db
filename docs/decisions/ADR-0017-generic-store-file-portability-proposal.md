@@ -1,6 +1,6 @@
 # ADR-0017: Add file portability to `GenericMmapStore` — persist the full record set alongside the existing one-field mmap file
 
-- Status: **Proposed** (awaiting owner review)
+- Status: **Accepted** (promoted from Proposed on 2026-09-02 — the owner approved the design as proposed, no changes requested)
 - Date: 2026-09-02
 - Deciders: baileyrd
 - Related: `docs/design/GENERIC-STORE-PORTABILITY-DESIGN.md` (the full
@@ -234,4 +234,5 @@ options" section for the full reasoning. Summarized:
 
 ## Acceptance and implementation
 
-- Pending owner review.
+- 2026-09-02: accepted as proposed. The next unit registers `STORAGE-015`
+  and implements per `docs/design/GENERIC-STORE-PORTABILITY-DESIGN.md`.

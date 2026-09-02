@@ -1,7 +1,8 @@
-# `GenericMmapStore` File Portability Design (Proposed)
+# `GenericMmapStore` File Portability Design (Accepted)
 
-- Status: **Proposed** (awaiting owner review). Acceptance would authorize
-  the design only; implementation would still require its own unit
+- Status: **Accepted** (promoted from Proposed on 2026-09-02 — the owner
+  approved the design as proposed, no changes requested). Acceptance
+  authorizes the design only; implementation still requires its own unit
   (registering `STORAGE-015` and a planning packet) before any code is
   written — the same posture `ADR-0016` took. See
   `ADR-0017-generic-store-file-portability-proposal.md` for the decision
@@ -465,9 +466,11 @@ design document itself.
 
 ## Implementation status
 
-Not implemented. Proposed 2026-09-02; awaiting owner acceptance.
+Not implemented. Proposed 2026-09-02; accepted as proposed 2026-09-02.
+Implementation (`STORAGE-015`) is the next unit.
 
 ## Change history
 
+- 2026-09-02: Accepted as proposed by the owner, no changes requested.
 - 2026-09-02: Initial proposal, follow-up (b) of `PROJECT-STATUS.md` item
   63 — the owner's "1 then 2" after `PRODUCTION-STORE-PORTABILITY`.
