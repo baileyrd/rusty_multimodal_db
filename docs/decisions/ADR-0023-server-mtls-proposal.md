@@ -205,7 +205,7 @@ Proposed: option 1. Concretely, at implementation:
   rejection on the existing `TLS-FR-003` path. The next unit registers
   `SERVER-001` v0.13.0 / FR-023 and implements per
   `docs/design/SERVER-MTLS-DESIGN.md`. (PR #134.)
-- 2026-09-02: implemented as `SERVER-001` v0.13.0 (FR-023) in this PR
+- 2026-09-02: implemented as `SERVER-001` v0.13.0 (FR-023) in PR #135
   — `TlsConfig::new_with_client_auth` / `from_pem_files_with_client_ca`
   / `from_env` with `SERVER_TLS_CLIENT_CA_PATH` (a partial configuration
   is `Some(Err(Io(NotFound)))`, the table factored for a hermetic unit
