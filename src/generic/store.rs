@@ -17,7 +17,7 @@
 
 use super::edge_blob::{self, EdgeBlob};
 use super::query::{Children, FilterEq, GetById, Neighbors, Parent, ScanField, UpdateField};
-use super::traits::{ChildOf, IndexedField, Record, ScannableField, SymmetricRelation};
+use super::traits::{ChildOf, IndexedField, Record, ScannableField, SchemaTag, SymmetricRelation};
 use super::NotFound;
 use crate::durability::DurabilityError;
 use serde::de::DeserializeOwned;
@@ -408,15 +408,19 @@ type PortableEdges<R> = Vec<(<R as Record>::Id, <R as Record>::Id)>;
 /// `edges_path` there for the `<path>.edges` single-relation convention
 /// the domain helpers use).
 ///
-/// Bounded `R::Id: Serialize + DeserializeOwned` here and here only
-/// (`SYMPORT-FR-006`): `new`, the `Neighbors` impl, and every forwarding
-/// impl keep their bounds exactly, and no existing call site changes.
-/// A durable stack assembled with `new` rather than `create`/`open`
-/// writes no blob and is not portable — closed by convention in the
-/// domain helpers, not by type (the design doc's stated non-goal).
+/// Bounded `R::Id: Serialize + DeserializeOwned` and `R: SchemaTag` here
+/// and here only (`SYMPORT-FR-006`, `SCHTAG-FR-002`): `new`, the
+/// `Neighbors` impl, and every forwarding impl keep their bounds exactly,
+/// and no existing call site changes. The blob's header carries
+/// `R::SCHEMA_TAG`'s hash, so an edge blob written for one record type is
+/// refused, by name, when opened as a relation over another with the
+/// same `Id` type (`SCHTAG-FR-001`). A durable stack assembled with `new`
+/// rather than `create`/`open` writes no blob and is not portable —
+/// closed by convention in the domain helpers, not by type (the design
+/// doc's stated non-goal).
 impl<S, R, Marker> Symmetric<S, R, Marker>
 where
-    R: SymmetricRelation<Marker>,
+    R: SymmetricRelation<Marker> + SchemaTag,
     R::Id: Serialize + DeserializeOwned,
 {
     /// Write `edges` to `edges_path`, then [`Self::new`] (`SYMPORT-FR-001`).
@@ -435,7 +439,9 @@ where
         edges: &[(R::Id, R::Id)],
         edges_path: &Path,
     ) -> Result<Self, DurabilityError> {
-        EdgeBlob::new(edges).encode()?.write(edges_path)?;
+        EdgeBlob::new(edges, R::SCHEMA_TAG)
+            .encode()?
+            .write(edges_path)?;
         Ok(Self::new(inner, edges))
     }
 
@@ -443,8 +449,9 @@ where
     /// `edges_path` current with them (`SYMPORT-FR-004`): the header's
     /// fingerprint is compared against `edges` first, and only if they
     /// differ — a changed or reordered edge list, a missing, short,
-    /// foreign, or wrong-version file, a directory written before the
-    /// edge blob existed — is the blob re-encoded and rewritten. The
+    /// foreign, wrong-version, or wrong-tag file, a directory written
+    /// before the edge blob existed or before it carried a tag
+    /// (`SCHTAG-FR-004`) — is the blob re-encoded and rewritten. The
     /// common reopen with the same edges never writes. The adjacency is
     /// always built from `edges`, never from the blob, on this path.
     ///
@@ -457,7 +464,7 @@ where
         edges: &[(R::Id, R::Id)],
         edges_path: &Path,
     ) -> Result<Self, DurabilityError> {
-        let blob = EdgeBlob::new(edges);
+        let blob = EdgeBlob::new(edges, R::SCHEMA_TAG);
         if !blob.is_current_at(edges_path) {
             blob.encode()?.write(edges_path)?;
         }
@@ -473,10 +480,11 @@ where
     /// Returns [`DurabilityError::RecordBlobUnreadable`], naming
     /// `edges_path`, if the blob is missing, isn't one (wrong magic — a
     /// `GENBLOB\0` or `DOGBLOB\0` file included), was written by an
-    /// incompatible version, doesn't decode, or doesn't match its own
-    /// header fingerprint (`SYMPORT-FR-005`).
+    /// incompatible version, carries another record type's schema tag
+    /// (`SCHTAG-FR-003`), doesn't decode, or doesn't match its own header
+    /// fingerprint (`SYMPORT-FR-005`).
     pub fn read_portable_edges(edges_path: &Path) -> Result<PortableEdges<R>, DurabilityError> {
-        edge_blob::read(edges_path)
+        edge_blob::read(edges_path, R::SCHEMA_TAG)
     }
 
     /// Rebuild the layer from its blob alone — exactly
@@ -739,10 +747,37 @@ mod tests {
         }
     }
 
+    impl SchemaTag for Node {
+        const SCHEMA_TAG: &'static str = "store::tests::Node";
+    }
+
     struct Linked;
     impl SymmetricRelation<Linked> for Node {}
 
     type Layer = Symmetric<BaseStore<Node>, Node, Linked>;
+
+    // A second record type over the same `u32` id and the same relation
+    // marker: its edge blob is byte-for-byte a `Node` edge blob except for
+    // the tag, which is the only thing that keeps it out of `Layer`.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct Other {
+        id: u32,
+    }
+
+    impl Record for Other {
+        type Id = u32;
+        fn id(&self) -> u32 {
+            self.id
+        }
+    }
+
+    impl SchemaTag for Other {
+        const SCHEMA_TAG: &'static str = "store::tests::Other";
+    }
+
+    impl SymmetricRelation<Linked> for Other {}
+
+    type OtherLayer = Symmetric<BaseStore<Other>, Other, Linked>;
 
     fn nodes() -> Vec<Node> {
         (1..=4).map(|id| Node { id }).collect()
@@ -873,6 +908,72 @@ mod tests {
         let fresh = vec![(4, 1)];
         let _ = Layer::create(BaseStore::new(nodes()), &fresh, &edges_path).unwrap();
         assert_eq!(Layer::read_portable_edges(&edges_path).unwrap(), fresh);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn another_record_types_edge_blob_is_a_tag_error_from_the_read_only_paths_and_healed_by_open() {
+        let (dir, edges_path) = scratch("symmetric_other_tag");
+        let others: Vec<Other> = (1..=4).map(|id| Other { id }).collect();
+        let _ = OtherLayer::create(BaseStore::new(others), &edges(), &edges_path).unwrap();
+
+        // Acceptance criterion 4: same `Id`, same edges, same bytes in
+        // the body — refused by name, never decoded (`SCHTAG-FR-001`).
+        for result in [
+            Layer::open_portable(BaseStore::new(nodes()), &edges_path).map(|_| ()),
+            Layer::read_portable_edges(&edges_path).map(|_| ()),
+        ] {
+            match result {
+                Err(DurabilityError::RecordBlobUnreadable { path, cause }) => {
+                    assert_eq!(path, edges_path);
+                    assert!(
+                        cause.starts_with(
+                            "schema tag mismatch: this store expects `store::tests::Node`"
+                        ),
+                        "{cause}"
+                    );
+                }
+                Err(other) => panic!("expected RecordBlobUnreadable, got {other:?}"),
+                Ok(()) => panic!("expected RecordBlobUnreadable, got a layer"),
+            }
+        }
+
+        // `open` with the caller's edges treats the wrong-tag blob as
+        // stale and rewrites it under `Node`'s tag (`SCHTAG-FR-004`).
+        let healed = Layer::open(BaseStore::new(nodes()), &edges(), &edges_path).unwrap();
+        assert_eq!(Neighbors::<Node, Linked>::neighbors(&healed, 1), vec![2, 3]);
+        assert_eq!(Layer::read_portable_edges(&edges_path).unwrap(), edges());
+        let portable = Layer::open_portable(BaseStore::new(nodes()), &edges_path).unwrap();
+        assert_eq!(all_neighbors(&portable), all_neighbors(&healed));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_version_1_edge_blob_is_a_version_error_and_healed_by_open() {
+        let (dir, edges_path) = scratch("symmetric_v1_blob");
+        let _ = Layer::create(BaseStore::new(nodes()), &edges(), &edges_path).unwrap();
+        // The exact image STORAGE-016 v0.1.0 wrote: version 1, the shared
+        // 20-byte header, no tag (`SCHTAG-FR-006`).
+        let bytes = std::fs::read(&edges_path).unwrap();
+        let mut v1 = bytes[..20].to_vec();
+        v1.extend_from_slice(&bytes[28..]);
+        v1[8..12].copy_from_slice(&1u32.to_le_bytes());
+        std::fs::write(&edges_path, &v1).unwrap();
+
+        match Layer::read_portable_edges(&edges_path) {
+            Err(DurabilityError::RecordBlobUnreadable { cause, .. }) => {
+                assert!(
+                    cause.starts_with("blob version mismatch: file has 1, this build expects 2"),
+                    "{cause}"
+                );
+            }
+            Err(other) => panic!("expected RecordBlobUnreadable, got {other:?}"),
+            Ok(_) => panic!("expected RecordBlobUnreadable, got edges"),
+        }
+
+        let healed = Layer::open(BaseStore::new(nodes()), &edges(), &edges_path).unwrap();
+        assert_eq!(Neighbors::<Node, Linked>::neighbors(&healed, 1), vec![2, 3]);
+        assert_eq!(std::fs::read(&edges_path).unwrap(), bytes);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -1,13 +1,15 @@
 # STORAGE-015 — `GenericMmapStore` file portability (companion record blob + `open_portable`)
 
-- Version: 0.1.0
+- Version: 0.2.0
 - Status: Accepted
 - Owners: baileyrd
 - Depends on: `STORAGE-012` (`GenericMmapStore`, the generic library),
   `STORAGE-014` (the `ProductionStore` treatment this ports and whose
   blob machinery it shares), ADR-0017 and
   `docs/design/GENERIC-STORE-PORTABILITY-DESIGN.md` (both Accepted —
-  the design this spec turns into requirements)
+  the design this spec turns into requirements), ADR-0019 and
+  `docs/design/BLOB-SCHEMA-TAG-DESIGN.md` (both Accepted — the schema
+  tag v0.2.0 adds to the blob header)
 - Supersedes: none. Extends, does not reverse, `GENERIC-SCHEMA-DESIGN.md`
   §4.2's one-durable-field scope: `GenericMmapStore`'s own `.mmap` format
   is unchanged.
@@ -35,6 +37,15 @@ the design document's `GPORT-FR-001..008`, renumbered into this spec's
 namespace, plus the two implementation decisions recorded in
 "Traceability" (the `R::Id` bound, and the `Employee` helper).
 
+v0.2.0 (ADR-0019, `BLOB-SCHEMA-TAG-DESIGN.md`'s `SCHTAG-FR-001..004`)
+adds one thing to that: the blob header now records **which `R` the
+blob holds**, as the FNV-1a 64 hash of a domain-chosen
+`SchemaTag::SCHEMA_TAG` string, checked before the body is decoded. A
+blob written from one record type and read as another of the same
+`bincode` shape — the failure v0.1.0's non-goals left to "trust the
+caller" — is now a named `schema tag mismatch` on the read-only paths
+and a rewrite on `open`.
+
 ## Non-goals
 
 - Not a change to `GenericMmapStore`'s `.mmap` layout (`GMMAPST\0`,
@@ -52,9 +63,13 @@ namespace, plus the two implementation decisions recorded in
 - Not a change to `GenericProductionStore<S>` — it is store-agnostic by
   design; portability lands entirely below it (its doctest gains an
   `open_portable` round trip, its code does not change).
-- Not a schema-migration story for the blob, and not a record of which
-  `R` the blob holds. Both are the `.mmap` file's existing posture:
-  detect an incompatible version, trust the caller on the type.
+- Not a schema-migration story for the blob. That is the `.mmap` file's
+  existing posture: detect an incompatible version, refuse. (v0.1.0
+  also listed "not a record of which `R` the blob holds" here; v0.2.0
+  withdraws that non-goal — see "Context and terminology" and
+  `STORAGE-015-FR-001`.) Still not a record of `R`'s *shape*: the tag
+  names the type, and a field change under an unchanged tag is the
+  domain's format change to version, as it is for the `.mmap` file.
 
 ## Context and terminology
 
@@ -63,13 +78,26 @@ namespace, plus the two implementation decisions recorded in
   unchanged by this spec.
 - **Companion record blob** (or just **the blob**): the new sibling file
   at `<path>.records` (`amount.mmap` → `amount.mmap.records`; the
-  `STORAGE-014` `companion_path` convention, reused): a 20-byte header
-  (`GENBLOB\0` magic, `u32` little-endian blob version, currently `1`,
-  then the record set's `u64` little-endian **fingerprint**) followed by
-  the `bincode` encoding of `Vec<R>`, in caller order. The `ScanMarker`
-  field rides along because `R` serializes it; on read it is only the
-  seed `open`'s reconciliation uses for a record the `.mmap` file has no
-  slot for yet.
+  `STORAGE-014` `companion_path` convention, reused): a 28-byte
+  **tagged header** — the shared 20-byte header (`GENBLOB\0` magic,
+  `u32` little-endian blob version, currently `2`, then the record
+  set's `u64` little-endian **fingerprint**) followed by the `u64`
+  little-endian **schema tag hash** — then the `bincode` encoding of
+  `Vec<R>`, in caller order. The `ScanMarker` field rides along because
+  `R` serializes it; on read it is only the seed `open`'s reconciliation
+  uses for a record the `.mmap` file has no slot for yet.
+- **Schema tag**: `R::SCHEMA_TAG`, the stable, domain-chosen `&'static
+  str` naming a record type through the new `SchemaTag` trait
+  (`src/generic/traits.rs`; `Order` = `"order_customer::Order"`,
+  `Employee` = `"employee::Employee"`). Never `type_name`, never written
+  in full — the header holds its FNV-1a 64 hash (the same `Fnv1a64`
+  as the fingerprint, over the tag's UTF-8 bytes), so the tag costs 8
+  bytes per blob and no length field. Renaming a tag is a format change
+  for that type's blobs (they become a tag mismatch, healed by `open`).
+- **Version-1 blob**: a `GENBLOB\0` blob written by v0.1.0 — 20-byte
+  header, no tag. Refused by the read-only paths with a `version` cause
+  (the version is checked before the tag is read, so a v1 file is never
+  reported as a tag mismatch) and rewritten as version 2 by `open`.
 - **Fingerprint**: FNV-1a 64 (the `STORAGE-014` implementation, now
   shared) over the streamed `bincode` encoding of the record set — the
   bytes the blob body would hold, hashed without being materialized.
@@ -77,8 +105,8 @@ namespace, plus the two implementation decisions recorded in
   mmap-backed field, because a generic `R` gives the blob no view inside
   a record; the consequence is named under "Data/state and invariants".
 - **Current blob**: a blob whose header is readable, carries this
-  build's blob version, and records the fingerprint of the record set a
-  caller just handed `open`.
+  build's blob version, carries `R`'s tag hash, and records the
+  fingerprint of the record set a caller just handed `open`.
 
 ## Requirements
 
@@ -89,7 +117,9 @@ namespace, plus the two implementation decisions recorded in
   after the `.mmap` file is created and flushed. The header is the
   `STORAGE-014` v0.2.0 layout (20 bytes, same field order) under a
   magic of its own, `GENBLOB\0`, so a `Dog` blob and a generic blob can
-  never be mistaken for one another.
+  never be mistaken for one another — followed, since v0.2.0 (design
+  `SCHTAG-FR-001`), by the 8-byte FNV-1a 64 hash of `R::SCHEMA_TAG`,
+  under blob version `2`. `create` never writes a version-1 blob.
 - `STORAGE-015-FR-002` (design `GPORT-FR-002`):
   `read_portable_records(path) -> Result<Vec<R>, DurabilityError>`
   returns the persisted records in the order they were persisted,
@@ -102,32 +132,47 @@ namespace, plus the two implementation decisions recorded in
   the records came from the blob, `open`'s own currency check finds the
   blob current and writes nothing.
 - `STORAGE-015-FR-004` (design `GPORT-FR-004`): `open(records, path)`
-  keeps the blob current: the blob's 20-byte header is read and its
-  fingerprint compared with the fingerprint of the caller's set; if the
-  blob is missing, unreadable, from another blob version, or
-  fingerprints differently, it is rewritten after the `.mmap` file opens
-  successfully. The ordering is `STORAGE-014` v0.2.0's — header check →
-  encode only if stale → open the `.mmap` file → write only if stale —
-  so an `.mmap` error never clobbers a valid blob for a different
-  dataset, and a pre-`STORAGE-015` directory (`.mmap` file only) is
-  healed on its first `open`, no migration step.
-- `STORAGE-015-FR-005` (design `GPORT-FR-005`): a missing, non-blob
-  (wrong magic or shorter than a header), incompatible-version,
-  fingerprint-mismatched (the body hashes differently from what the
-  header claims — a spliced or bit-flipped file), or non-decoding blob
-  at `read_portable_records`/`open_portable` time is the existing
+  keeps the blob current: the blob's 28-byte tagged header is read and
+  its fingerprint compared with the fingerprint of the caller's set; if
+  the blob is missing, unreadable, from another blob version (a v0.1.0
+  version-1 file included), tagged for another `R` (design
+  `SCHTAG-FR-004`), or fingerprints differently, it is rewritten after
+  the `.mmap` file opens successfully. The ordering is `STORAGE-014`
+  v0.2.0's — header check → encode only if stale → open the `.mmap`
+  file → write only if stale — so an `.mmap` error never clobbers a
+  valid blob for a different dataset, and a pre-`STORAGE-015` directory
+  (`.mmap` file only) or a pre-v0.2.0 one (version-1 blob) is healed on
+  its first `open`, no migration step.
+- `STORAGE-015-FR-005` (design `GPORT-FR-005`, `SCHTAG-FR-003`): a
+  missing, non-blob (wrong magic or shorter than a shared header),
+  incompatible-version, short-tagged-header (cut inside the 8 tag
+  bytes), **tag-mismatched** (the header's tag hash is not
+  `R::SCHEMA_TAG`'s — the blob holds another type; the cause names the
+  expected tag string and both hashes), fingerprint-mismatched (the
+  body hashes differently from what the header claims — a spliced or
+  bit-flipped file), or non-decoding blob at
+  `read_portable_records`/`open_portable` time is the existing
   `DurabilityError::RecordBlobUnreadable { path, cause }`, with `path`
-  naming the companion and `cause` naming which of those it is. Never
-  `InvalidMagic`/`SchemaVersionMismatch` (those describe the `.mmap`
-  file and stay distinct), never a panic, never a silently-empty store.
-- `STORAGE-015-FR-006` (design `GPORT-FR-006`): the one new requirement
-  on record types: `R: Serialize + DeserializeOwned` joins
+  naming the companion and `cause` naming which of those it is. The
+  checks run in that order: version before tag, so a version-1 file is
+  a `version` cause, and tag before body, so a wrong-type blob is never
+  handed to `bincode`. Never `InvalidMagic`/`SchemaVersionMismatch`
+  (those describe the `.mmap` file and stay distinct), never a panic,
+  never a silently-empty store.
+- `STORAGE-015-FR-006` (design `GPORT-FR-006`, `SCHTAG-FR-002`): the
+  requirements on record types: `R: Serialize + DeserializeOwned` joins
   `GenericMmapStore`'s existing bounds on its inherent impl and its
   `GetById`/`FilterEq`/`ScanField`/`UpdateField`/`Flush` impls.
   `Order`, `OrderStatus`, `Customer`, `Employee`, `Department`, and the
   `production.rs` doctest's `Widget` gain `#[derive(Serialize,
   Deserialize)]`; nothing else about them changes, and every existing
-  `create`/`open` call site compiles without argument changes.
+  `create`/`open` call site compiles without argument changes. Since
+  v0.2.0, `R: SchemaTag` is added **only** on the four file constructors
+  — `create`, `open`, `read_portable_records`, `open_portable`, in their
+  own impl block — not on the query/update impls, the in-memory stacks,
+  or `Record`. `Order`, `Employee`, and `Widget` implement `SchemaTag`
+  (three impls, one line of body each); every other in-crate record type
+  is untouched.
 - `STORAGE-015-FR-007` (design `GPORT-FR-007`): `src/generic/mmap_store.rs`'s
   slot layout, header, `write_slot_into`/`append_committed_slot`/
   `is_committed`, and the reconciliation loop are unchanged in
@@ -155,25 +200,42 @@ namespace, plus the two implementation decisions recorded in
   is the shared machinery's second real call site — the project's own
   threshold for sharing over duplicating. `RecordBlob`'s 12 tests pass
   unmodified.
+- `src/generic/traits.rs` (v0.2.0): `pub trait SchemaTag { const
+  SCHEMA_TAG: &'static str; }` — public, not a supertrait of `Record`,
+  documented as part of the on-disk format.
 - `src/generic/record_blob.rs` (new, `pub(crate)`, unconditional — not
   `research`-gated, since `GenericMmapStore` uses it): `MAGIC =
-  GENBLOB\0`, `BLOB_VERSION = 1`; `GenericRecordBlob<'a, R: Serialize>`
-  borrowing `&'a [R]` with `fingerprint()` (streams `bincode` into
-  `Fnv1a64`, no allocation), `encode() -> EncodedRecordBlob`, and
-  `is_current_at(&Path) -> bool` (one fingerprint pass plus a 20-byte
-  read — never the body); free `read<R: DeserializeOwned>(&Path) ->
-  Vec<R>` (header check, body hashed and verified against the header,
-  then decode) and `blob_path(&Path)` (= `companion_path`). 9 tests.
+  GENBLOB\0`, `BLOB_VERSION = 2` (was `1` in v0.1.0); the tagged-header
+  helpers `TAG_OFFSET` (= `HEADER_LEN`, 20), `TAGGED_HEADER_LEN` (28),
+  `tag_hash(&str) -> u64`, `encode_tagged_image(magic, version,
+  fingerprint, tag, body)` and `parse_tagged_header(bytes, magic,
+  expected_version, expected_tag)` (shared header first via
+  `parse_header`, then the tag), all `pub(crate)` so `STORAGE-016`'s
+  edge blob shares them; `GenericRecordBlob<'a, R: Serialize +
+  SchemaTag>` borrowing `&'a [R]` with `fingerprint()` (streams
+  `bincode` into `Fnv1a64`, no allocation), `encode() ->
+  EncodedRecordBlob`, and `is_current_at(&Path) -> bool` (one
+  fingerprint pass plus a 28-byte read — never the body); free `read<R:
+  DeserializeOwned + SchemaTag>(&Path) -> Vec<R>` (tagged header check,
+  body hashed and verified against the header, then decode) and
+  `blob_path(&Path)` (= `companion_path`). 14 tests (9 from v0.1.0, 5
+  for the tag).
 - `src/generic/mmap_store.rs`: `create` = encode → existing create →
   blob write; `open` = `is_current_at` → (encode only if stale) →
   existing open → write if stale; `read_portable_records(path)` =
   `record_blob::read`; `open_portable(path)` = `open(read…?, path)`.
-  Module docs gain a "companion record blob" section. 6 new
-  `research`-gated tests.
+  The four live in their own impl block carrying the `SchemaTag` bound
+  (v0.2.0); the helper and trait impls do not. Module docs gain a
+  "companion record blob" section. 6 new `research`-gated tests in
+  v0.1.0, 2 more (`Employee` blob read as `Order`; version-1 companion)
+  in v0.2.0.
 - `src/generic/order_customer.rs`: `open_order_production_stack_portable`
   and 1 new test; `src/generic/mod.rs` declares `record_blob` and
   re-exports the helper. `src/generic/production.rs`'s doctest reopens
-  via `open_portable` and re-checks both updated values.
+  via `open_portable` and re-checks both updated values. v0.2.0 adds
+  `impl SchemaTag for Order` there, `impl SchemaTag for Employee` in
+  `src/generic_spike/employee_impl.rs`, and `impl SchemaTag for Widget`
+  in the doctest.
 - No new dependency; `bincode`/`serde` and the existing
   `DurabilityError::RecordBlobUnreadable` variant are reused unchanged.
 
@@ -191,6 +253,13 @@ namespace, plus the two implementation decisions recorded in
   fingerprint of the in-memory records equals both (pinned by a test).
   A change to the encoding or the hash is a format change and a
   `BLOB_VERSION` bump.
+- A blob's header tag hash equals `tag_hash(R::SCHEMA_TAG)` for the
+  `R` that wrote it — FNV-1a 64 over the tag's bytes, pinned by a test
+  against the published FNV test vectors (`""` and `"a"`). The tag hash
+  is not covered by the fingerprint (the fingerprint is over the body);
+  each guards a different thing and each is checked on every read.
+- Two blobs of two types with the same `bincode` shape and the same
+  records differ in exactly the 8 tag bytes (pinned by a test).
 - **The fingerprint covers the whole record, mmap-backed field
   included.** A caller that reopens with regenerated records whose scan
   values differ from create-time values sees a blob rewrite the `Dog`
@@ -229,14 +298,27 @@ namespace, plus the two implementation decisions recorded in
 - Backward compatible on disk: a `.mmap` file written before this spec
   opens exactly as before via `open`, which then writes the missing
   blob. Only the portable path requires the blob.
+- Version-1 blobs (v0.1.0, no tag) are **not** read by v0.2.0: the
+  read-only paths refuse them with a `version` cause and `open`
+  rewrites them as version 2 — the same heal as a missing blob, no
+  migration step. The crate is `publish = false` and every version-1
+  blob was written by a build of this repository; the design weighed
+  reading them and chose not to (ADR-0019).
 - Forward-detecting: a blob with a newer `BLOB_VERSION` is refused with
   a `version` cause, never partially decoded.
+- Type-detecting (v0.2.0): a blob written for another `R` is refused
+  with a `schema tag mismatch` cause, never handed to `bincode` — the
+  decode-succeeds-into-the-wrong-type case for same-shape records is
+  closed. The tag is a name, not a shape: two types under one tag string
+  share blobs, by the domain's choice.
 - The blob's magic (`GENBLOB\0`) differs from `GenericMmapStore`'s
   (`GMMAPST\0`), `MmapAgeStore`'s (`DOGMMAP\0`), and `RecordBlob`'s
   (`DOGBLOB\0`), so pointing `read` at any of those files fails on the
   header, before `bincode` sees a byte — and vice versa.
-- The one API change is the bound tightening (`STORAGE-015-FR-006`);
-  `publish = false`, every in-crate record type covered.
+- The API changes are the bound tightenings (`STORAGE-015-FR-006`: the
+  serde bounds in v0.1.0, `SchemaTag` on the four file constructors in
+  v0.2.0) and the new public `SchemaTag` trait; `publish = false`,
+  every in-crate record type covered.
 - Synthetic data only; no network surface.
 
 ## Acceptance criteria
@@ -270,7 +352,24 @@ namespace, plus the two implementation decisions recorded in
   fingerprint equalling the header's; a different set not current;
   missing file; `DOGBLOB\0` magic; wrong version; tampered body
   (fingerprint mismatch); truncated body (decode failure); path
-  derivation.
+  derivation; and, since v0.2.0: the tag hash matching the FNV-1a 64
+  test vectors; the tag sitting at bytes 20..28 and being the only
+  difference between two same-shape types' images; a same-shape
+  other-type blob being a `schema tag mismatch`, not a decode; a
+  version-1 image being a `version` cause before the tag is looked at;
+  a file cut inside the tag bytes being a short-tagged-header cause.
+- v0.2.0, at the store level (design acceptance criteria 1–3 and 5):
+  an `Employee` companion at an `Order` store's path →
+  `read_portable_records` and `open_portable` return
+  `RecordBlobUnreadable` whose cause begins `schema tag mismatch: this
+  store expects \`order_customer::Order\``; `is_current_at` is true for
+  the `Employee` set and false for the `Order` set; `open(orders, path)`
+  succeeds and rewrites the blob, after which `read_portable_records`
+  returns the orders. A version-1 companion (the v0.1.0 layout, built
+  by hand from a v2 image) → `version` cause from the read-only paths,
+  `open` succeeds and the companion's bytes equal the v2 image again.
+- v0.2.0, criterion 8: `production.rs`'s doctest `Widget` implements
+  `SchemaTag` and the doctest passes unchanged otherwise.
 - `create()`'s and `open()`'s added cost is *measured* (ADR-0017 asked
   for it), reported in `RESULTS.md`, and judged against the design's
   own trigger (an `open` delta at 1M nearer `STORAGE-014` v0.1.0's +27%
@@ -281,9 +380,10 @@ namespace, plus the two implementation decisions recorded in
 ## Verification plan
 
 - `cargo test` (default features) and `cargo test --all-features`: the
-  9 `generic::record_blob` tests, 6 `generic::mmap_store` portability
-  tests, 1 `order_customer` test, and the updated `production.rs`
-  doctest above, plus every pre-existing test, passing.
+  14 `generic::record_blob` tests (9 + 5 tag), 8 `generic::mmap_store`
+  portability tests (6 + 2 tag), 1 `order_customer` test, and the
+  updated `production.rs` doctest above, plus every pre-existing test,
+  passing.
 - `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D
   warnings`, `cargo doc --no-deps` (no new warnings): clean.
 - A scratch (uncommitted) release-mode timing of `GenericMmapStore::
@@ -298,11 +398,16 @@ namespace, plus the two implementation decisions recorded in
 ## Traceability
 
 Implements: ADR-0017 / `GENERIC-STORE-PORTABILITY-DESIGN.md`
-(`GPORT-FR-001..008` ↔ `STORAGE-015-FR-001..008`, one-to-one). Depends
-on: `STORAGE-012` (the type extended), `STORAGE-014` (the blob header,
-fingerprint, and write path shared). Feeds: `RESULTS.md`'s portability
-subsection and the resolution of the "narrower" open question there and
-in `PROJECT-STATUS.md` (`GenericMmapStore`'s one-durable-field gap).
+(`GPORT-FR-001..008` ↔ `STORAGE-015-FR-001..008`, one-to-one); since
+v0.2.0 also ADR-0019 / `BLOB-SCHEMA-TAG-DESIGN.md` (`SCHTAG-FR-001` ↔
+FR-001, `SCHTAG-FR-002` ↔ FR-006, `SCHTAG-FR-003` ↔ FR-005,
+`SCHTAG-FR-004` ↔ FR-004; the edge-blob half of each lands in
+`STORAGE-016` v0.2.0). Depends on: `STORAGE-012` (the type extended),
+`STORAGE-014` (the blob header, fingerprint, and write path shared).
+Feeds: `STORAGE-016` (the tagged-header helpers it shares), `RESULTS.md`'s
+portability subsection and the resolution of the "narrower" open
+question there and in `PROJECT-STATUS.md` (`GenericMmapStore`'s
+one-durable-field gap).
 
 Two places the implementation diverges from the design's sketch, on
 purpose:
@@ -362,13 +467,25 @@ purpose:
   (`<path>.edges`, `GENEDGE\0`, sharing this spec's header/hash/write
   path a third time); `open_employee_production_stack_portable(path)`
   is the `Employee` helper this spec's Traceability said would wait.
-  Whether the blob should record `R` is now proposed in
-  `BLOB-SCHEMA-TAG-DESIGN.md` / `ADR-0019` and accepted as proposed (this spec's v0.2.0,
-  next: `GENBLOB\0` version 2 with a schema-tag header field, and the
-  same for `GENEDGE\0`).
+  Whether the blob should record `R`: **resolved by this spec's
+  v0.2.0** — `BLOB-SCHEMA-TAG-DESIGN.md` / ADR-0019, accepted as
+  proposed and implemented (`GENBLOB\0` version 2 with the schema-tag
+  header field, and the same for `GENEDGE\0` in `STORAGE-016` v0.2.0).
 
 ## Change history
 
+- 0.2.0 (2026-09-02): the schema tag (ADR-0019,
+  `BLOB-SCHEMA-TAG-DESIGN.md`, accepted as proposed the same day).
+  `BLOB_VERSION` 1 → 2; the header gains the 8-byte FNV-1a 64 hash of
+  the new `SchemaTag::SCHEMA_TAG`; `R: SchemaTag` on the four file
+  constructors only; version-1 blobs refused by the read-only paths and
+  rewritten by `open`. "Purpose", "Non-goals" (one withdrawn),
+  "Context and terminology", FR-001/-004/-005/-006, "Architecture",
+  "Data/state and invariants", "Security, privacy, and compatibility",
+  "Acceptance criteria", "Verification plan", "Traceability" updated;
+  the last open question resolved. Code: `src/generic/traits.rs`,
+  `src/generic/record_blob.rs`, `src/generic/mmap_store.rs`, the three
+  `SchemaTag` impls; 7 new tests in this spec's scope.
 - 0.1.0 (2026-09-02, later the same day; no version bump — no
   requirement changed): the `Symmetric`-companion open question resolved
   by `STORAGE-016` v0.1.0 (see "Open questions"). No code in this spec's

@@ -253,3 +253,15 @@ Accepted as proposed:
   32-byte string alternative declined). The next unit bumps `STORAGE-015`
   to v0.2.0 and `STORAGE-016` to v0.2.0 and implements per
   `docs/design/BLOB-SCHEMA-TAG-DESIGN.md`.
+- 2026-09-02: implemented as `STORAGE-015` v0.2.0 / `STORAGE-016` v0.2.0
+  in this PR (`SchemaTag` in `src/generic/traits.rs`; the tagged-header
+  helpers and `BLOB_VERSION = 2` in `src/generic/record_blob.rs`;
+  `src/generic/edge_blob.rs` sharing them with the tag passed as a
+  value; the bound on `GenericMmapStore`'s four file constructors, now
+  in their own impl block, and on `Symmetric`'s `STORAGE-016` block;
+  `Order`, `Employee`, and the doctest `Widget` tagged). No deviation
+  from the design's sketch beyond making `TAG_OFFSET` and
+  `TAGGED_HEADER_LEN` `pub(crate)` so the edge blob's tests can build
+  version-1 and cut-inside-the-tag images. 12 new tests pin the eight
+  acceptance criteria; version-1 blobs are refused by the read-only
+  paths and rewritten by `open`, as decided.

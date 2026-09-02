@@ -247,7 +247,8 @@ options" section for the full reasoning. Summarized:
   it holds — a schema tag in the header is a `BLOB_VERSION` bump, not a
   redesign. *Tripped by the owner's queue rather than a second store
   type: proposed as `BLOB-SCHEMA-TAG-DESIGN.md` / `ADR-0019` (that
-  `BLOB_VERSION` bump, to 2), accepted as proposed.*
+  `BLOB_VERSION` bump, to 2), accepted as proposed and implemented as
+  `STORAGE-015` v0.2.0.*
 
 ## Acceptance and implementation
 

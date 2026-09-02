@@ -337,7 +337,9 @@ blob current when the edges came from it, so a `create` → `open_portable`
   decode failure only when the encodings differ — the `STORAGE-015`
   trust model, and the same open question (a schema tag) it deferred; a
   fix there would apply here the same way. *That fix is now accepted
-  for both blobs at once in `BLOB-SCHEMA-TAG-DESIGN.md` / `ADR-0019`.*
+  and implemented for both blobs at once in `BLOB-SCHEMA-TAG-DESIGN.md`
+  / `ADR-0019` — `STORAGE-016` v0.2.0: the blob records `R` by tag
+  (still not `Marker` or `Id`'s type).*
 - **No change to `GenericMmapStore`'s crash-safety or multi-process
   story**; the edge blob's write is atomic by rename and last-writer-wins
   across processes, as its sibling's is.
@@ -432,8 +434,11 @@ can fail).
 - Whether the blob should record which relation (`R`, `Marker`) it holds
   — the same schema-tag question `STORAGE-015` deferred, deferred here
   for the same reason and to be resolved together if resolved.
-  **Accepted** as proposed in `BLOB-SCHEMA-TAG-DESIGN.md` / `ADR-0019`
-  — the edge blob receives `R`'s tag as a value (`GENEDGE\0` version 2).
+  **Resolved** for `R`: accepted as proposed and implemented in
+  `BLOB-SCHEMA-TAG-DESIGN.md` / `ADR-0019`, `STORAGE-016` v0.2.0 — the
+  edge blob receives `R`'s tag as a value (`GENEDGE\0` version 2).
+  `Marker` stays unrecorded until a durable stack holds two symmetric
+  relations over one `R`.
 - Whether `Symmetric::new` should eventually be removed in favor of an
   in-memory variant of the triple, closing the by-convention gap in
   "Non-goals" by type — not proposed; `new` has two in-memory callers

@@ -1,16 +1,21 @@
 # STORAGE-016 — `Symmetric` edge-list portability (companion edge blob + `create`/`open`/`open_portable`)
 
-- Version: 0.1.0
+- Version: 0.2.0
 - Status: Accepted
 - Owners: baileyrd
 - Depends on: `STORAGE-012` (`Symmetric`, the generic library),
   `STORAGE-014` v0.2.0 (the header, fingerprint, and write path shared a
-  third time), `STORAGE-015` (the `GenericMmapStore` companion this sits
-  beside and whose portable helpers the `Employee` helper composes),
-  ADR-0018 and `docs/design/SYMMETRIC-EDGE-PORTABILITY-DESIGN.md` (both
-  Accepted — the design this spec turns into requirements)
+  third time), `STORAGE-015` v0.2.0 (the `GenericMmapStore` companion
+  this sits beside, whose portable helpers the `Employee` helper
+  composes, and whose tagged-header helpers and `SchemaTag` trait this
+  spec's v0.2.0 shares), ADR-0018 and
+  `docs/design/SYMMETRIC-EDGE-PORTABILITY-DESIGN.md` (both Accepted —
+  the design this spec turns into requirements), ADR-0019 and
+  `docs/design/BLOB-SCHEMA-TAG-DESIGN.md` (both Accepted — the schema
+  tag v0.2.0 adds to the edge blob header)
 - Supersedes: none. Extends, does not reverse, `STORAGE-015`: its
-  `.records` blob, `GENBLOB\0` magic, and blob version 1 are unchanged.
+  `.records` blob and `GENBLOB\0` magic are unchanged by this spec
+  (its own v0.2.0 bumps its blob version, not this one).
 
 ## Purpose and scope
 
@@ -38,6 +43,14 @@ stack from `<path>`, `<path>.records`, and `<path>.edges`. The eight
 requirements below are the design document's `SYMPORT-FR-001..008`,
 renumbered into this spec's namespace.
 
+v0.2.0 (ADR-0019, `BLOB-SCHEMA-TAG-DESIGN.md`'s `SCHTAG-FR-001..004`,
+applied to the edge blob exactly as `STORAGE-015` v0.2.0 applies them
+to the record blob) adds the **schema tag**: the edge blob header
+records the FNV-1a 64 hash of `R::SCHEMA_TAG` — the record type whose
+ids the edges pair — checked before the body is decoded, so an edge
+blob written for one record type read as another is a named `schema
+tag mismatch` on the read-only paths and a rewrite on `open`.
+
 ## Non-goals
 
 - Not a change to `GenericMmapStore`, its `.mmap` file, or its
@@ -51,23 +64,37 @@ renumbered into this spec's namespace.
   and keep using it. Consequence: a durable stack assembled with `new`
   writes no blob — closed by convention (the domain helpers use
   `create`/`open`), not by the type system.
-- Not a stack-level manifest naming a stack's files, and not a record of
-  which relation (`R`, `Marker`) the blob holds — both deferred, the
-  second together with `STORAGE-015`'s identical open question.
+- Not a stack-level manifest naming a stack's files — deferred. (v0.1.0
+  also listed "not a record of which relation the blob holds"; v0.2.0
+  withdraws half of that: the blob now records `R`, by tag. It still
+  does not record `Marker` — two symmetric relations over one `R`
+  already need two distinct `edges_path`s, and the design judged a
+  per-marker tag not worth a second trait; see "Data/state and
+  invariants".)
 - Not multi-writer coordination beyond atomic rename, last writer wins.
 
 ## Context and terminology
 
-- **Edge blob**: the companion file at `edges_path` — a 20-byte header
-  (`GENEDGE\0` magic, `u32` little-endian blob version, currently `1`,
-  then a `u64` little-endian fingerprint) followed by the `bincode`
-  encoding of `Vec<(R::Id, R::Id)>` in caller order.
+- **Edge blob**: the companion file at `edges_path` — a 28-byte tagged
+  header (the shared 20-byte header: `GENEDGE\0` magic, `u32`
+  little-endian blob version, currently `2`, then a `u64` little-endian
+  fingerprint; then the `u64` little-endian **schema tag hash**)
+  followed by the `bincode` encoding of `Vec<(R::Id, R::Id)>` in caller
+  order.
+- **Schema tag**: `R::SCHEMA_TAG` — the same `SchemaTag` trait, string,
+  and FNV-1a 64 hash `STORAGE-015` v0.2.0 defines for the record blob
+  (`"employee::Employee"` for the `Employee` stack). One tag per record
+  type, used by both of its blobs; the two magics tell the blobs apart.
+- **Version-1 blob**: a `GENEDGE\0` blob written by v0.1.0, 20-byte
+  header, no tag. Refused by the read-only paths with a `version` cause
+  (checked before the tag) and rewritten as version 2 by `open`.
 - **Fingerprint**: FNV-1a 64 over the streamed `bincode` encoding of the
   edge list — the same hash and streaming the `.records` blobs use.
   Order is part of it deliberately: order is observable through
   `neighbors`'s result order, so a reordered list *is* a different layer.
-- **Current blob**: readable header, this build's blob version, and a
-  fingerprint equal to that of the edge list `open` was handed.
+- **Current blob**: readable header, this build's blob version, `R`'s
+  tag hash, and a fingerprint equal to that of the edge list `open` was
+  handed.
 - **`<path>.edges`**: the single-relation convention (`edge_blob::
   edges_path`), beside `<path>.records`. `Symmetric` takes the path as an
   argument rather than deriving it because a stack may hold two
@@ -79,10 +106,12 @@ renumbered into this spec's namespace.
   inner, edges, edges_path)` writes the full `edges` slice, in the order
   given, to `edges_path` as a `bincode` `Vec<(R::Id, R::Id)>` behind the
   `STORAGE-014` v0.2.0 20-byte header — magic `GENEDGE\0` (distinct from
-  `DOGBLOB\0`, `GENBLOB\0`, `DOGMMAP\0`, `GMMAPST\0`), blob version `1`,
-  FNV-1a 64 fingerprint — via the shared `encode_image`, then returns
-  `Self::new(inner, edges)`. An existing file at `edges_path` is always
-  replaced.
+  `DOGBLOB\0`, `GENBLOB\0`, `DOGMMAP\0`, `GMMAPST\0`), blob version `2`
+  (since v0.2.0; `1` before), FNV-1a 64 fingerprint — plus, since v0.2.0
+  (design `SCHTAG-FR-001`), the 8-byte hash of `R::SCHEMA_TAG`, via the
+  shared `encode_tagged_image`; then returns `Self::new(inner, edges)`.
+  An existing file at `edges_path` is always replaced. `create` never
+  writes a version-1 blob.
 - `STORAGE-016-FR-002` (design `SYMPORT-FR-002`):
   `Symmetric::read_portable_edges(edges_path) -> Result<Vec<(R::Id,
   R::Id)>, DurabilityError>` returns the persisted edge list in persisted
@@ -91,24 +120,32 @@ renumbered into this spec's namespace.
   open_portable(inner, edges_path) -> Result<Self, DurabilityError>` is
   exactly `Ok(Self::new(inner, &Self::read_portable_edges(edges_path)?))`.
 - `STORAGE-016-FR-004` (design `SYMPORT-FR-004`): `Symmetric::open(inner,
-  edges, edges_path)` keeps the blob current: header read, fingerprint
-  compare, rewrite only when stale, missing, or unreadable (which heals a
-  pre-feature directory holding `.mmap` and `.records` but no `.edges`).
-  It returns `Self::new(inner, edges)` — on this path the adjacency is
+  edges, edges_path)` keeps the blob current: tagged header read,
+  fingerprint compare, rewrite only when stale, missing, unreadable
+  (which heals a pre-feature directory holding `.mmap` and `.records`
+  but no `.edges`), from another blob version (a v0.1.0 version-1 file
+  included), or tagged for another `R` (design `SCHTAG-FR-004`). It
+  returns `Self::new(inner, edges)` — on this path the adjacency is
   always built from the caller's edges, never from the blob.
-- `STORAGE-016-FR-005` (design `SYMPORT-FR-005`): every edge-blob
-  failure at `read_portable_edges`/`open_portable` time — missing, short,
-  wrong magic, wrong version, body not matching the header fingerprint,
-  `bincode` decode failure — is `DurabilityError::RecordBlobUnreadable {
-  path, cause }` with `path` naming the edge blob and `cause` naming
-  which. Never a panic, never a silently edgeless layer, no new error
-  variant.
-- `STORAGE-016-FR-006` (design `SYMPORT-FR-006`): the four functions live
-  in one separate `impl` block bounded `R::Id: Serialize +
-  DeserializeOwned`. `Symmetric::new`, the `Neighbors` impl, and every
-  forwarding impl keep their bounds exactly; no existing call site
-  changes. Every `R::Id` in this crate (`Uuid`, integers) satisfies the
-  bound.
+- `STORAGE-016-FR-005` (design `SYMPORT-FR-005`, `SCHTAG-FR-003`): every
+  edge-blob failure at `read_portable_edges`/`open_portable` time —
+  missing, short, wrong magic, wrong version, cut inside the tag bytes,
+  **tag-mismatched** (the header's tag hash is not `R::SCHEMA_TAG`'s;
+  the cause names the expected tag string and both hashes), body not
+  matching the header fingerprint, `bincode` decode failure — is
+  `DurabilityError::RecordBlobUnreadable { path, cause }` with `path`
+  naming the edge blob and `cause` naming which. Version is checked
+  before the tag, and the tag before the body, so a version-1 file is a
+  `version` cause and a wrong-type blob is never handed to `bincode`.
+  Never a panic, never a silently edgeless layer, no new error variant.
+- `STORAGE-016-FR-006` (design `SYMPORT-FR-006`, `SCHTAG-FR-002`): the
+  four functions live in one separate `impl` block bounded `R::Id:
+  Serialize + DeserializeOwned` and, since v0.2.0, `R: SchemaTag`.
+  `Symmetric::new`, the `Neighbors` impl, and every forwarding impl keep
+  their bounds exactly; no existing call site changes. Every `R::Id` in
+  this crate (`Uuid`, integers) satisfies the bound; `Employee`, the one
+  `R` whose `Symmetric` layer is durable, implements `SchemaTag`
+  (`STORAGE-015` v0.2.0's impl — one tag per type, not one per blob).
 - `STORAGE-016-FR-007` (design `SYMPORT-FR-007`):
   `create_employee_production_stack` and `open_employee_production_stack`
   keep their signatures and use `Symmetric::create`/`open` with
@@ -126,25 +163,33 @@ renumbered into this spec's namespace.
 ## Architecture and interfaces
 
 - `src/generic/edge_blob.rs` (new, `pub(crate)`, unconditional): `MAGIC
-  = GENEDGE\0`, `BLOB_VERSION = 1`, `EDGES_SUFFIX = ".edges"`;
-  `EdgeBlob<'a, Id: Serialize>` borrowing `&'a [(Id, Id)]` with `new`,
-  `fingerprint() -> Result<u64, DurabilityError>` (streams `bincode`
-  into `Fnv1a64`, no allocation), `encode() -> Result<EncodedRecordBlob,
-  DurabilityError>`, and `is_current_at(&Path) -> bool` (one fingerprint
-  pass plus a 20-byte read, never the body; a serialization failure
-  counts as "not current" so `open`'s rewrite surfaces it as a proper
-  error); free `read<Id: DeserializeOwned>(&Path)` (header check, body
-  hashed and verified against the header, then decode) and
-  `edges_path(&Path)`. 12 tests.
+  = GENEDGE\0`, `BLOB_VERSION = 2` (was `1` in v0.1.0), `EDGES_SUFFIX =
+  ".edges"`; `EdgeBlob<'a, Id: Serialize>` borrowing `&'a [(Id, Id)]`
+  and, since v0.2.0, the tag (`new(edges, tag: &'static str)` — the tag
+  is a value, not a bound, so `EdgeBlob` stays generic over `Id` alone),
+  with `fingerprint() -> Result<u64, DurabilityError>` (streams
+  `bincode` into `Fnv1a64`, no allocation), `encode() ->
+  Result<EncodedRecordBlob, DurabilityError>` (via `STORAGE-015`'s
+  `encode_tagged_image`), and `is_current_at(&Path) -> bool` (one
+  fingerprint pass plus a 28-byte read, never the body; a serialization
+  failure counts as "not current" so `open`'s rewrite surfaces it as a
+  proper error); free `read<Id: DeserializeOwned>(&Path, tag)` (tagged
+  header check via `parse_tagged_header`, body hashed and verified
+  against the header, then decode) and `edges_path(&Path)`. 15 tests
+  (12 from v0.1.0, 3 for the tag).
 - `src/durability/record_blob.rs`: unchanged — its `pub(crate)`
   machinery (`encode_image`, `parse_header`, `EncodedRecordBlob::write`,
   `Fnv1a64`, `HEADER_LEN`) gains a third call site. The
   `RecordBlobUnreadable` doc comment in `src/durability/mod.rs` gains one
-  sentence naming the edge blob.
+  sentence naming the edge blob. `src/generic/record_blob.rs`'s tagged
+  helpers (`STORAGE-015` v0.2.0) are the second call site of those.
 - `src/generic/store.rs`: one added `impl` block (`create`, `open`,
   `read_portable_edges`, `open_portable`) with its `use` lines, plus a
   new `#[cfg(test)] mod tests` — the file had none — with 6 tests over an
-  in-memory `BaseStore` inner (the blob is independent of `S`).
+  in-memory `BaseStore` inner (the blob is independent of `S`); v0.2.0
+  adds `SchemaTag` to the block's bound, passes `R::SCHEMA_TAG` at the
+  three blob call sites, and adds 2 tests (a second record type `Other`
+  with its own tag; a version-1 blob).
 - `src/generic/mod.rs`: declares `pub(crate) mod edge_blob;`.
 - `src/generic_spike/employee_impl.rs` (research-gated): the two
   existing helpers switch constructors; `open_employee_production_stack_
@@ -168,8 +213,12 @@ renumbered into this spec's namespace.
   and `<path>.records` without `<path>.edges` is a typed error naming the
   edge blob from `open_portable`; `open_employee_production_stack(
   employees, edges, path)` on that directory still works and heals it.
-- The blob does not record `R`, `Marker`, or `Id`'s type — the
-  `STORAGE-015` trust model.
+- Since v0.2.0 the blob records `R` (by `SCHEMA_TAG` hash, checked on
+  every read) but not `Marker` or `Id`'s type. Two `Symmetric` relations
+  over one `R` share a tag: a blob of one at the other's `edges_path`
+  is a semantic mix-up (which relation?), not a decode one (same `Id`
+  type either way) — distinct paths are the guard, as before. A
+  same-shape *other* `R` is now a tag mismatch, not a decode.
 - Blob/edge-list disagreement is not a failure mode: `open` builds from
   the caller's edges and only writes; `open_portable` builds from the
   blob and never writes.
@@ -181,6 +230,7 @@ renumbered into this spec's namespace.
   (propagated, never `expect`ed).
 - `read_portable_edges`/`open_portable`: `RecordBlobUnreadable` with the
   causes `cannot read file` / `magic number mismatch` / `blob version
+  mismatch` / `file too short for a tagged header` / `schema tag
   mismatch` / `fingerprint mismatch` / `body does not decode`.
 - A `create` whose inner store already succeeded but whose blob write
   fails returns the error and drops the inner store; the inner store's
@@ -192,11 +242,19 @@ renumbered into this spec's namespace.
 
 ## Security, privacy, and compatibility
 
-- Purely additive: no existing signature or bound changes. A pre-feature
-  `Employee` directory opens through the existing helper and gains its
-  `.edges` file on that first `open`.
+- v0.1.0 was purely additive: no existing signature or bound changes. A
+  pre-feature `Employee` directory opens through the existing helper and
+  gains its `.edges` file on that first `open`. v0.2.0 adds the
+  `SchemaTag` bound to the one `impl` block (`STORAGE-016-FR-006`); no
+  signature changes.
+- Version-1 edge blobs (v0.1.0, no tag) are **not** read by v0.2.0: the
+  read-only paths refuse them with a `version` cause and `open` rewrites
+  them as version 2 — the same heal as a missing blob (ADR-0019's
+  compatibility call, identical to `STORAGE-015` v0.2.0's).
 - Forward-detecting: a blob with a newer `BLOB_VERSION` is refused with a
   `version` cause, never partially decoded.
+- Type-detecting (v0.2.0): an edge blob written for another `R` is
+  refused with a `schema tag mismatch` cause, never handed to `bincode`.
 - `GENEDGE\0` differs from every other magic in the crate, so pointing
   `read` at a `.records`, `.mmap`, or `Dog` blob fails on the header
   before `bincode` sees a byte — and vice versa.
@@ -231,13 +289,26 @@ renumbered into this spec's namespace.
   through `Uuid` pairs in order; the streamed fingerprint equalling the
   header's; a reordered or different list not current; an empty list;
   missing file; short file; `GENBLOB\0` and `DOGBLOB\0` magic; wrong
-  version; tampered body; truncated body.
+  version; tampered body; truncated body; and, since v0.2.0: a blob
+  written under another tag being a `schema tag mismatch`, not a decode
+  (and not current for the other tag); a version-1 image being a
+  `version` cause before the tag is looked at; a file cut inside the
+  tag bytes being a short-tagged-header cause.
+- v0.2.0, at the layer level (design acceptance criterion 4): an edge
+  blob written by `Symmetric<_, Other, _>::create` at a `Symmetric<_,
+  Node, _>` layer's `edges_path` → `read_portable_edges` and
+  `open_portable` return `RecordBlobUnreadable` whose cause begins
+  `schema tag mismatch: this store expects \`store::tests::Node\``;
+  `open(inner, edges, path)` succeeds and rewrites it, after which
+  `read_portable_edges` returns the `Node` edges. A version-1 edge blob
+  → `version` cause from the read-only paths, healed by `open`.
 
 ## Verification plan
 
 - `cargo test` (default features) and `cargo test --all-features`: the
-  12 `generic::edge_blob` tests, 6 `generic::store` tests, 5
-  `employee_impl` tests, plus every pre-existing test, passing.
+  15 `generic::edge_blob` tests (12 + 3 tag), 8 `generic::store` tests
+  (6 + 2 tag), 5 `employee_impl` tests, plus every pre-existing test,
+  passing.
 - `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D
   warnings`, `cargo doc --no-deps` (no new warnings): clean.
 - Cost: not measured, per the design — the mechanism is the one
@@ -249,10 +320,14 @@ renumbered into this spec's namespace.
 ## Traceability
 
 Implements: ADR-0018 / `SYMMETRIC-EDGE-PORTABILITY-DESIGN.md`
-(`SYMPORT-FR-001..008` ↔ `STORAGE-016-FR-001..008`, one-to-one).
-Depends on: `STORAGE-012` (the layer extended), `STORAGE-014`/
-`STORAGE-015` (the blob machinery shared and the record-side portable
-helpers composed). Feeds: the resolution of `GENERIC-STORE-PORTABILITY-
+(`SYMPORT-FR-001..008` ↔ `STORAGE-016-FR-001..008`, one-to-one); since
+v0.2.0 also the edge-blob half of ADR-0019 /
+`BLOB-SCHEMA-TAG-DESIGN.md` (`SCHTAG-FR-001` ↔ FR-001, `-002` ↔
+FR-006, `-003` ↔ FR-005, `-004` ↔ FR-004; the record-blob half and the
+`SchemaTag` trait are `STORAGE-015` v0.2.0's). Depends on:
+`STORAGE-012` (the layer extended), `STORAGE-014`/`STORAGE-015` (the
+blob machinery shared — including v0.2.0's tagged-header helpers — and
+the record-side portable helpers composed). Feeds: the resolution of `GENERIC-STORE-PORTABILITY-
 DESIGN.md`'s first open question and `STORAGE-015`'s "Symmetric-level
 edge companion" open question.
 
@@ -266,17 +341,32 @@ rather than swallowing it.
 ## Open questions
 
 - Whether the blob should record which relation (`R`, `Marker`) it holds
-  — deferred together with `STORAGE-015`'s identical question, to be
-  resolved together (the owner's queued follow-up 2, "blob schema tag").
-  **Accepted** as proposed in `BLOB-SCHEMA-TAG-DESIGN.md` / `ADR-0019`
-  (this spec's v0.2.0, next: `GENEDGE\0` version 2 with a schema-tag
-  header field).
+  — **resolved by this spec's v0.2.0** for `R`, together with
+  `STORAGE-015`'s identical question: `BLOB-SCHEMA-TAG-DESIGN.md` /
+  ADR-0019, accepted as proposed and implemented (`GENEDGE\0` version 2
+  with the schema-tag header field). `Marker` is not recorded; the
+  design defers a `Marker`-level tag until a durable stack holds two
+  symmetric relations over one `R` (ADR-0018's existing revisit
+  trigger).
 - Whether a stack should carry a manifest naming its files — not
   proposed; the helper's docs name the three, and a missing one is a
   typed error naming which.
 
 ## Change history
 
+- 0.2.0 (2026-09-02): the schema tag (ADR-0019,
+  `BLOB-SCHEMA-TAG-DESIGN.md`, accepted as proposed the same day), the
+  edge-blob half of the change `STORAGE-015` v0.2.0 makes for the
+  record blob. `BLOB_VERSION` 1 → 2; the header gains the 8-byte hash
+  of `R::SCHEMA_TAG`; `EdgeBlob::new`/`edge_blob::read` take the tag
+  as a value; `R: SchemaTag` on the one `impl` block; version-1 blobs
+  refused by the read-only paths and rewritten by `open`. "Purpose",
+  "Non-goals" (one narrowed), "Context and terminology",
+  FR-001/-004/-005/-006, "Architecture", "Data/state and invariants",
+  "Errors", "Security, privacy, and compatibility", "Acceptance
+  criteria", "Verification plan", "Traceability" updated; the first
+  open question resolved. Code: `src/generic/edge_blob.rs`,
+  `src/generic/store.rs`; 5 new tests in this spec's scope.
 - 0.1.0 (2026-09-02): Initial accepted draft, alongside the real
   implementation (`src/generic/edge_blob.rs`, one `impl` block in
   `src/generic/store.rs`, the `Employee` helpers in
