@@ -319,6 +319,10 @@ impl AuthConfig {
 /// purely opt-in.
 pub struct TlsConfig {
     acceptor: rusty_tls::TlsAcceptor,
+    /// `MTLS-FR-001` (ADR-0023): whether `acceptor` was built with client
+    /// CA roots, so every connection must present a certificate chaining
+    /// to one of them or fail the handshake.
+    requires_client_certificate: bool,
 }
 
 /// Everything that can go wrong building a [`TlsConfig`].
@@ -367,7 +371,48 @@ impl TlsConfig {
     ) -> Result<Self, TlsConfigError> {
         let acceptor = rusty_tls::TlsAcceptor::new(cert_chain_der, private_key_der)
             .map_err(TlsConfigError::Tls)?;
-        Ok(Self { acceptor })
+        Ok(Self {
+            acceptor,
+            requires_client_certificate: false,
+        })
+    }
+
+    /// [`TlsConfig::new`] plus the DER-encoded CA certificates a client
+    /// certificate must chain to (`MTLS-FR-001`, ADR-0023,
+    /// `docs/design/SERVER-MTLS-DESIGN.md`) — mutual TLS as an *admission*
+    /// gate: a connection that presents no certificate, or one that does
+    /// not chain to any of `client_ca_roots_der`, fails the TLS handshake
+    /// and is dropped before any framed message (`Authenticate` included)
+    /// is read, on the same `TLS-FR-003` path as any other handshake
+    /// failure. Admission is all the certificate decides: an admitted
+    /// connection still starts exactly where [`AuthConfig`] says it does
+    /// (`MTLS-FR-002`), and nothing in this crate ever reads the admitted
+    /// certificate's contents (`MTLS-FR-005`). An empty root set is
+    /// `TlsConfigError::Tls` (`rusty_tls::Error::InvalidClientCaRoots`) —
+    /// a server never starts with mTLS silently off. `handle_connection`
+    /// has no mTLS branch: the acceptor carries the policy.
+    pub fn new_with_client_auth(
+        cert_chain_der: Vec<Vec<u8>>,
+        private_key_der: Vec<u8>,
+        client_ca_roots_der: Vec<Vec<u8>>,
+    ) -> Result<Self, TlsConfigError> {
+        let acceptor = rusty_tls::TlsAcceptor::new_with_client_auth(
+            cert_chain_der,
+            private_key_der,
+            client_ca_roots_der,
+        )
+        .map_err(TlsConfigError::Tls)?;
+        Ok(Self {
+            acceptor,
+            requires_client_certificate: true,
+        })
+    }
+
+    /// Whether every connection must present a client certificate —
+    /// `true` only for a config built by [`TlsConfig::new_with_client_auth`]
+    /// or its PEM/environment equivalents.
+    pub fn requires_client_certificate(&self) -> bool {
+        self.requires_client_certificate
     }
 
     /// Build from PEM-encoded certificate chain + private key files
@@ -397,17 +442,80 @@ impl TlsConfig {
         Self::new(cert_chain_der, private_key_der)
     }
 
+    /// [`TlsConfig::from_pem_files`] plus a PEM file holding one or more
+    /// `CERTIFICATE` blocks — the client CA roots for
+    /// [`TlsConfig::new_with_client_auth`] (`MTLS-FR-004`).
+    pub fn from_pem_files_with_client_ca(
+        cert_chain_path: impl AsRef<Path>,
+        private_key_path: impl AsRef<Path>,
+        client_ca_path: impl AsRef<Path>,
+    ) -> Result<Self, TlsConfigError> {
+        let (cert_chain_der, private_key_der) =
+            Self::read_pem_chain_and_key(cert_chain_path, private_key_path)?;
+        let client_ca_pem = std::fs::read_to_string(client_ca_path).map_err(TlsConfigError::Io)?;
+        let client_ca_roots_der =
+            pem::decode_blocks(&client_ca_pem).map_err(TlsConfigError::Pem)?;
+        Self::new_with_client_auth(cert_chain_der, private_key_der, client_ca_roots_der)
+    }
+
+    /// The shared PEM→DER step of both `from_pem_files*` constructors.
+    fn read_pem_chain_and_key(
+        cert_chain_path: impl AsRef<Path>,
+        private_key_path: impl AsRef<Path>,
+    ) -> Result<(Vec<Vec<u8>>, Vec<u8>), TlsConfigError> {
+        let cert_chain_pem =
+            std::fs::read_to_string(cert_chain_path).map_err(TlsConfigError::Io)?;
+        let private_key_pem =
+            std::fs::read_to_string(private_key_path).map_err(TlsConfigError::Io)?;
+        let cert_chain_der = pem::decode_blocks(&cert_chain_pem).map_err(TlsConfigError::Pem)?;
+        let private_key_blocks =
+            pem::decode_blocks(&private_key_pem).map_err(TlsConfigError::Pem)?;
+        let [private_key_der] = <[Vec<u8>; 1]>::try_from(private_key_blocks)
+            .map_err(|_| TlsConfigError::Pem(pem::PemError::UnterminatedBlock))?;
+        Ok((cert_chain_der, private_key_der))
+    }
+
     /// Build from `SERVER_TLS_CERT_CHAIN_PATH`/`SERVER_TLS_PRIVATE_KEY_PATH`
     /// at process startup, mirroring [`AuthConfig::from_env`]'s own
     /// pattern — `None` (rather than an error) if either variable is
     /// unset, so a caller can treat "TLS not configured" and "TLS
     /// misconfigured" differently: the former is `serve(..., None)`'s
     /// ordinary opt-out, the latter is a real startup error a caller
-    /// should surface (`Some(Err(..))`).
+    /// should surface (`Some(Err(..))`). Since v0.13.0 (`MTLS-FR-004`)
+    /// an optional third variable, `SERVER_TLS_CLIENT_CA_PATH`, selects
+    /// [`TlsConfig::from_pem_files_with_client_ca`]; set while the chain/key
+    /// pair is not, it is `Some(Err(TlsConfigError::Io(NotFound, ..)))`
+    /// naming the missing variables — never a silent plaintext or
+    /// no-mTLS server. (The chain/key pair itself is all-or-nothing as it
+    /// always was: one of the two set alone is still `None`.)
     pub fn from_env() -> Option<Result<Self, TlsConfigError>> {
-        let cert_chain_path = std::env::var("SERVER_TLS_CERT_CHAIN_PATH").ok()?;
-        let private_key_path = std::env::var("SERVER_TLS_PRIVATE_KEY_PATH").ok()?;
-        Some(Self::from_pem_files(cert_chain_path, private_key_path))
+        Self::from_env_values(
+            std::env::var("SERVER_TLS_CERT_CHAIN_PATH").ok(),
+            std::env::var("SERVER_TLS_PRIVATE_KEY_PATH").ok(),
+            std::env::var("SERVER_TLS_CLIENT_CA_PATH").ok(),
+        )
+    }
+
+    /// [`TlsConfig::from_env`]'s decision table, factored so a test can
+    /// drive it without touching the real process environment (the same
+    /// constraint [`AuthConfig::from_env`]'s docs impose).
+    fn from_env_values(
+        cert_chain_path: Option<String>,
+        private_key_path: Option<String>,
+        client_ca_path: Option<String>,
+    ) -> Option<Result<Self, TlsConfigError>> {
+        match (cert_chain_path, private_key_path, client_ca_path) {
+            (Some(chain), Some(key), None) => Some(Self::from_pem_files(chain, key)),
+            (Some(chain), Some(key), Some(ca)) => {
+                Some(Self::from_pem_files_with_client_ca(chain, key, ca))
+            }
+            (_, _, Some(_)) => Some(Err(TlsConfigError::Io(io::Error::new(
+                io::ErrorKind::NotFound,
+                "SERVER_TLS_CLIENT_CA_PATH is set but SERVER_TLS_CERT_CHAIN_PATH and \
+                 SERVER_TLS_PRIVATE_KEY_PATH are not both set",
+            )))),
+            _ => None,
+        }
     }
 }
 
@@ -742,6 +850,41 @@ pub fn serve<S: ConnectionStore + 'static>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `MTLS-FR-004`: `TlsConfig::from_env`'s decision table, driven
+    /// through the factored `from_env_values` so no real environment
+    /// variable is read (the constraint `AuthConfig::from_env`'s docs
+    /// impose on tests). Chain/key unset → `None`; the pair set → the
+    /// PEM path (here an `Io` error, since the files do not exist);
+    /// client CA set without the pair → `Some(Err(Io(NotFound)))`, never
+    /// `None`.
+    #[test]
+    fn tls_from_env_values_treats_a_client_ca_without_a_chain_and_key_as_an_error() {
+        let missing = |name: &str| Some(format!("/nonexistent/{name}"));
+        assert!(TlsConfig::from_env_values(None, None, None).is_none());
+        assert!(TlsConfig::from_env_values(missing("chain"), None, None).is_none());
+        assert!(matches!(
+            TlsConfig::from_env_values(missing("chain"), missing("key"), None),
+            Some(Err(TlsConfigError::Io(_)))
+        ));
+        assert!(matches!(
+            TlsConfig::from_env_values(missing("chain"), missing("key"), missing("ca")),
+            Some(Err(TlsConfigError::Io(_)))
+        ));
+        match TlsConfig::from_env_values(None, None, missing("ca")).map(|r| r.map(|_| ())) {
+            Some(Err(TlsConfigError::Io(e))) => {
+                assert_eq!(e.kind(), io::ErrorKind::NotFound);
+                assert!(e.to_string().contains("SERVER_TLS_CLIENT_CA_PATH"));
+            }
+            other => panic!("expected a NotFound Io error naming the variable, got {other:?}"),
+        }
+        match TlsConfig::from_env_values(missing("chain"), None, missing("ca"))
+            .map(|r| r.map(|_| ()))
+        {
+            Some(Err(TlsConfigError::Io(e))) => assert_eq!(e.kind(), io::ErrorKind::NotFound),
+            other => panic!("expected a NotFound Io error, got {other:?}"),
+        }
+    }
 
     /// A minimal in-memory `ConnectionStore` fixture, independent of any
     /// real domain adapter — exercises `dispatch`'s own logic (response

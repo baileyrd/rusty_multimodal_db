@@ -458,3 +458,9 @@ error it already handles. Its module doc gains the third variable.
 - 2026-09-02: Accepted as proposed; the verification plan's throwaway
   probe ran first and confirmed every assertion this document made from
   reading source (see ADR-0023's acceptance log). No content change.
+  (PR #134.)
+- 2026-09-02: Implemented as `SERVER-001` v0.13.0 / FR-023 (this PR),
+  per the verification plan: acceptance criteria 1–10 hold as written,
+  no deviation. The partial-environment error (an open question above)
+  reuses `TlsConfigError::Io` with `NotFound` naming the variables — no
+  new variant. `ADR-0023`'s acceptance log carries the same note.

@@ -424,6 +424,9 @@ of this design-only pass.
 - Whether a future mTLS design (once/if native TLS is ever adopted)
   would replace this token scheme entirely or layer alongside it is
   unaddressed — a real question for that future revisit, not this one.
+  *Resolved: layer — `SERVER-MTLS-DESIGN.md` / `ADR-0023`, implemented
+  as `SERVER-001` v0.13.0 / FR-023: the certificate decides admission,
+  this token scheme still decides class, unchanged.*
 
 ## Change history
 
