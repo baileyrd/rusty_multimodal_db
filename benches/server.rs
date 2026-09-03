@@ -123,7 +123,7 @@ use rusty_multimodal_db::server::order::{OrderConnectionStore, FIELD_AMOUNT};
 use rusty_multimodal_db::server::protocol::{
     FieldRef, Request, Response, ScanValue, TransactionOp,
 };
-use rusty_multimodal_db::server::{serve, AuthConfig};
+use rusty_multimodal_db::server::{serve, ServeOptions};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::{Arc, Barrier};
 use std::thread;
@@ -169,7 +169,7 @@ fn start_dog_server() -> (SocketAddr, Vec<Uuid>) {
     let connection_store = Arc::new(DogConnectionStore::new(store));
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
-    thread::spawn(move || serve(listener, connection_store, AuthConfig::default(), None));
+    thread::spawn(move || serve(listener, connection_store, ServeOptions::default()));
     (addr, ids)
 }
 
@@ -196,7 +196,7 @@ fn start_dog_server_journaled() -> (SocketAddr, Vec<Uuid>) {
     );
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
-    thread::spawn(move || serve(listener, connection_store, AuthConfig::default(), None));
+    thread::spawn(move || serve(listener, connection_store, ServeOptions::default()));
     (addr, ids)
 }
 
@@ -225,7 +225,7 @@ fn start_order_server() -> (SocketAddr, Vec<Uuid>) {
     )));
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
-    thread::spawn(move || serve(listener, connection_store, AuthConfig::default(), None));
+    thread::spawn(move || serve(listener, connection_store, ServeOptions::default()));
     (addr, ids)
 }
 
@@ -263,7 +263,7 @@ fn start_employee_server() -> (SocketAddr, Vec<Uuid>) {
     )));
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
-    thread::spawn(move || serve(listener, connection_store, AuthConfig::default(), None));
+    thread::spawn(move || serve(listener, connection_store, ServeOptions::default()));
     (addr, ids)
 }
 

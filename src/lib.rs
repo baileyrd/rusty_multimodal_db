@@ -78,7 +78,7 @@
 //! built exactly this way: every request addressed by discovered field
 //! name, capability checks run client-side first, no domain-specific
 //! `FIELD_*` constant imported anywhere in it. Authentication/authorization
-//! is real and implemented ([`server::AuthConfig`]/`Request::Authenticate`,
+//! is real and implemented ([`server::ServeOptions`]/`Request::Authenticate`,
 //! `docs/design/SERVER-AUTH-DESIGN.md`, ADR-0012, Accepted) but purely
 //! opt-in — a server started with no configured tokens behaves exactly as
 //! before. Atomic multi-operation transactions are real and implemented
@@ -93,7 +93,7 @@
 //! this crate's first git dependency) before any framed traffic, also
 //! purely opt-in — a server started with no `TlsConfig` behaves exactly
 //! as before. **No query language beyond fixed field-tag addressing, and
-//! `TlsConfig`/`AuthConfig` must both be configured together before
+//! `TlsConfig`/`ServeOptions` must both be configured together before
 //! exposing a server beyond a trusted network** — see [`server`]'s
 //! own module docs and `docs/decisions/ADR-0010-server-query-layer-proposal.md`
 //! (Accepted) before using it; this is new, parallel capability, same as
@@ -174,7 +174,7 @@ pub mod record;
 /// this is new, real, additive capability, not a benchmarked-alternative
 /// or historical-spike module, and it introduces a real
 /// network-listening binary surface. Authentication/authorization
-/// (`AuthConfig`, ADR-0012, Accepted) and native transport encryption
+/// (`ServeOptions`, ADR-0012, Accepted) and native transport encryption
 /// (`TlsConfig`, ADR-0014, Accepted, via `rusty_tls` — this crate's first
 /// git dependency, not a direct `rustls` dependency) are both implemented
 /// and purely opt-in — see this module's own doc comment and ADR-0010's

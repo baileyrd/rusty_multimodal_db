@@ -31,7 +31,7 @@ use rusty_multimodal_db::server::framing::{read_message, write_message};
 use rusty_multimodal_db::server::protocol::{
     ErrorCode, Request, Response, ScanValue, PROTOCOL_VERSION,
 };
-use rusty_multimodal_db::server::{serve, AuthConfig, TlsConfig, TokenClass};
+use rusty_multimodal_db::server::{serve, ServeOptions, TlsConfig, TokenClass};
 use rusty_multimodal_db::ProductionStore;
 use rusty_tls::{TlsStream, TrustPolicy};
 use std::io::{Read, Write};
@@ -59,7 +59,7 @@ fn self_signed_leaf() -> (Vec<u8>, Vec<u8>) {
     (cert.der().to_vec(), key_pair.serialize_der())
 }
 
-fn start_server(auth: AuthConfig, tls: Option<TlsConfig>) -> std::net::SocketAddr {
+fn start_server(auth: ServeOptions, tls: Option<TlsConfig>) -> std::net::SocketAddr {
     let dir = unique_dir("server_tls_integration");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("dogs.mmap");
@@ -70,7 +70,11 @@ fn start_server(auth: AuthConfig, tls: Option<TlsConfig>) -> std::net::SocketAdd
 
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
-    thread::spawn(move || serve(listener, connection_store, auth, tls));
+    let options = match tls {
+        Some(tls) => auth.with_tls(tls),
+        None => auth,
+    };
+    thread::spawn(move || serve(listener, connection_store, options));
     addr
 }
 
@@ -93,7 +97,7 @@ fn roundtrip<S: Read + Write>(stream: &mut S, req: Request) -> Response {
 fn a_real_client_completes_a_request_response_round_trip_over_tls() {
     let (cert_der, key_der) = self_signed_leaf();
     let tls = TlsConfig::new(vec![cert_der], key_der).unwrap();
-    let addr = start_server(AuthConfig::default(), Some(tls));
+    let addr = start_server(ServeOptions::default(), Some(tls));
 
     let mut client = connect_tls(addr);
     assert_eq!(
@@ -131,7 +135,7 @@ fn a_real_client_completes_a_request_response_round_trip_over_tls() {
     ));
 }
 
-/// `TLS-FR-007`: composed with `AuthConfig`, `Authenticate`'s token now
+/// `TLS-FR-007`: composed with `ServeOptions`, `Authenticate`'s token now
 /// travels over the encrypted channel — the handshake always completes
 /// before any framed `Request` is ever read, so authenticating over TLS
 /// works exactly like authenticating in plaintext.
@@ -139,7 +143,7 @@ fn a_real_client_completes_a_request_response_round_trip_over_tls() {
 fn authentication_composes_with_tls() {
     let (cert_der, key_der) = self_signed_leaf();
     let tls = TlsConfig::new(vec![cert_der], key_der).unwrap();
-    let auth = AuthConfig::new(None, Some("write-token".into()));
+    let auth = ServeOptions::new(None, Some("write-token".into()));
     let addr = start_server(auth, Some(tls));
 
     let mut client = connect_tls(addr);
@@ -201,7 +205,7 @@ impl Write for RecordingStream {
 fn the_authenticate_token_is_not_observable_in_the_bytes_sent_on_the_wire() {
     let (cert_der, key_der) = self_signed_leaf();
     let tls = TlsConfig::new(vec![cert_der], key_der).unwrap();
-    let auth = AuthConfig::new(None, Some("super-secret-token-xyz123".into()));
+    let auth = ServeOptions::new(None, Some("super-secret-token-xyz123".into()));
     let addr = start_server(auth, Some(tls));
 
     let tcp = TcpStream::connect(addr).unwrap();
@@ -242,7 +246,7 @@ fn the_authenticate_token_is_not_observable_in_the_bytes_sent_on_the_wire() {
 fn a_plain_connection_to_a_tls_configured_server_never_gets_a_valid_response() {
     let (cert_der, key_der) = self_signed_leaf();
     let tls = TlsConfig::new(vec![cert_der], key_der).unwrap();
-    let addr = start_server(AuthConfig::default(), Some(tls));
+    let addr = start_server(ServeOptions::default(), Some(tls));
 
     let mut plain = TcpStream::connect(addr).unwrap();
     plain.set_nodelay(true).unwrap();
@@ -267,7 +271,7 @@ fn a_plain_connection_to_a_tls_configured_server_never_gets_a_valid_response() {
 /// direct side-by-side check in this file specifically.
 #[test]
 fn no_tls_config_reproduces_plaintext_behavior() {
-    let addr = start_server(AuthConfig::default(), None);
+    let addr = start_server(ServeOptions::default(), None);
     let mut client = TcpStream::connect(addr).unwrap();
     client.set_nodelay(true).unwrap();
     assert!(matches!(
@@ -294,7 +298,7 @@ fn dev_tls() -> ClientTlsConfig {
 fn schema_driven_client_connects_over_tls() {
     let (cert_der, key_der) = self_signed_leaf();
     let tls = TlsConfig::new(vec![cert_der], key_der).unwrap();
-    let addr = start_server(AuthConfig::default(), Some(tls));
+    let addr = start_server(ServeOptions::default(), Some(tls));
 
     let mut client =
         SchemaDrivenClient::connect_with(addr, ConnectOptions::new().tls(dev_tls())).unwrap();
@@ -319,7 +323,7 @@ fn schema_driven_client_connects_over_tls() {
 fn schema_driven_client_authenticates_over_tls() {
     let (cert_der, key_der) = self_signed_leaf();
     let tls = TlsConfig::new(vec![cert_der], key_der).unwrap();
-    let auth = AuthConfig::new(Some("read-token".into()), Some("write-token".into()));
+    let auth = ServeOptions::new(Some("read-token".into()), Some("write-token".into()));
     let addr = start_server(auth, Some(tls));
 
     match SchemaDrivenClient::connect_authenticated(addr, "write-token").map(|_| ()) {
@@ -360,7 +364,7 @@ fn schema_driven_client_authenticates_over_tls() {
 fn schema_driven_client_tls_failures_are_errors_not_hangs() {
     let (cert_der, key_der) = self_signed_leaf();
     let tls = TlsConfig::new(vec![cert_der], key_der).unwrap();
-    let addr = start_server(AuthConfig::default(), Some(tls));
+    let addr = start_server(ServeOptions::default(), Some(tls));
 
     match SchemaDrivenClient::connect(addr).map(|_| ()) {
         Err(ClientError::Frame(_)) => {}
@@ -426,7 +430,7 @@ fn identity_client(chain: Vec<Vec<u8>>, key: Vec<u8>) -> ClientTlsConfig {
 #[test]
 fn mtls_admits_a_client_whose_certificate_chains_to_the_configured_ca() {
     let (ca, ca_key) = throwaway_ca();
-    let addr = start_server(AuthConfig::default(), Some(mtls_server_config(&ca)));
+    let addr = start_server(ServeOptions::default(), Some(mtls_server_config(&ca)));
 
     let (chain, key) = client_identity(&ca, &ca_key);
     let mut raw = TlsStream::new_with_client_identity(
@@ -465,7 +469,7 @@ fn mtls_admits_a_client_whose_certificate_chains_to_the_configured_ca() {
 #[test]
 fn mtls_rejects_a_client_without_a_certificate_or_with_one_from_another_ca() {
     let (ca, ca_key) = throwaway_ca();
-    let addr = start_server(AuthConfig::default(), Some(mtls_server_config(&ca)));
+    let addr = start_server(ServeOptions::default(), Some(mtls_server_config(&ca)));
 
     // No identity: raw and library clients alike.
     let mut raw = connect_tls(addr);
@@ -512,7 +516,7 @@ fn mtls_rejects_a_client_without_a_certificate_or_with_one_from_another_ca() {
 #[test]
 fn mtls_composes_with_auth_config_as_admission_then_class() {
     let (ca, ca_key) = throwaway_ca();
-    let auth = AuthConfig::new(Some("read-token".into()), Some("write-token".into()));
+    let auth = ServeOptions::new(Some("read-token".into()), Some("write-token".into()));
     let addr = start_server(auth, Some(mtls_server_config(&ca)));
     let (chain, key) = client_identity(&ca, &ca_key);
     let identity = || identity_client(chain.clone(), key.clone());
@@ -537,7 +541,7 @@ fn mtls_composes_with_auth_config_as_admission_then_class() {
         .unwrap());
 
     // Certificates only: no tokens configured.
-    let addr = start_server(AuthConfig::default(), Some(mtls_server_config(&ca)));
+    let addr = start_server(ServeOptions::default(), Some(mtls_server_config(&ca)));
     let mut client =
         SchemaDrivenClient::connect_with(addr, ConnectOptions::new().tls(identity())).unwrap();
     assert!(client
@@ -581,7 +585,7 @@ fn mtls_pem_files_and_construction_errors() {
 
     let tls = TlsConfig::from_pem_files_with_client_ca(&chain_path, &key_path, &ca_path).unwrap();
     assert!(tls.requires_client_certificate());
-    let addr = start_server(AuthConfig::default(), Some(tls));
+    let addr = start_server(ServeOptions::default(), Some(tls));
     let identity = dev_tls()
         .with_identity_pem_files(&client_chain_path, &client_key_path)
         .unwrap();
@@ -625,7 +629,7 @@ fn handshake_outcomes_are_audited_with_a_reason() {
     let (ca, ca_key) = throwaway_ca();
     let sink = Arc::new(Collecting::default());
     let addr = start_server(
-        AuthConfig::default().with_audit(sink.clone()),
+        ServeOptions::default().with_audit(sink.clone()),
         Some(mtls_server_config(&ca)),
     );
 
@@ -703,7 +707,7 @@ fn admitted_records_classed_by_certificate_for_a_matched_leaf_only() {
     let (classed_chain, classed_key) = client_identity(&ca, &ca_key);
     let (unclassed_chain, unclassed_key) = client_identity(&ca, &ca_key);
     let sink = Arc::new(Collecting::default());
-    let auth = AuthConfig::default()
+    let auth = ServeOptions::default()
         .with_certificate_class(classed_chain[0].clone(), TokenClass::ReadOnly)
         .with_audit(sink.clone());
     let addr = start_server(auth, Some(mtls_server_config(&ca)));
@@ -771,7 +775,7 @@ fn a_classed_leaf_starts_at_its_class_with_no_authenticate() {
     let leaf_der = chain[0].clone();
 
     let read_only_auth =
-        AuthConfig::default().with_certificate_class(leaf_der.clone(), TokenClass::ReadOnly);
+        ServeOptions::default().with_certificate_class(leaf_der.clone(), TokenClass::ReadOnly);
     let addr = start_server(read_only_auth, Some(mtls_server_config(&ca)));
     let mut client = SchemaDrivenClient::connect_with(
         addr,
@@ -785,7 +789,7 @@ fn a_classed_leaf_starts_at_its_class_with_no_authenticate() {
     }
 
     let read_write_auth =
-        AuthConfig::default().with_certificate_class(leaf_der, TokenClass::ReadWrite);
+        ServeOptions::default().with_certificate_class(leaf_der, TokenClass::ReadWrite);
     let addr = start_server(read_write_auth, Some(mtls_server_config(&ca)));
     let mut client = SchemaDrivenClient::connect_with(
         addr,
@@ -806,7 +810,7 @@ fn a_valid_token_replaces_the_certificate_class_an_invalid_one_does_not() {
     let (ca, ca_key) = throwaway_ca();
     let (chain, key) = client_identity(&ca, &ca_key);
     let leaf_der = chain[0].clone();
-    let auth = AuthConfig::new(Some("read-token".into()), Some("write-token".into()))
+    let auth = ServeOptions::new(Some("read-token".into()), Some("write-token".into()))
         .with_certificate_class(leaf_der, TokenClass::ReadOnly);
     let addr = start_server(auth, Some(mtls_server_config(&ca)));
     let identity = || identity_client(chain.clone(), key.clone());
@@ -821,7 +825,7 @@ fn a_valid_token_replaces_the_certificate_class_an_invalid_one_does_not() {
 
     // A fresh server/store: the first scenario's write must not leak into
     // this one's read assertion below.
-    let auth = AuthConfig::new(Some("read-token".into()), Some("write-token".into()))
+    let auth = ServeOptions::new(Some("read-token".into()), Some("write-token".into()))
         .with_certificate_class(chain[0].clone(), TokenClass::ReadOnly);
     let addr = start_server(auth, Some(mtls_server_config(&ca)));
     let mut client =
@@ -850,7 +854,7 @@ fn certificates_only_server_leaves_an_unclassed_admitted_leaf_unauthenticated() 
     let (ca, ca_key) = throwaway_ca();
     let (classed_chain, classed_key) = client_identity(&ca, &ca_key);
     let (unclassed_chain, unclassed_key) = client_identity(&ca, &ca_key);
-    let auth = AuthConfig::default()
+    let auth = ServeOptions::default()
         .with_certificate_class(classed_chain[0].clone(), TokenClass::ReadOnly);
     let addr = start_server(auth, Some(mtls_server_config(&ca)));
 
@@ -901,7 +905,7 @@ fn with_certificate_class_pem_file_classes_every_block_and_surfaces_errors() {
     )
     .unwrap();
 
-    let auth = AuthConfig::default()
+    let auth = ServeOptions::default()
         .with_certificate_class_pem_file(&leaves_pem_path, TokenClass::ReadOnly)
         .unwrap();
     let addr = start_server(auth, Some(mtls_server_config(&ca)));
@@ -914,7 +918,7 @@ fn with_certificate_class_pem_file_classes_every_block_and_surfaces_errors() {
         assert_eq!(client.scan("age").unwrap(), vec![ScanValue::U32(3)]);
     }
 
-    match AuthConfig::default()
+    match ServeOptions::default()
         .with_certificate_class_pem_file(dir.join("missing.pem"), TokenClass::ReadOnly)
         .map(|_| ())
     {
@@ -923,7 +927,7 @@ fn with_certificate_class_pem_file_classes_every_block_and_surfaces_errors() {
     }
     let not_pem_path = dir.join("not-pem.txt");
     std::fs::write(&not_pem_path, b"not a certificate").unwrap();
-    match AuthConfig::default()
+    match ServeOptions::default()
         .with_certificate_class_pem_file(&not_pem_path, TokenClass::ReadOnly)
         .map(|_| ())
     {

@@ -8,7 +8,7 @@
 //! other's cost — the audit log's per-decision volume, or this log's
 //! per-request volume.
 //!
-//! An [`AccessSink`] is hung on `AuthConfig::with_access_log` — the same
+//! An [`AccessSink`] is hung on `ServeOptions::with_access_log` — the same
 //! object the audit sink and (if configured) the rate limiter hang on, so
 //! `serve`'s signature is unchanged; `handle_connection` calls it once per
 //! dispatched request, after the response is decided, outside every lock.
@@ -55,7 +55,7 @@ pub struct AccessEvent {
     /// The peer, if the OS could say.
     pub peer: Option<SocketAddr>,
     /// The class the connection was answering at — `Some(ReadWrite)` on
-    /// every dispatched request through an unconfigured `AuthConfig`, per
+    /// every dispatched request through an unconfigured `ServeOptions`, per
     /// `AUTH-FR-007`; `Option` to mirror `AuditKind::Admitted`'s shape
     /// rather than assert something the type system need not.
     pub class: Option<TokenClass>,

@@ -7,7 +7,7 @@
 //! certificate, no record id, no value ever appears in an event. The
 //! peer address and a Unix-seconds timestamp are the identifiers.
 //!
-//! An [`AuditSink`] is hung on `AuthConfig::with_audit` — the policy
+//! An [`AuditSink`] is hung on `ServeOptions::with_audit` — the policy
 //! object every gate already consults — so `serve`'s signature is
 //! unchanged; `handle_connection` calls it at its existing gates, after
 //! the decision and before the response, outside every lock. The
@@ -99,7 +99,7 @@ pub enum AuditKind {
     /// (`None`: it must authenticate). `classed_by_certificate`
     /// (`ADR-0029`'s fourth revisit trigger, taken once `ADR-0028`
     /// landed): whether `initial_class` came from a matched, configured
-    /// certificate (`CLS-FR-004`) rather than `AuthConfig::is_configured`'s
+    /// certificate (`CLS-FR-004`) rather than `ServeOptions::is_configured`'s
     /// unauthenticated/`ReadWrite` default — always `false` when
     /// `initial_class` is `None`, since a certificate that classes a
     /// connection always sets it.

@@ -58,9 +58,9 @@
 //! and that error is the one returned. [`ConnectOptions::require_hello`]
 //! turns the fallback off for a caller that would rather see the EOF.
 //!
-//! # Authentication (`AuthConfig`), `SERVER-001-FR-021`
+//! # Authentication (`ServeOptions`), `SERVER-001-FR-021`
 //!
-//! An `AuthConfig`-configured server rejects every request but
+//! A `ServeOptions`-configured server rejects every request but
 //! `Authenticate` — `DescribeSchema` included (`AUTH-FR-002`) — until a
 //! recognized token is presented, so on such a server the schema fetch
 //! [`SchemaDrivenClient::connect`] does cannot succeed and `connect` fails
@@ -259,7 +259,7 @@ pub struct ClientTlsConfig {
 
 /// Hand-written so the identity's private key never reaches a log:
 /// prints whether an identity is present, not its bytes (the same
-/// never-echo-a-secret rule `AuthConfig` follows for tokens).
+/// never-echo-a-secret rule `ServeOptions` follows for tokens).
 impl fmt::Debug for ClientTlsConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ClientTlsConfig")
@@ -582,7 +582,7 @@ impl SchemaDrivenClient {
     /// immediately sends `Request::DescribeSchema` and keeps the result
     /// for every subsequent field-name lookup this client does.
     ///
-    /// Against an `AuthConfig`-configured server this fails with
+    /// Against a `ServeOptions`-configured server this fails with
     /// `ClientError::Server(ErrorCode::Unauthenticated, ..)` — the schema
     /// fetch itself is gated (`AUTH-FR-002`); use
     /// [`SchemaDrivenClient::connect_authenticated`] there.

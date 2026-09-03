@@ -24,27 +24,27 @@
 //! No query language beyond fixed field-tag addressing — an explicit
 //! non-goal of the accepted design(s). **Do not expose a server built
 //! from this module beyond a trusted, localhost/development network
-//! unless both `AuthConfig` and `TlsConfig` (below) are configured** —
+//! unless both `ServeOptions` and `TlsConfig` (below) are configured** —
 //! see ADR-0010's Consequences; ADR-0012 closed the authentication/
 //! authorization half of that gap, ADR-0014 closes the transport-
 //! encryption half, but neither alone is the whole story (a
 //! `TlsConfig`-only server still lets anyone who can connect do
-//! anything; an `AuthConfig`-only server still puts tokens and every
+//! anything; a `ServeOptions`-only server still puts tokens and every
 //! record value in plaintext on the wire). ADR-0010's third named gap,
 //! "no transaction semantics," is now partly closed too — see "Atomic
 //! transactions" below for exactly which slice.
 //!
-//! # Authentication/authorization (`AuthConfig`), ADR-0012
+//! # Authentication/authorization (`ServeOptions`), ADR-0012
 //!
 //! `docs/design/SERVER-AUTH-DESIGN.md` closes the "no authentication, no
 //! authorization" gap ADR-0010 originally left open: [`serve`] takes an
-//! [`AuthConfig`] naming which token(s) (if any) a server instance
+//! [`ServeOptions`] naming which token(s) (if any) a server instance
 //! accepts and the [`TokenClass`] (`ReadOnly`/`ReadWrite`) each grants.
 //! `Request::Authenticate` establishes a connection's class; every other
 //! request kind is rejected with `ErrorCode::Unauthenticated` until it
 //! does, and `ReadOnly` is further rejected from `Request::UpdateField`/
 //! `Request::Transaction` with `ErrorCode::Unauthorized`.
-//! `AuthConfig::default()` (no tokens configured) reproduces exactly the
+//! `ServeOptions::default()` (no tokens configured) reproduces exactly the
 //! pre-ADR-0012 unauthenticated behavior (`AUTH-FR-007`) — this is purely
 //! opt-in. See this module's own `handle_connection` for the full gating
 //! logic.
@@ -99,7 +99,7 @@
 //! remain completely unaware transport encryption exists, and
 //! `src/server/framing.rs` needed zero changes, since its functions were
 //! already generic over `Read`/`Write`. Explicitly not mTLS — client
-//! identity remains exactly [`AuthConfig`]'s existing shared-secret token
+//! identity remains exactly [`ServeOptions`]'s existing shared-secret token
 //! scheme, now traveling encrypted rather than plaintext.
 //!
 //! # Protocol version (`Hello`), ADR-0022
@@ -359,8 +359,8 @@ pub enum TokenClass {
 ///
 /// Tokens are never logged or echoed back on any path, including error
 /// messages (`AUTH-FR-005`).
-#[derive(Clone, Default)]
-pub struct AuthConfig {
+#[derive(Default)]
+pub struct ServeOptions {
     read_only_token: Option<String>,
     read_write_token: Option<String>,
     /// `AUD-FR-003` (ADR-0029): where admission, authentication, and
@@ -378,9 +378,13 @@ pub struct AuthConfig {
     /// `ACC-FR-003` (ADR-0031): where per-request access events are
     /// recorded, independent of `audit`; `None` is [`access::NoAccessLog`].
     access_log: Option<Arc<dyn access::AccessSink>>,
+    /// `SRV-FR-001` (ADR-0032): native TLS, folded in from the former
+    /// second `serve` parameter — `None` is plaintext, exactly [`serve`]'s
+    /// behavior before this field existed (`TLS-FR-008`).
+    tls: Option<TlsConfig>,
 }
 
-impl std::fmt::Debug for AuthConfig {
+impl std::fmt::Debug for ServeOptions {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let read_only_certs = self
             .certificate_classes
@@ -388,7 +392,7 @@ impl std::fmt::Debug for AuthConfig {
             .filter(|(_, class)| *class == TokenClass::ReadOnly)
             .count();
         let read_write_certs = self.certificate_classes.len() - read_only_certs;
-        f.debug_struct("AuthConfig")
+        f.debug_struct("ServeOptions")
             .field("read_only_token", &self.read_only_token)
             .field("read_write_token", &self.read_write_token)
             // `CLS-FR-006`: counts only, never a configured leaf's bytes.
@@ -412,6 +416,14 @@ impl std::fmt::Debug for AuthConfig {
                     "none"
                 },
             )
+            .field(
+                "tls",
+                &if self.tls.is_some() {
+                    "configured"
+                } else {
+                    "none"
+                },
+            )
             .finish()
     }
 }
@@ -419,10 +431,10 @@ impl std::fmt::Debug for AuthConfig {
 static NO_AUDIT: audit::NoAudit = audit::NoAudit;
 static NO_ACCESS_LOG: access::NoAccessLog = access::NoAccessLog;
 
-impl AuthConfig {
+impl ServeOptions {
     /// Build directly from already-known tokens. Use this from tests and
     /// from any caller that already has its tokens from its own config
-    /// source — see [`AuthConfig::from_env`]'s own doc comment for why
+    /// source — see [`ServeOptions::from_env`]'s own doc comment for why
     /// tests specifically must not use real environment variables.
     pub fn new(read_only_token: Option<String>, read_write_token: Option<String>) -> Self {
         Self {
@@ -432,6 +444,7 @@ impl AuthConfig {
             certificate_classes: Vec::new(),
             rate_limit: None,
             access_log: None,
+            tls: None,
         }
     }
 
@@ -439,16 +452,16 @@ impl AuthConfig {
     /// leaf's DER bytes exactly equal `leaf_der` starts the connection at
     /// `class`, with no `Authenticate` needed (`CLS-FR-004`) — see
     /// `handle_connection`'s TLS arm. Repeatable; builds the map one
-    /// certificate at a time. Only takes effect on a `TlsConfig` built
-    /// with client auth (`SERVER_TLS_CLIENT_CA_PATH`) — `AuthConfig`
-    /// cannot see `TlsConfig`, so it does not refuse this on its own; see
-    /// `dog_server`'s startup check (`CLS-FR-005`).
+    /// certificate at a time. Only takes effect when [`with_tls`][Self::with_tls]
+    /// configures client auth (`SERVER_TLS_CLIENT_CA_PATH`) — this crate
+    /// does not refuse the combination on its own; see `dog_server`'s
+    /// startup check (`CLS-FR-005`).
     pub fn with_certificate_class(mut self, leaf_der: Vec<u8>, class: TokenClass) -> Self {
         self.certificate_classes.push((leaf_der, class));
         self
     }
 
-    /// [`AuthConfig::with_certificate_class`] for every `CERTIFICATE`
+    /// [`ServeOptions::with_certificate_class`] for every `CERTIFICATE`
     /// block in a PEM file — a leaf per class-holding certificate,
     /// classed identically (`CLS-FR-003`).
     pub fn with_certificate_class_pem_file(
@@ -497,7 +510,7 @@ impl AuthConfig {
     /// binary's own one-time startup — `cargo test` runs many tests in
     /// parallel within one process, so reading real process-wide
     /// environment variables from a test would race with every other test
-    /// doing the same; tests use [`AuthConfig::new`] instead.
+    /// doing the same; tests use [`ServeOptions::new`] instead.
     pub fn from_env() -> Self {
         Self {
             read_only_token: std::env::var("SERVER_AUTH_READ_ONLY_TOKEN").ok(),
@@ -506,7 +519,26 @@ impl AuthConfig {
             certificate_classes: Vec::new(),
             rate_limit: None,
             access_log: None,
+            tls: None,
         }
+    }
+
+    /// `SRV-FR-001`/`SRV-FR-003` (ADR-0032): native TLS — the former
+    /// second `serve` parameter, now one more opt-in field. Kept a
+    /// separate, still-fallible construction step deliberately
+    /// (`TlsConfig::new`/`from_env` can fail; nothing about `ServeOptions`
+    /// itself can) — a caller builds a `TlsConfig` and handles its
+    /// `Result` first, then folds it in here, exactly the two-step
+    /// pattern every other conditionally-configured piece already uses
+    /// (`with_audit`, `with_rate_limit`, `with_access_log`).
+    pub fn with_tls(mut self, tls: TlsConfig) -> Self {
+        self.tls = Some(tls);
+        self
+    }
+
+    /// The configured `TlsConfig`, or `None` for plaintext.
+    pub fn tls(&self) -> Option<&TlsConfig> {
+        self.tls.as_ref()
     }
 
     /// No tokens *and* no certificate classes configured — `AUTH-FR-007`:
@@ -668,7 +700,7 @@ struct Window {
 }
 
 /// `RL-FR-002`/`RL-FR-003`: the shared per-peer failure table backing
-/// [`AuthConfig::with_rate_limit`]. One mutex, touched only on the
+/// [`ServeOptions::with_rate_limit`]. One mutex, touched only on the
 /// `Authenticate` path of a server with a budget configured, for one
 /// lookup or insert (`RL-FR-007`).
 #[derive(Debug)]
@@ -755,7 +787,7 @@ impl FailureTable {
 /// — this owner's own ecosystem-wide `rustls` wrapper, not a direct
 /// `rustls` dependency, see that design's own "Ecosystem check" for why —
 /// built once at server startup and shared across every connection
-/// thread [`serve`] spawns, the same lifecycle [`AuthConfig`] already
+/// thread [`serve`] spawns, the same lifecycle [`ServeOptions`] already
 /// uses for its own configured tokens. `serve` with `tls: None` behaves
 /// exactly as it did before this feature existed (`TLS-FR-008`) — this is
 /// purely opt-in.
@@ -827,7 +859,7 @@ impl TlsConfig {
     /// and is dropped before any framed message (`Authenticate` included)
     /// is read, on the same `TLS-FR-003` path as any other handshake
     /// failure. Admission is all the certificate decides: an admitted
-    /// connection still starts exactly where [`AuthConfig`] says it does
+    /// connection still starts exactly where [`ServeOptions`] says it does
     /// (`MTLS-FR-002`), and nothing in this crate ever reads the admitted
     /// certificate's contents (`MTLS-FR-005`). An empty root set is
     /// `TlsConfigError::Tls` (`rusty_tls::Error::InvalidClientCaRoots`) —
@@ -918,7 +950,7 @@ impl TlsConfig {
     }
 
     /// Build from `SERVER_TLS_CERT_CHAIN_PATH`/`SERVER_TLS_PRIVATE_KEY_PATH`
-    /// at process startup, mirroring [`AuthConfig::from_env`]'s own
+    /// at process startup, mirroring [`ServeOptions::from_env`]'s own
     /// pattern — `None` (rather than an error) if either variable is
     /// unset, so a caller can treat "TLS not configured" and "TLS
     /// misconfigured" differently: the former is `serve(..., None)`'s
@@ -940,7 +972,7 @@ impl TlsConfig {
 
     /// [`TlsConfig::from_env`]'s decision table, factored so a test can
     /// drive it without touching the real process environment (the same
-    /// constraint [`AuthConfig::from_env`]'s docs impose).
+    /// constraint [`ServeOptions::from_env`]'s docs impose).
     fn from_env_values(
         cert_chain_path: Option<String>,
         private_key_path: Option<String>,
@@ -977,7 +1009,7 @@ impl TlsConfig {
 /// `Rc<RefCell<_>>` gives the TLS path the same two-owned-halves shape.
 /// Single-threaded is enough — each connection is served by exactly one
 /// OS thread (see [`serve`]), so a `RefCell`'s runtime borrow check is
-/// sufficient; no `Mutex`/`Arc` needed for this, unlike `AuthConfig`/
+/// sufficient; no `Mutex`/`Arc` needed for this, unlike `ServeOptions`/
 /// `TlsConfig` themselves, which really are shared *across* connection
 /// threads.
 enum ReadHalf {
@@ -1054,7 +1086,7 @@ pub fn dispatch<S: ConnectionStore + ?Sized>(store: &S, req: Request) -> Respons
         },
         Request::DescribeSchema => Response::Schema(store.describe()),
         // `Authenticate` is intercepted directly by `handle_connection`,
-        // which has the per-connection state (and `AuthConfig`) this
+        // which has the per-connection state (and `ServeOptions`) this
         // function has no way to reach — a store has no notion of "this
         // connection". Reaching this arm at all means `handle_connection`
         // let an `Authenticate` request fall through, which never happens
@@ -1162,7 +1194,7 @@ fn send_response(writer: &mut BufWriter<WriteHalf>, resp: &Response) -> bool {
 /// # Audit (`AUD-FR-004`–`006`), ADR-0029
 ///
 /// Every decision the gates below take is recorded on
-/// [`AuthConfig::audit`] after the decision and before the response —
+/// [`ServeOptions::audit`] after the decision and before the response —
 /// `Admitted` (after an *eager* TLS handshake, so a refused admission is
 /// `HandshakeFailed` with the TLS error's text; `classed_by_certificate`
 /// records whether `initial_class` came from a matched certificate —
@@ -1212,9 +1244,11 @@ impl Drop for DisconnectAudit<'_> {
 fn handle_connection<S: ConnectionStore + ?Sized>(
     stream: TcpStream,
     store: &S,
-    auth: &AuthConfig,
-    tls: &Option<TlsConfig>,
+    options: &ServeOptions,
 ) {
+    // `SRV-FR-004` (ADR-0032): `tls` was `serve`'s own second parameter;
+    // now it is read off the one consolidated `options` value.
+    let tls = options.tls();
     // This is a synchronous request/response protocol: each side writes a
     // small frame, then blocks reading the other side's small frame back.
     // Left at its default, Nagle's algorithm delays a small write hoping
@@ -1227,7 +1261,7 @@ fn handle_connection<S: ConnectionStore + ?Sized>(
     let _ = stream.set_nodelay(true);
     // `AUD-FR-001`: the one identifying datum an audit event carries.
     let peer = stream.peer_addr().ok();
-    let sink = auth.audit();
+    let sink = options.audit();
 
     let transport = match tls {
         None => audit::Transport::Plain,
@@ -1272,7 +1306,7 @@ fn handle_connection<S: ConnectionStore + ?Sized>(
             // acceptor (no client auth) or a leaf not in the map.
             certificate_class = tls_stream
                 .peer_certificate_der()
-                .and_then(|der| auth.class_for_certificate(der));
+                .and_then(|der| options.class_for_certificate(der));
             let shared = Rc::new(RefCell::new(tls_stream));
             (
                 BufReader::new(ReadHalf::Tls(Rc::clone(&shared))),
@@ -1286,7 +1320,7 @@ fn handle_connection<S: ConnectionStore + ?Sized>(
     // token still replaces it (unchanged below). Otherwise exactly
     // today's rule: unauthenticated if anything is configured, `ReadWrite`
     // if nothing is.
-    let mut authenticated: Option<TokenClass> = match (certificate_class, auth.is_configured()) {
+    let mut authenticated: Option<TokenClass> = match (certificate_class, options.is_configured()) {
         (Some(class), _) => Some(class),
         (None, false) => Some(TokenClass::ReadWrite),
         (None, true) => None,
@@ -1347,7 +1381,7 @@ fn handle_connection<S: ConnectionStore + ?Sized>(
         first_frame = false;
 
         if let Request::Authenticate { token } = &req {
-            let resp = if !auth.is_configured() {
+            let resp = if !options.is_configured() {
                 sink.record(&audit::AuditEvent::now(
                     peer,
                     audit::AuditKind::Authenticated {
@@ -1355,7 +1389,7 @@ fn handle_connection<S: ConnectionStore + ?Sized>(
                     },
                 ));
                 Response::Ok
-            } else if auth.is_throttled(peer_ip) {
+            } else if options.is_throttled(peer_ip) {
                 // `RL-FR-002`: over budget — refused before any
                 // comparison, and it still counts toward the
                 // per-connection lockout below.
@@ -1366,7 +1400,7 @@ fn handle_connection<S: ConnectionStore + ?Sized>(
                 ));
                 err_response(ErrorCode::Unauthenticated)
             } else {
-                match auth.check(token) {
+                match options.check(token) {
                     Some(class) => {
                         authenticated = Some(class);
                         sink.record(&audit::AuditEvent::now(
@@ -1377,7 +1411,7 @@ fn handle_connection<S: ConnectionStore + ?Sized>(
                     }
                     None => {
                         failures += 1;
-                        auth.note_failure(peer_ip);
+                        options.note_failure(peer_ip);
                         sink.record(&audit::AuditEvent::now(
                             peer,
                             audit::AuditKind::AuthenticationFailed,
@@ -1557,7 +1591,7 @@ fn handle_connection<S: ConnectionStore + ?Sized>(
         // `ACC-FR-004`: after the audit log's own recording for this path
         // (if any — the gates above already returned), one access event
         // per dispatched request, before the response is sent.
-        auth.access_log().record(&access::AccessEvent::now(
+        options.access_log().record(&access::AccessEvent::now(
             peer,
             Some(class),
             request_kind,
@@ -1573,34 +1607,36 @@ fn handle_connection<S: ConnectionStore + ?Sized>(
 /// thread against the same shared `store` — the thread-per-connection
 /// model ADR-0010 chose over an async runtime. Every connection thread
 /// takes only `&S`; all coordination is whatever locking `store` already
-/// does internally (see this module's own doc comment). `auth` and `tls`
-/// are each shared (`Arc`) across every connection thread the same way
-/// `store` is — see this module's own `handle_connection` for the gating/
-/// handshake each performs. `tls: None` reproduces plaintext behavior
-/// exactly (`TLS-FR-008`); `tls: Some(..)` requires every connection to
-/// complete a TLS handshake before any request is served. Runs until
-/// `listener` itself errors (e.g. the socket is closed) or forever
-/// otherwise — a real deployment's shutdown/drain story is an explicit
-/// non-goal of the accepted design, not solved here.
+/// does internally (see this module's own doc comment). `options` is
+/// shared (`Arc`) across every connection thread the same way `store`
+/// is — see this module's own `handle_connection` for the gating/
+/// handshake it performs. `options.tls()`'s `None` reproduces plaintext
+/// behavior exactly (`TLS-FR-008`); configured, it requires every
+/// connection to complete a TLS handshake before any request is served.
+/// Runs until `listener` itself errors (e.g. the socket is closed) or
+/// forever otherwise — a real deployment's shutdown/drain story is an
+/// explicit non-goal of the accepted design, not solved here.
+///
+/// `options` consolidates every cross-cutting server concern —
+/// tokens, certificate classes, the audit/access-log sinks, the
+/// rate-limit budget, and (since `ADR-0032`) native TLS — into `serve`'s
+/// one configuration parameter (`SRV-FR-001`/`SRV-FR-004`); before this
+/// it was `ServeOptions` (then named `AuthConfig`) plus a separate
+/// `Option<TlsConfig>` parameter.
 pub fn serve<S: ConnectionStore + 'static>(
     listener: TcpListener,
     store: Arc<S>,
-    auth: AuthConfig,
-    tls: Option<TlsConfig>,
+    options: ServeOptions,
 ) {
-    let auth = Arc::new(auth);
-    let tls = Arc::new(tls);
+    let options = Arc::new(options);
     for incoming in listener.incoming() {
         let stream = match incoming {
             Ok(s) => s,
             Err(_) => continue, // one bad accept doesn't take down the server
         };
         let store = Arc::clone(&store);
-        let auth = Arc::clone(&auth);
-        let tls = Arc::clone(&tls);
-        thread::spawn(move || {
-            handle_connection(stream, store.as_ref(), auth.as_ref(), tls.as_ref())
-        });
+        let options = Arc::clone(&options);
+        thread::spawn(move || handle_connection(stream, store.as_ref(), options.as_ref()));
     }
 }
 
@@ -1610,7 +1646,7 @@ mod tests {
 
     /// `MTLS-FR-004`: `TlsConfig::from_env`'s decision table, driven
     /// through the factored `from_env_values` so no real environment
-    /// variable is read (the constraint `AuthConfig::from_env`'s docs
+    /// variable is read (the constraint `ServeOptions::from_env`'s docs
     /// impose on tests). Chain/key unset → `None`; the pair set → the
     /// PEM path (here an `Io` error, since the files do not exist);
     /// client CA set without the pair → `Some(Err(Io(NotFound)))`, never
@@ -2071,8 +2107,8 @@ mod tests {
             Ok(a) => a,
             Err(e) => panic!("listener address: {e}"),
         };
-        let auth = AuthConfig::new(Some("ro".into()), Some("rw".into()));
-        thread::spawn(move || serve(listener, Arc::new(FixtureStore), auth, None));
+        let auth = ServeOptions::new(Some("ro".into()), Some("rw".into()));
+        thread::spawn(move || serve(listener, Arc::new(FixtureStore), auth));
         let stream = match TcpStream::connect(addr) {
             Ok(s) => s,
             Err(e) => panic!("connect to fixture server: {e}"),
@@ -2242,13 +2278,13 @@ mod tests {
 
     #[test]
     fn auth_config_default_is_unconfigured() {
-        assert!(!AuthConfig::default().is_configured());
-        assert_eq!(AuthConfig::default().check("anything"), None);
+        assert!(!ServeOptions::default().is_configured());
+        assert_eq!(ServeOptions::default().check("anything"), None);
     }
 
     #[test]
     fn auth_config_check_maps_each_token_to_its_own_class() {
-        let auth = AuthConfig::new(Some("ro-secret".into()), Some("rw-secret".into()));
+        let auth = ServeOptions::new(Some("ro-secret".into()), Some("rw-secret".into()));
         assert!(auth.is_configured());
         assert_eq!(auth.check("ro-secret"), Some(TokenClass::ReadOnly));
         assert_eq!(auth.check("rw-secret"), Some(TokenClass::ReadWrite));
@@ -2261,14 +2297,14 @@ mod tests {
 
     #[test]
     fn auth_config_works_with_only_one_class_configured() {
-        let read_only_only = AuthConfig::new(Some("ro-secret".into()), None);
+        let read_only_only = ServeOptions::new(Some("ro-secret".into()), None);
         assert_eq!(
             read_only_only.check("ro-secret"),
             Some(TokenClass::ReadOnly)
         );
         assert_eq!(read_only_only.check("rw-secret"), None);
 
-        let read_write_only = AuthConfig::new(None, Some("rw-secret".into()));
+        let read_write_only = ServeOptions::new(None, Some("rw-secret".into()));
         assert_eq!(
             read_write_only.check("rw-secret"),
             Some(TokenClass::ReadWrite)
@@ -2281,7 +2317,7 @@ mod tests {
     /// substring-safety test above.
     #[test]
     fn class_for_certificate_matches_by_exact_der_bytes_only() {
-        let auth = AuthConfig::default()
+        let auth = ServeOptions::default()
             .with_certificate_class(vec![1, 2, 3], TokenClass::ReadOnly)
             .with_certificate_class(vec![4, 5, 6], TokenClass::ReadWrite);
         assert_eq!(
@@ -2297,13 +2333,13 @@ mod tests {
         assert_eq!(auth.class_for_certificate(&[9, 9, 9]), None);
     }
 
-    /// `CLS-FR-003`: a certificates-only `AuthConfig` (no tokens) is
+    /// `CLS-FR-003`: a certificates-only `ServeOptions` (no tokens) is
     /// `is_configured()` — the safe direction `AUTH-FR-007` requires of a
     /// configured server (`SERVER-MTLS-CLASS-DESIGN.md`'s "Security,
     /// privacy, and compatibility").
     #[test]
     fn is_configured_is_true_with_only_a_certificate_class() {
-        let auth = AuthConfig::default().with_certificate_class(vec![1], TokenClass::ReadOnly);
+        let auth = ServeOptions::default().with_certificate_class(vec![1], TokenClass::ReadOnly);
         assert!(auth.is_configured());
     }
 
@@ -2311,7 +2347,7 @@ mod tests {
     /// leaf's bytes.
     #[test]
     fn auth_config_debug_prints_certificate_counts_not_bytes() {
-        let auth = AuthConfig::default()
+        let auth = ServeOptions::default()
             .with_certificate_class(vec![0xAB, 0xCD], TokenClass::ReadOnly)
             .with_certificate_class(vec![0xEF], TokenClass::ReadWrite)
             .with_certificate_class(vec![0x12], TokenClass::ReadWrite);
@@ -2395,7 +2431,7 @@ mod tests {
     /// configured one at the very first byte must not check measurably
     /// faster than one that differs only at the very last byte — the
     /// classic signature of an early-exit (non-constant-time) comparison.
-    /// Measured directly against `AuthConfig::check` (not over a real TCP
+    /// Measured directly against `ServeOptions::check` (not over a real TCP
     /// round trip, unlike the rest of this crate's server tests): a
     /// network hop's own jitter (microseconds to milliseconds) would
     /// completely swamp the signal this specific claim is about — a
@@ -2410,7 +2446,7 @@ mod tests {
         use std::time::Instant;
 
         let configured = "a".repeat(64);
-        let auth = AuthConfig::new(None, Some(configured.clone()));
+        let auth = ServeOptions::new(None, Some(configured.clone()));
 
         let mut differs_at_start = "b".to_string();
         differs_at_start.push_str(&"a".repeat(63));

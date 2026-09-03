@@ -426,4 +426,7 @@ observable behavior regardless of which reads better.)
   v0.24.0 / FR-034), directly pulling the trigger `ADR-0029` first
   named and `ADR-0030`/`ADR-0031` each restated and deferred. (PR #169.)
 - 2026-09-03: Accepted as proposed. No content change. Implementation
-  follows as `SERVER-001`'s next minor / FR.
+  follows as `SERVER-001`'s next minor / FR. (PR #170.)
+- 2026-09-03: Implemented as `SERVER-001` v0.25.0 / FR-035 (this PR).
+  Every requirement `SRV-FR-001`–`006` delivered exactly as designed;
+  every acceptance criterion 1–5 holds; no deviation.

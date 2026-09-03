@@ -7,7 +7,7 @@
 //! crate doesn't take a new dependency for this instead: standard base64
 //! decoding is a small, fully-specified, deterministic transform with no
 //! invisible-to-testing correctness property (unlike, say, constant-time
-//! comparison — see `AuthConfig::check`'s own comment on why *that*
+//! comparison — see `ServeOptions::check`'s own comment on why *that*
 //! comparison is not hand-rolled), so hand-rolling it here is a
 //! reasonable, well-tested bounded utility.
 
