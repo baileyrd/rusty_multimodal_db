@@ -426,7 +426,10 @@ of this design-only pass.
   unaddressed — a real question for that future revisit, not this one.
   *Resolved: layer — `SERVER-MTLS-DESIGN.md` / `ADR-0023`, implemented
   as `SERVER-001` v0.13.0 / FR-023: the certificate decides admission,
-  this token scheme still decides class, unchanged.*
+  this token scheme still decides class, unchanged.* *Extended by
+  `SERVER-MTLS-CLASS-DESIGN.md` / `ADR-0028` (Proposed): the certificate
+  may also decide class, when the operator pins that certificate to one
+  on `AuthConfig`; a valid token still replaces it.*
 
 ## Change history
 
