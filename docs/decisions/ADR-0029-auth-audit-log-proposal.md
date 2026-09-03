@@ -140,7 +140,7 @@ Proposed: option 1. Concretely, at implementation:
   thirds of the named gap, a policy design that reads this log's
   event kinds.
   *Taken up as `ADR-0030` / `docs/design/SERVER-AUTH-RATE-LIMIT-DESIGN.md`,
-  proposed in this PR: a per-connection lockout on by default and an
+  proposed in PR #161: a per-connection lockout on by default and an
   opt-in per-peer budget, both recorded here as `LockedOut`/`Throttled`;
   it also proposes marking `AuditKind` and `RequestKind`
   `#[non_exhaustive]`, which this decision intended by designing them
