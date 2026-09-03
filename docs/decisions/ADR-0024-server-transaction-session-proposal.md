@@ -187,7 +187,7 @@ Proposed: option 2. Concretely, at implementation:
   plain sessions unchanged — so `SESS-FR-007` and this decision's "no
   read-your-writes" consequence stand for every session that did not
   ask; accepted in PR #153 and implemented as `SERVER-001` v0.18.0 /
-  FR-028 in this PR. No change to this decision.*
+  FR-028 in PR #157. No change to this decision.*
 - Revisit if: stage-time validation becomes wanted — a `ConnectionStore`
   validation hook, additive.
 - Revisit if: a second mutating operation kind appears — `TransactionOp`
