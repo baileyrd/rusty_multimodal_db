@@ -159,3 +159,12 @@ Proposed: option 1. Concretely, at implementation:
   Implemented after `ADR-0027`'s unit and before `ADR-0028`'s
   crate-side unit (which waits upstream), as `SERVER-001`'s next minor
   / FR, per `docs/design/SERVER-AUTH-AUDIT-DESIGN.md`. (PR #153.)
+- 2026-09-03: implemented as `SERVER-001` v0.19.0 (FR-029) in this PR
+  — `src/server/audit.rs` (the event types, `AuditSink`, `NoAudit`,
+  `StderrAudit`, `FileAudit`, the documented line), `AuthConfig::with_audit`
+  / `audit()`, the eager TLS handshake, the records at the existing
+  gates, a drop guard for `Disconnected`, fail-open with one notice,
+  `SERVER_AUDIT_LOG` in `dog_server`. Three unit tests, one binary
+  test, four integration tests; every acceptance criterion 1–7 holds;
+  no deviation. Full sweep green (356 lib tests, 353 + 3; auth suite
+  10/10, TLS suite 13/13).

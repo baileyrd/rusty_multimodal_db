@@ -125,6 +125,7 @@
 //! ADR-0022 said it would (see `handle_connection`'s own "Transaction
 //! sessions" section).
 
+pub mod audit;
 pub mod client;
 pub mod dog;
 #[cfg(feature = "research")]
@@ -323,11 +324,33 @@ pub enum TokenClass {
 ///
 /// Tokens are never logged or echoed back on any path, including error
 /// messages (`AUTH-FR-005`).
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct AuthConfig {
     read_only_token: Option<String>,
     read_write_token: Option<String>,
+    /// `AUD-FR-003` (ADR-0029): where admission, authentication, and
+    /// authorization decisions are recorded; `None` is [`audit::NoAudit`].
+    audit: Option<Arc<dyn audit::AuditSink>>,
 }
+
+impl std::fmt::Debug for AuthConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AuthConfig")
+            .field("read_only_token", &self.read_only_token)
+            .field("read_write_token", &self.read_write_token)
+            .field(
+                "audit",
+                &if self.audit.is_some() {
+                    "configured"
+                } else {
+                    "none"
+                },
+            )
+            .finish()
+    }
+}
+
+static NO_AUDIT: audit::NoAudit = audit::NoAudit;
 
 impl AuthConfig {
     /// Build directly from already-known tokens. Use this from tests and
@@ -338,6 +361,25 @@ impl AuthConfig {
         Self {
             read_only_token,
             read_write_token,
+            audit: None,
+        }
+    }
+
+    /// `AUD-FR-003` (ADR-0029): record every admission, authentication,
+    /// and authorization decision on `sink` — see [`audit`]. Off unless
+    /// called; the sink is shared by every connection thread and is
+    /// called after each decision, before the response, outside every
+    /// lock. A sink that fails never fails a connection (`AUD-FR-006`).
+    pub fn with_audit(mut self, sink: Arc<dyn audit::AuditSink>) -> Self {
+        self.audit = Some(sink);
+        self
+    }
+
+    /// The configured sink, or [`audit::NoAudit`].
+    pub fn audit(&self) -> &dyn audit::AuditSink {
+        match &self.audit {
+            Some(sink) => sink.as_ref(),
+            None => &NO_AUDIT,
         }
     }
 
@@ -351,6 +393,7 @@ impl AuthConfig {
         Self {
             read_only_token: std::env::var("SERVER_AUTH_READ_ONLY_TOKEN").ok(),
             read_write_token: std::env::var("SERVER_AUTH_READ_WRITE_TOKEN").ok(),
+            audit: None,
         }
     }
 
@@ -793,6 +836,17 @@ fn send_response(writer: &mut BufWriter<WriteHalf>, resp: &Response) -> bool {
 /// (compatibility rule 3). Misuse (`NoSession`, `SessionOpen`,
 /// `SessionFull`) is a typed error with the connection open.
 ///
+/// # Audit (`AUD-FR-004`–`006`), ADR-0029
+///
+/// Every decision the gates below take is recorded on
+/// [`AuthConfig::audit`] after the decision and before the response —
+/// `Admitted` (after an *eager* TLS handshake, so a refused admission is
+/// `HandshakeFailed` with the TLS error's text), `Authenticated` /
+/// `AuthenticationFailed`, `Refused` at the unauthenticated and
+/// `ReadOnly` gates, and exactly one `Disconnected` on the way out. No
+/// successful request is recorded; no token, certificate, id, or value
+/// ever is. With the default [`audit::NoAudit`] every call is a no-op.
+///
 /// # Read-your-writes sessions (`RYW-FR-001`–`005`), ADR-0027
 ///
 /// Protocol 5 adds `BeginWith { flags }`: with `SESSION_READ_YOUR_WRITES`
@@ -803,6 +857,22 @@ fn send_response(writer: &mut BufWriter<WriteHalf>, resp: &Response) -> bool {
 /// committed state exactly as before; a connection with no session takes
 /// no new branch. Unknown flag bits are `Malformed`; below version 5 the
 /// request is `Malformed` (rule 3), like `Begin` below 3.
+/// Records `Disconnected` when a connection's `handle_connection` frame
+/// returns by any path (`AUD-FR-004`) — created only after `Admitted`.
+struct DisconnectAudit<'a> {
+    sink: &'a dyn audit::AuditSink,
+    peer: Option<std::net::SocketAddr>,
+}
+
+impl Drop for DisconnectAudit<'_> {
+    fn drop(&mut self) {
+        self.sink.record(&audit::AuditEvent::now(
+            self.peer,
+            audit::AuditKind::Disconnected,
+        ));
+    }
+}
+
 fn handle_connection<S: ConnectionStore + ?Sized>(
     stream: TcpStream,
     store: &S,
@@ -819,7 +889,15 @@ fn handle_connection<S: ConnectionStore + ?Sized>(
     // directly (a concurrent-client integration test went from ~36s to
     // well under a second after this one call).
     let _ = stream.set_nodelay(true);
+    // `AUD-FR-001`: the one identifying datum an audit event carries.
+    let peer = stream.peer_addr().ok();
+    let sink = auth.audit();
 
+    let transport = match tls {
+        None => audit::Transport::Plain,
+        Some(tls) if tls.requires_client_certificate() => audit::Transport::MutualTls,
+        Some(_) => audit::Transport::Tls,
+    };
     let (mut reader, mut writer): (BufReader<ReadHalf>, BufWriter<WriteHalf>) = match tls {
         None => {
             let peer_stream = match stream.try_clone() {
@@ -832,10 +910,23 @@ fn handle_connection<S: ConnectionStore + ?Sized>(
             )
         }
         Some(tls) => {
-            let tls_stream = match tls.acceptor.accept(stream) {
+            let mut tls_stream = match tls.acceptor.accept(stream) {
                 Ok(s) => s,
                 Err(_) => return, // config/setup error building the connection object — drop cleanly, no panic
             };
+            // `AUD-FR-005` (and `CLS-FR-002`): complete the handshake before
+            // the frame loop, so a refused admission has a typed reason to
+            // record. Client-visible behavior is unchanged — the connection
+            // ends with no response either way (`TLS-FR-003`).
+            if let Err(e) = tls_stream.complete_handshake() {
+                sink.record(&audit::AuditEvent::now(
+                    peer,
+                    audit::AuditKind::HandshakeFailed {
+                        reason: e.to_string(),
+                    },
+                ));
+                return;
+            }
             let shared = Rc::new(RefCell::new(tls_stream));
             (
                 BufReader::new(ReadHalf::Tls(Rc::clone(&shared))),
@@ -849,6 +940,16 @@ fn handle_connection<S: ConnectionStore + ?Sized>(
     } else {
         Some(TokenClass::ReadWrite)
     };
+    // `AUD-FR-004`: admitted — and exactly one `Disconnected` when this
+    // function returns by any path.
+    sink.record(&audit::AuditEvent::now(
+        peer,
+        audit::AuditKind::Admitted {
+            transport,
+            initial_class: authenticated,
+        },
+    ));
+    let _disconnect = DisconnectAudit { sink, peer };
 
     // `PROTO-FR-004`: only the very first frame may be a `Hello`. Since
     // protocol 3 the negotiated version is kept too (`SESS-FR-006`): the
@@ -887,14 +988,30 @@ fn handle_connection<S: ConnectionStore + ?Sized>(
 
         if let Request::Authenticate { token } = &req {
             let resp = if !auth.is_configured() {
+                sink.record(&audit::AuditEvent::now(
+                    peer,
+                    audit::AuditKind::Authenticated {
+                        class: TokenClass::ReadWrite,
+                    },
+                ));
                 Response::Ok
             } else {
                 match auth.check(token) {
                     Some(class) => {
                         authenticated = Some(class);
+                        sink.record(&audit::AuditEvent::now(
+                            peer,
+                            audit::AuditKind::Authenticated { class },
+                        ));
                         Response::Ok
                     }
-                    None => err_response(ErrorCode::Unauthenticated),
+                    None => {
+                        sink.record(&audit::AuditEvent::now(
+                            peer,
+                            audit::AuditKind::AuthenticationFailed,
+                        ));
+                        err_response(ErrorCode::Unauthenticated)
+                    }
                 }
             };
             if !send_response(&mut writer, &resp) {
@@ -906,6 +1023,14 @@ fn handle_connection<S: ConnectionStore + ?Sized>(
         let class = match authenticated {
             Some(class) => class,
             None => {
+                sink.record(&audit::AuditEvent::now(
+                    peer,
+                    audit::AuditKind::Refused {
+                        class: None,
+                        request: audit::RequestKind::of(&req),
+                        code: ErrorCode::Unauthenticated,
+                    },
+                ));
                 if !send_response(&mut writer, &err_response(ErrorCode::Unauthenticated)) {
                     return;
                 }
@@ -919,6 +1044,14 @@ fn handle_connection<S: ConnectionStore + ?Sized>(
                 Request::UpdateField { .. } | Request::Transaction { .. } | Request::Commit
             )
         {
+            sink.record(&audit::AuditEvent::now(
+                peer,
+                audit::AuditKind::Refused {
+                    class: Some(class),
+                    request: audit::RequestKind::of(&req),
+                    code: ErrorCode::Unauthorized,
+                },
+            ));
             if !send_response(&mut writer, &err_response(ErrorCode::Unauthorized)) {
                 return;
             }

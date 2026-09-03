@@ -17,12 +17,13 @@
 //! crash-atomic at one `fsync` per batch, shared across concurrent batches
 //! by ADR-0026's group commit) — with none of them set, this
 //! behaves exactly as it did before any of these features existed: no
-//! auth, no encryption, no journal. Do not expose this beyond a
+//! auth, no encryption, no journal, no audit log (`SERVER_AUDIT_LOG`, ADR-0029: `stderr` or a file path). Do not expose this beyond a
 //! trusted, localhost/development network unless both are configured —
 //! see ADR-0010's Consequences. Usage: `dog_server [host:port]` (defaults
 //! to `127.0.0.1:7878`).
 
 use rusty_multimodal_db::record::DogRecord;
+use rusty_multimodal_db::server::audit::{AuditSink, FileAudit, StderrAudit};
 use rusty_multimodal_db::server::dog::DogConnectionStore;
 use rusty_multimodal_db::server::{serve, AuthConfig, TlsConfig};
 use rusty_multimodal_db::ProductionStore;
@@ -67,7 +68,14 @@ fn main() {
 
     let listener = TcpListener::bind(&addr).unwrap_or_else(|e| panic!("binding {addr}: {e}"));
 
-    let auth = AuthConfig::from_env();
+    // `SERVER_AUDIT_LOG` (ADR-0029): `stderr`, or a file path appended to;
+    // unset → no audit. An unopenable path is a startup error.
+    let auth = match audit_sink_from(std::env::var("SERVER_AUDIT_LOG").ok().as_deref()) {
+        Ok(Some(sink)) => AuthConfig::from_env().with_audit(sink),
+        Ok(None) => AuthConfig::from_env(),
+        Err(e) => panic!("SERVER_AUDIT_LOG configured but invalid: {e}"),
+    };
+    let audited = std::env::var_os("SERVER_AUDIT_LOG").is_some();
     let tls = match TlsConfig::from_env() {
         None => None,
         Some(Ok(tls)) => Some(tls),
@@ -76,7 +84,7 @@ fn main() {
         ),
     };
     eprintln!(
-        "dog_server listening on {addr} (auth: {}, TLS: {}, transaction journal: {} — see ADR-0012/ADR-0014/ADR-0023/ADR-0025; do not expose beyond a trusted network unless auth and TLS are both configured)",
+        "dog_server listening on {addr} (auth: {}, TLS: {}, transaction journal: {}, audit log: {} — see ADR-0012/ADR-0014/ADR-0023/ADR-0025/ADR-0029; do not expose beyond a trusted network unless auth and TLS are both configured)",
         if auth.is_configured() { "configured" } else { "NOT configured" },
         match &tls {
             None => "NOT configured",
@@ -84,7 +92,40 @@ fn main() {
             Some(_) => "configured",
         },
         if journaled { "configured" } else { "NOT configured" },
+        if audited { "configured" } else { "NOT configured" },
     );
 
     serve(listener, connection_store, auth, tls);
+}
+
+/// `SERVER_AUDIT_LOG`'s decision table (`AUD-FR-008`), factored so a test
+/// can drive it without touching the process environment: unset → no
+/// sink; `stderr` → [`StderrAudit`]; anything else → a [`FileAudit`] at
+/// that path, an unopenable one an error.
+fn audit_sink_from(value: Option<&str>) -> std::io::Result<Option<Arc<dyn AuditSink>>> {
+    match value {
+        None => Ok(None),
+        Some("stderr") => Ok(Some(Arc::new(StderrAudit::new()))),
+        Some(path) => Ok(Some(Arc::new(FileAudit::open(Path::new(path))?))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn audit_sink_from_follows_the_documented_table() {
+        assert!(audit_sink_from(None).unwrap().is_none());
+        assert!(audit_sink_from(Some("stderr")).unwrap().is_some());
+        let dir = std::env::temp_dir().join(format!("dog_server_audit_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("audit.log");
+        assert!(audit_sink_from(Some(path.to_str().unwrap()))
+            .unwrap()
+            .is_some());
+        assert!(path.exists());
+        let unopenable = dir.join("missing").join("audit.log");
+        assert!(audit_sink_from(Some(unopenable.to_str().unwrap())).is_err());
+    }
 }

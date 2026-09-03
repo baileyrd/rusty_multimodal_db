@@ -22,6 +22,7 @@
 //! ADR-0014 exists to preserve.
 
 use rusty_multimodal_db::record::DogRecord;
+use rusty_multimodal_db::server::audit::{AuditEvent, AuditKind, AuditSink, Transport};
 use rusty_multimodal_db::server::client::{
     ClientError, ClientTlsConfig, ConnectOptions, SchemaDrivenClient,
 };
@@ -606,4 +607,79 @@ fn mtls_pem_files_and_construction_errors() {
         Err(TlsConfigError::Io(_)) => {}
         other => panic!("expected Io for a missing identity file, got {other:?}"),
     }
+}
+
+/// `AUD-FR-001`/`AUD-FR-005` (design criterion 4): with the eager
+/// handshake, a client without a certificate on an mTLS server is a
+/// `HandshakeFailed` with a reason and no `Admitted`; an admitted mTLS
+/// client is `Admitted { MutualTls, .. }`.
+#[test]
+fn handshake_outcomes_are_audited_with_a_reason() {
+    #[derive(Default)]
+    struct Collecting(Mutex<Vec<AuditEvent>>);
+    impl AuditSink for Collecting {
+        fn record(&self, event: &AuditEvent) {
+            self.0.lock().unwrap().push(event.clone());
+        }
+    }
+    let (ca, ca_key) = throwaway_ca();
+    let sink = Arc::new(Collecting::default());
+    let addr = start_server(
+        AuthConfig::default().with_audit(sink.clone()),
+        Some(mtls_server_config(&ca)),
+    );
+
+    // No certificate: refused at the handshake.
+    let mut bare = connect_tls(addr);
+    let _ = write_message(&mut bare, &Request::DescribeSchema);
+    let reply: Result<Response, _> = read_message(&mut bare);
+    assert!(reply.is_err());
+    drop(bare);
+    let failed = loop {
+        let events = sink.0.lock().unwrap().clone();
+        if let Some(e) = events
+            .iter()
+            .find(|e| matches!(e.kind, AuditKind::HandshakeFailed { .. }))
+        {
+            break e.clone();
+        }
+        thread::sleep(std::time::Duration::from_millis(1));
+    };
+    match &failed.kind {
+        AuditKind::HandshakeFailed { reason } => assert!(!reason.is_empty()),
+        other => panic!("{other:?}"),
+    }
+    assert!(failed.peer.is_some());
+    assert!(sink
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|e| !matches!(e.kind, AuditKind::Admitted { .. })));
+
+    // A CA-signed client: admitted as mutual TLS at `ReadWrite` (no tokens).
+    let (chain, key) = client_identity(&ca, &ca_key);
+    let mut client = SchemaDrivenClient::connect_with(
+        addr,
+        ConnectOptions::new().tls(identity_client(chain, key)),
+    )
+    .unwrap();
+    assert!(client.get(Uuid::from_u128(1)).unwrap().is_some());
+    drop(client);
+    for _ in 0..5_000 {
+        if sink.0.lock().unwrap().iter().any(|e| {
+            e.kind
+                == AuditKind::Admitted {
+                    transport: Transport::MutualTls,
+                    initial_class: Some(rusty_multimodal_db::server::TokenClass::ReadWrite),
+                }
+        }) {
+            return;
+        }
+        thread::sleep(std::time::Duration::from_millis(1));
+    }
+    panic!(
+        "no mutual-TLS admission recorded: {:?}",
+        sink.0.lock().unwrap()
+    );
 }

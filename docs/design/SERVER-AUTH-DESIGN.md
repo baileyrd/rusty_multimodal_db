@@ -337,9 +337,10 @@ if any, was closest to matching.
   failures, and any audit log of authentication attempts. A real gap for
   a genuinely adversarial network, not addressed by this proposal.
   *The audit log third taken up as `SERVER-AUTH-AUDIT-DESIGN.md` /
-  `ADR-0029` (Accepted): a decisions-only record on an `AuditSink` hung
-  on `AuthConfig`, off by default. Rate limiting and lockout stay named,
-  now with the record they would be tuned from.*
+  `ADR-0029` (Accepted; implemented as `SERVER-001` v0.19.0 / FR-029):
+  a decisions-only record on an `AuditSink` hung on `AuthConfig`, off
+  by default. Rate limiting and lockout stay named, now with the record
+  they would be tuned from.*
 
 ## Security, privacy, and compatibility
 
