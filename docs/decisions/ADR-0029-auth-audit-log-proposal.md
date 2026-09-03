@@ -147,6 +147,14 @@ Proposed: option 1. Concretely, at implementation:
   to grow with the gates. No change to this decision.*
 - Revisit if: access logging is wanted — a volume and privacy
   decision, a second sink or a second event family.
+  *Taken up as `ADR-0031` / `docs/design/SERVER-ACCESS-LOG-DESIGN.md`,
+  proposed in this PR: a second, independent sink family
+  (`AccessSink`/`AccessEvent`), kind and outcome shape only, so the two
+  switches never couple. No change to this decision.*
+  *Taken up as `ADR-0031` / `docs/design/SERVER-ACCESS-LOG-DESIGN.md`,
+  proposed in this PR: a second, independent sink family
+  (`AccessSink`/`AccessEvent`), kind and outcome shape only, so the two
+  switches never couple. No change to this decision.*
 - Revisit if: a second cross-cutting `serve` option appears —
   `ServeOptions` (option 3) becomes worth its breaking change.
 - Revisit if: `ADR-0028` lands — `Admitted` may gain an explicit

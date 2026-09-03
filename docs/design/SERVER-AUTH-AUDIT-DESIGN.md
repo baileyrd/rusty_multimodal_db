@@ -36,7 +36,9 @@ who was turned away, and what was refused, when.* It is not diagnostic
 logging (`SERVER-001` keeps "structured logging/metrics" out of scope
 and this document does not reopen it), and it is not access logging
 (a line per successful request — a volume and privacy decision this
-crate has not made and this document does not make). It is the record
+crate has not made and this document does not make — *made in
+`SERVER-ACCESS-LOG-DESIGN.md` / `ADR-0031` (Proposed): a second,
+independent sink*). It is the record
 of every decision the server's three gates take:
 
 - **admission** — the TLS handshake, with or without a client
