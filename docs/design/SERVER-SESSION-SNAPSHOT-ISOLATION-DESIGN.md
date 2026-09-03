@@ -456,3 +456,11 @@ fn apply_transaction(
   document proposes. (PR #173.)
 - 2026-09-03: Accepted as proposed. No content change. Implementation
   follows as `SERVER-001`'s next minor / FR.
+- 2026-09-03: Implemented as `SERVER-001` v0.26.0 / FR-036, exactly as
+  proposed — the "Proposed shape" section above is the real code, not
+  approximated. `record_read_set` (per-connection state, `GetById`
+  intercept) and `check_read_set` (each adapter's own helper, mirroring
+  `validate_batch`) are the two small pure functions this design's
+  pseudocode sketched out inline. Every acceptance criterion 1–8 holds;
+  no deviation recorded. See `docs/decisions/ADR-0033-session-snapshot-isolation-proposal.md`'s
+  own "Acceptance and implementation" for the full account.

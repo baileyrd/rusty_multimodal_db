@@ -150,7 +150,8 @@
 use super::framing::{self, FrameError};
 use super::protocol::{
     DomainSchema, ErrorCode, FieldDescriptor, ParentLookup, RecordId, Request, Response, ScanValue,
-    PROTOCOL_VERSION, SESSION_READ_YOUR_WRITES, SESSION_VALIDATE_ON_STAGE,
+    PROTOCOL_VERSION, SESSION_READ_YOUR_WRITES, SESSION_SNAPSHOT_ISOLATION,
+    SESSION_VALIDATE_ON_STAGE,
 };
 use super::{pem, TlsConfigError};
 use std::fmt;
@@ -421,16 +422,19 @@ pub struct Session<'a> {
     open: bool,
     read_your_writes: bool,
     validate_on_stage: bool,
+    snapshot_isolation: bool,
 }
 
 /// How to open a session with [`SchemaDrivenClient::begin_with`]: each
 /// option is a `Request::BeginWith` flag bit and is gated on the protocol
 /// version that introduced it (compatibility rule 4) — `read_your_writes`
-/// on 5 (`FR-028`), `validate_on_stage` on 6 (`FR-030`).
+/// on 5 (`FR-028`), `validate_on_stage` on 6 (`FR-030`),
+/// `snapshot_isolation` on 7 (`ISO-FR-001`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SessionOptions {
     read_your_writes: bool,
     validate_on_stage: bool,
+    snapshot_isolation: bool,
 }
 
 impl SessionOptions {
@@ -451,6 +455,14 @@ impl SessionOptions {
         self
     }
 
+    /// Every `GetById` on this session records the value it returned;
+    /// `commit` fails with `ErrorCode::Conflict` if any of them changed
+    /// under another connection's commit since (`ISO-FR-001`–`003`).
+    pub fn snapshot_isolation(mut self) -> Self {
+        self.snapshot_isolation = true;
+        self
+    }
+
     fn flags(self) -> u32 {
         (if self.read_your_writes {
             SESSION_READ_YOUR_WRITES
@@ -460,12 +472,18 @@ impl SessionOptions {
             SESSION_VALIDATE_ON_STAGE
         } else {
             0
+        }) | (if self.snapshot_isolation {
+            SESSION_SNAPSHOT_ISOLATION
+        } else {
+            0
         })
     }
 
     /// The protocol version the chosen options need.
     fn required_version(self) -> u32 {
-        if self.validate_on_stage {
+        if self.snapshot_isolation {
+            7
+        } else if self.validate_on_stage {
             6
         } else if self.read_your_writes {
             5
@@ -545,6 +563,14 @@ impl Session<'_> {
     /// with the code `commit` would have reported, and stages nothing.
     pub fn validate_on_stage(&self) -> bool {
         self.validate_on_stage
+    }
+
+    /// Whether this session tracks a read set for `commit` to re-check
+    /// (`ISO-FR-001`) — on such a session, [`Session::commit`] can fail
+    /// with `ErrorCode::Conflict` if a tracked `get` changed under
+    /// another connection's commit before this one landed.
+    pub fn snapshot_isolation(&self) -> bool {
+        self.snapshot_isolation
     }
 
     /// Discard every staged write and close the session.
@@ -770,6 +796,7 @@ impl SchemaDrivenClient {
             open: true,
             read_your_writes: false,
             validate_on_stage: false,
+            snapshot_isolation: false,
         })
     }
 
@@ -795,6 +822,7 @@ impl SchemaDrivenClient {
             open: true,
             read_your_writes: options.read_your_writes,
             validate_on_stage: options.validate_on_stage,
+            snapshot_isolation: options.snapshot_isolation,
         })
     }
 
@@ -818,6 +846,7 @@ impl SchemaDrivenClient {
             open: true,
             read_your_writes: true,
             validate_on_stage: false,
+            snapshot_isolation: false,
         })
     }
 

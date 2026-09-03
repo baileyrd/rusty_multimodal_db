@@ -184,4 +184,31 @@ Proposed: option 1. Concretely, at implementation:
   in PR #173.
 - 2026-09-03: accepted as proposed (option (a); (b) and (c) declined).
   Implementation follows as `SERVER-001`'s next minor / FR, per
-  `docs/design/SERVER-SESSION-SNAPSHOT-ISOLATION-DESIGN.md`.
+  `docs/design/SERVER-SESSION-SNAPSHOT-ISOLATION-DESIGN.md`. (PR #174.)
+- 2026-09-03: implemented as `SERVER-001` v0.26.0 / FR-036 (this PR),
+  the owner's "Start Unit 33: implement ADR-0033". Built exactly to the
+  design's "Proposed shape": a third `BeginWith` bit,
+  `SESSION_SNAPSHOT_ISOLATION = 4`, at protocol version 7
+  (`PROTOCOL_VERSION` 6 → 7, `ErrorCode::Conflict` at index 10,
+  downgraded to `Unsupported` below 7). While such a session is open,
+  every `GetById` records the raw, pre-overlay committed value into a
+  per-connection read set (`record_read_set`, keyed by `(id, field)`,
+  the same shape `overlay_staged` is over a record's fields); only a
+  found `GetById` is tracked, and past `MAX_TRACKED_READS = 4096`
+  distinct keys a *new* key is simply not added while an
+  already-tracked one keeps updating. `ConnectionStore::apply_transaction`
+  gains a `read_set` parameter, empty whenever the bit is off; each of
+  `DogConnectionStore`/`OrderConnectionStore`/`EmployeeConnectionStore`
+  re-checks every tracked key inside the exact same
+  `with_exclusive`/`with_journal` section its own write validation and
+  apply already use, refusing the whole commit atomically with
+  `(0, ErrorCode::Conflict)` on any mismatch — verified directly: a
+  batch whose every write is itself valid still refuses whole on a
+  stale read, including one touching a record the batch never writes.
+  Client: `SessionOptions::snapshot_isolation()`/
+  `Session::snapshot_isolation()`, gated at version 7 like the other
+  two options. Nine new tests plus two pre-existing pinned-version-
+  literal fixes; every acceptance criterion 1–8 holds; no deviation. No
+  `Cargo.toml`, store (`src/store/**`), or `serve`-signature change.
+  With this, `SESS-FR-007`'s second half — left standing since
+  `ADR-0027` — is closed.

@@ -12,6 +12,7 @@ use super::protocol::{
 use super::ConnectionStore;
 use crate::concurrency::{ConcurrencyError, ConcurrentStore};
 use crate::production::TransactionalStore;
+use crate::record::DogRecord;
 use crate::store::{DogStore, StoreError};
 use std::path::Path;
 
@@ -134,6 +135,34 @@ where
         }
         Ok(())
     }
+
+    /// `ISO-FR-002`/`ISO-FR-006` (ADR-0033): re-check a snapshot-isolated
+    /// session's tracked reads against current state, using whatever
+    /// `get` the caller already has in scope — `inner` within the
+    /// unjournaled path's exclusive section, a per-call read on the
+    /// journaled path (same "read before the exclusive section, same as
+    /// `validate_batch`" shape). `reads` empty (no snapshot isolation in
+    /// use) always passes. A mismatch — including a tracked key that no
+    /// longer resolves at all, which this crate's own "no runtime
+    /// deletion" invariant means never happens in practice — fails with
+    /// the same sentinel index `0` `ErrorCode::Journal` already uses for
+    /// a batch-wide failure not tied to one `updates` operation.
+    fn check_read_set(
+        reads: &[(RecordId, FieldRef, ScanValue)],
+        get: impl Fn(RecordId) -> Option<DogRecord>,
+    ) -> Result<(), (usize, ErrorCode)> {
+        for (id, field, value) in reads {
+            let current = get(*id).and_then(|record| match *field {
+                FIELD_BREED => Some(ScanValue::Str(record.breed)),
+                FIELD_AGE => Some(ScanValue::U32(record.age)),
+                _ => None,
+            });
+            if current.as_ref() != Some(value) {
+                return Err((0, ErrorCode::Conflict));
+            }
+        }
+        Ok(())
+    }
 }
 
 impl<S: DogStore + ConcurrentStore + TransactionalStore + Send + Sync> ConnectionStore
@@ -247,12 +276,19 @@ where
         }
     }
 
-    fn apply_transaction(&self, updates: &[TransactionOp]) -> Result<(), (usize, ErrorCode)> {
+    fn apply_transaction(
+        &self,
+        updates: &[TransactionOp],
+        read_set: &[(RecordId, FieldRef, ScanValue)],
+    ) -> Result<(), (usize, ErrorCode)> {
         match &self.journal {
-            // The v0.7.0 path, unchanged: validate then apply under one
-            // exclusive section.
+            // The v0.7.0 path, unchanged apart from the read-set check:
+            // validate, re-check reads, then apply, all under one
+            // exclusive section — so the check is atomic with the apply
+            // exactly as `ISO-FR-002` requires.
             None => self.store.with_exclusive(|inner| {
                 Self::validate_batch(updates, |id| DogStore::get(inner, id).is_some())?;
+                Self::check_read_set(read_set, |id| DogStore::get(inner, id))?;
                 Self::apply_batch(inner, updates)
             }),
             // `GRP-FR-001`: validate with per-call reads, then append,
@@ -261,12 +297,18 @@ where
             // a quiescent checkpoint, the store flush. `JRN-FR-002` still
             // holds by step order: durable before the first write; a
             // journal or `fsync` failure is the batch's failure with
-            // nothing applied (`GRP-FR-005`).
+            // nothing applied (`GRP-FR-005`). The read-set check runs
+            // again *inside* the exclusive section, immediately before
+            // `apply_batch`, since only there is it atomic with the
+            // apply — a per-call check before the journal append would
+            // leave a window for another connection's commit to land in
+            // between.
             Some(journal) => {
                 Self::validate_batch(updates, |id| DogStore::get(&self.store, id).is_some())?;
                 journal
                     .commit(updates, |turn| {
                         self.store.with_exclusive(|inner| {
+                            Self::check_read_set(read_set, |id| DogStore::get(inner, id))?;
                             Self::apply_batch(inner, updates)?;
                             Ok(turn.checkpoint_due && inner.checkpoint_flush().is_ok())
                         })
@@ -425,13 +467,15 @@ mod tests {
         )
         .unwrap();
         assert_eq!(std::fs::metadata(&journal).unwrap().len(), header_len);
-        adapter.apply_transaction(&[op(1, 30), op(2, 40)]).unwrap();
+        adapter
+            .apply_transaction(&[op(1, 30), op(2, 40)], &[])
+            .unwrap();
         let after_ok = std::fs::metadata(&journal).unwrap().len();
         assert!(after_ok > header_len);
         assert_eq!(age_of(&adapter, 1), 30);
         // A batch that fails validation journals nothing.
         assert_eq!(
-            adapter.apply_transaction(&[op(1, 31), op(99, 1)]),
+            adapter.apply_transaction(&[op(1, 31), op(99, 1)], &[]),
             Err((1, ErrorCode::RecordNotFound))
         );
         assert_eq!(std::fs::metadata(&journal).unwrap().len(), after_ok);
@@ -521,6 +565,71 @@ mod tests {
         assert_eq!(age_of(&adapter, 1), 3, "validation never writes");
     }
 
+    /// `ISO-FR-002`/`ISO-FR-003`/`ISO-FR-006`: a read set that still
+    /// matches current state commits normally; one that doesn't refuses
+    /// the whole batch with `(0, ErrorCode::Conflict)`, applying nothing
+    /// — even when every write in the batch is itself perfectly valid,
+    /// and even when the stale read is for a record the batch's own
+    /// writes never touch (`ISO-FR-002` is per-connection, not scoped to
+    /// the batch's own ids).
+    #[test]
+    fn apply_transaction_checks_the_read_set_atomically_with_the_write_batch() {
+        let adapter = sample_adapter();
+        // dog 1's age is 3 (`sample_adapter`); this read set matches.
+        assert_eq!(
+            adapter.apply_transaction(
+                &[op(2, 40)],
+                &[(Uuid::from_u128(1), FIELD_AGE, ScanValue::U32(3))],
+            ),
+            Ok(())
+        );
+        assert_eq!(age_of(&adapter, 2), 40);
+
+        // Another connection's plain write changes dog 1's age — the
+        // moral equivalent of a concurrent commit landing after this
+        // session's own `GetById` but before its `Commit`.
+        assert_eq!(
+            adapter.update_field(Uuid::from_u128(1), FIELD_AGE, ScanValue::U32(50)),
+            Ok(true)
+        );
+
+        // A batch that never touches dog 1 at all still refuses, on the
+        // strength of the now-stale tracked read alone.
+        assert_eq!(
+            adapter.apply_transaction(
+                &[op(2, 41)],
+                &[(Uuid::from_u128(1), FIELD_AGE, ScanValue::U32(3))],
+            ),
+            Err((0, ErrorCode::Conflict))
+        );
+        assert_eq!(age_of(&adapter, 2), 40, "the refused batch applied nothing");
+
+        // A batch that *does* write to dog 1 — itself a perfectly valid
+        // write — still refuses on the same stale read.
+        assert_eq!(
+            adapter.apply_transaction(
+                &[op(1, 99)],
+                &[(Uuid::from_u128(1), FIELD_AGE, ScanValue::U32(3))],
+            ),
+            Err((0, ErrorCode::Conflict))
+        );
+        assert_eq!(age_of(&adapter, 1), 50, "the refused batch applied nothing");
+
+        // An up-to-date read set commits normally.
+        assert_eq!(
+            adapter.apply_transaction(
+                &[op(2, 42)],
+                &[(Uuid::from_u128(1), FIELD_AGE, ScanValue::U32(50))],
+            ),
+            Ok(())
+        );
+        assert_eq!(age_of(&adapter, 2), 42);
+
+        // An empty read set (snapshot isolation off) never conflicts.
+        assert_eq!(adapter.apply_transaction(&[op(2, 43)], &[]), Ok(()));
+        assert_eq!(age_of(&adapter, 2), 43);
+    }
+
     /// `GRP-FR-001` (ADR-0026, design criterion 1): the journal's `fsync`
     /// never runs under the store's write lock — while a leader is held
     /// before its sync, another thread's read and single write on the
@@ -556,7 +665,7 @@ mod tests {
             }));
         let leader = {
             let adapter = Arc::clone(&adapter);
-            std::thread::spawn(move || adapter.apply_transaction(&[op(1, 30)]))
+            std::thread::spawn(move || adapter.apply_transaction(&[op(1, 30)], &[]))
         };
         entered_rx.recv().unwrap();
         // The leader is inside its sync step: the store must be free.
@@ -599,7 +708,7 @@ mod tests {
         // put it past `JOURNAL_CHECKPOINT_BYTES`.
         let mut seen = Vec::new();
         for _ in 0..16 {
-            adapter.apply_transaction(&big).unwrap();
+            adapter.apply_transaction(&big, &[]).unwrap();
             seen.push(std::fs::metadata(&journal).unwrap().len());
         }
         let entry = seen[0] - 12;
