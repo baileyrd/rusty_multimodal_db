@@ -1164,11 +1164,14 @@ fn send_response(writer: &mut BufWriter<WriteHalf>, resp: &Response) -> bool {
 /// Every decision the gates below take is recorded on
 /// [`AuthConfig::audit`] after the decision and before the response —
 /// `Admitted` (after an *eager* TLS handshake, so a refused admission is
-/// `HandshakeFailed` with the TLS error's text), `Authenticated` /
-/// `AuthenticationFailed`, `Refused` at the unauthenticated and
-/// `ReadOnly` gates, and exactly one `Disconnected` on the way out. No
-/// successful request is recorded; no token, certificate, id, or value
-/// ever is. With the default [`audit::NoAudit`] every call is a no-op.
+/// `HandshakeFailed` with the TLS error's text; `classed_by_certificate`
+/// records whether `initial_class` came from a matched certificate —
+/// `ADR-0029`'s fourth revisit trigger, taken once `ADR-0028` landed),
+/// `Authenticated` / `AuthenticationFailed`, `Refused` at the
+/// unauthenticated and `ReadOnly` gates, and exactly one `Disconnected`
+/// on the way out. No successful request is recorded; no token,
+/// certificate, id, or value ever is. With the default
+/// [`audit::NoAudit`] every call is a no-op.
 ///
 /// # Stage-time validation (`STV-FR-001`–`003`), `ADR-0024`'s second trigger
 ///
@@ -1295,6 +1298,7 @@ fn handle_connection<S: ConnectionStore + ?Sized>(
         audit::AuditKind::Admitted {
             transport,
             initial_class: authenticated,
+            classed_by_certificate: certificate_class.is_some(),
         },
     ));
     let _disconnect = DisconnectAudit { sink, peer };

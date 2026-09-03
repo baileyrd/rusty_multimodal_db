@@ -672,6 +672,7 @@ fn handshake_outcomes_are_audited_with_a_reason() {
                 == AuditKind::Admitted {
                     transport: Transport::MutualTls,
                     initial_class: Some(rusty_multimodal_db::server::TokenClass::ReadWrite),
+                    classed_by_certificate: false,
                 }
         }) {
             return;
@@ -680,6 +681,77 @@ fn handshake_outcomes_are_audited_with_a_reason() {
     }
     panic!(
         "no mutual-TLS admission recorded: {:?}",
+        sink.0.lock().unwrap()
+    );
+}
+
+/// `ADR-0029`'s fourth revisit trigger, taken once `ADR-0028` landed:
+/// `Admitted.classed_by_certificate` is `true` only for the connection
+/// whose presented leaf matched a configured class, `false` for an
+/// admitted leaf outside the map (unauthenticated here, on a
+/// certificates-only server).
+#[test]
+fn admitted_records_classed_by_certificate_for_a_matched_leaf_only() {
+    #[derive(Default)]
+    struct Collecting(Mutex<Vec<AuditEvent>>);
+    impl AuditSink for Collecting {
+        fn record(&self, event: &AuditEvent) {
+            self.0.lock().unwrap().push(event.clone());
+        }
+    }
+    let (ca, ca_key) = throwaway_ca();
+    let (classed_chain, classed_key) = client_identity(&ca, &ca_key);
+    let (unclassed_chain, unclassed_key) = client_identity(&ca, &ca_key);
+    let sink = Arc::new(Collecting::default());
+    let auth = AuthConfig::default()
+        .with_certificate_class(classed_chain[0].clone(), TokenClass::ReadOnly)
+        .with_audit(sink.clone());
+    let addr = start_server(auth, Some(mtls_server_config(&ca)));
+
+    let mut classed = SchemaDrivenClient::connect_with(
+        addr,
+        ConnectOptions::new().tls(identity_client(classed_chain, classed_key)),
+    )
+    .unwrap();
+    assert_eq!(classed.scan("age").unwrap(), vec![ScanValue::U32(3)]);
+    drop(classed);
+
+    let _ = SchemaDrivenClient::connect_with(
+        addr,
+        ConnectOptions::new().tls(identity_client(unclassed_chain, unclassed_key)),
+    )
+    .map(|_| ());
+
+    for _ in 0..5_000 {
+        let events = sink.0.lock().unwrap();
+        let classed_seen = events.iter().any(|e| {
+            matches!(
+                e.kind,
+                AuditKind::Admitted {
+                    classed_by_certificate: true,
+                    initial_class: Some(TokenClass::ReadOnly),
+                    ..
+                }
+            )
+        });
+        let unclassed_seen = events.iter().any(|e| {
+            matches!(
+                e.kind,
+                AuditKind::Admitted {
+                    classed_by_certificate: false,
+                    initial_class: None,
+                    ..
+                }
+            )
+        });
+        if classed_seen && unclassed_seen {
+            return;
+        }
+        drop(events);
+        thread::sleep(std::time::Duration::from_millis(1));
+    }
+    panic!(
+        "expected one classed and one unclassed admission: {:?}",
         sink.0.lock().unwrap()
     );
 }
