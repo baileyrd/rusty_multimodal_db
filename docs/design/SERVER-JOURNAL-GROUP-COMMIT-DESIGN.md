@@ -534,4 +534,4 @@ already have `self.store.get::<T>()` for their reads.
 - 2026-09-03: Initial proposal, in response to the owner selecting the
   group-commit design round as the first of four next directions
   ("1, 2, 3, 4") after `SERVER-001` v0.16.0. Evidence from a
-  throwaway probe (never committed) recorded above.
+  throwaway probe (never committed) recorded above. (PR #145.)

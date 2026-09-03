@@ -194,7 +194,7 @@ Proposed: option 1. Concretely, at implementation:
   *Fired by `RESULTS.md`'s FR-025 rows (throughput flat at ~3.3k
   batches/s from 1 to 64 connections) and taken up as `ADR-0026` /
   `docs/design/SERVER-JOURNAL-GROUP-COMMIT-DESIGN.md`, proposed in
-  this PR: the `fsync` leaves the exclusive section, one leader syncs
+  PR #145: the `fsync` leaves the exclusive section, one leader syncs
   for everyone, applies stay in journal order. No change to this
   decision; the journal's format and guarantees are unchanged there.*
 - Revisit if: always-on is judged the right default after the bench
