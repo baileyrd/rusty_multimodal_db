@@ -153,7 +153,12 @@ Proposed: option 1. Concretely, at implementation:
   *Taken up as `ADR-0031` / `docs/design/SERVER-ACCESS-LOG-DESIGN.md`,
   proposed in PR #165: a second, independent sink family
   (`AccessSink`/`AccessEvent`), kind and outcome shape only, so the two
-  switches never couple. No change to this decision.*
+  switches never couple. No change to this decision. Implemented as
+  `SERVER-001` v0.23.0 / FR-033 (this PR): `src/server/access.rs`
+  gained `AccessEvent`/`Outcome`/`AccessSink`/`NoAccessLog`/
+  `StderrAccessLog`/`FileAccessLog`, exactly as proposed; the two
+  streams are disjoint by construction and proved so by one
+  integration test running both collecting sinks on the same server.*
 - Revisit if: a second cross-cutting `serve` option appears —
   `ServeOptions` (option 3) becomes worth its breaking change.
 - Revisit if: `ADR-0028` lands — `Admitted` may gain an explicit

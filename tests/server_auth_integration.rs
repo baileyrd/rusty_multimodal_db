@@ -9,6 +9,7 @@
 //! call.
 
 use rusty_multimodal_db::record::DogRecord;
+use rusty_multimodal_db::server::access::{AccessEvent, AccessSink, Outcome};
 use rusty_multimodal_db::server::audit::{
     AuditEvent, AuditKind, AuditSink, FileAudit, RequestKind, Transport,
 };
@@ -721,5 +722,143 @@ fn a_throttled_peer_is_refused_even_with_the_correct_token_and_recovers_after_th
             }
         ),
         Response::Ok
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Access log (`SERVER-001` next minor / FR, ADR-0031,
+// `docs/design/SERVER-ACCESS-LOG-DESIGN.md`)
+// ---------------------------------------------------------------------------
+
+/// A test's own access sink: every event, in order.
+#[derive(Default)]
+struct CollectingAccess(Mutex<Vec<AccessEvent>>);
+
+impl AccessSink for CollectingAccess {
+    fn record(&self, event: &AccessEvent) {
+        self.0.lock().unwrap().push(event.clone());
+    }
+}
+
+impl CollectingAccess {
+    fn wait_until(&self, what: &str, cond: impl Fn(&[AccessEvent]) -> bool) -> Vec<AccessEvent> {
+        for _ in 0..5_000 {
+            let events = self.0.lock().unwrap().clone();
+            if cond(&events) {
+                return events;
+            }
+            thread::sleep(std::time::Duration::from_millis(1));
+        }
+        panic!("timed out waiting for {what}: {:?}", self.0.lock().unwrap());
+    }
+}
+
+/// Acceptance criteria 2/3: with both a collecting access sink and a
+/// collecting audit sink on the same server, an unauthenticated request
+/// and `Authenticate` appear only on the audit stream; every dispatched
+/// request (a read, a write, and one the domain adapter refuses as
+/// `Unsupported`) appears only on the access stream, each with the right
+/// `RequestKind`, `Outcome`, and class — the two streams are disjoint by
+/// construction, not just by convention.
+#[test]
+fn access_log_and_audit_log_streams_stay_disjoint() {
+    let access_sink = Arc::new(CollectingAccess::default());
+    let audit_sink = Arc::new(Collecting::default());
+    let addr = start_server(
+        auth_config()
+            .with_access_log(access_sink.clone())
+            .with_audit(audit_sink.clone()),
+    );
+
+    let mut c = connect(addr);
+    assert_unauthenticated(roundtrip(
+        &mut c,
+        Request::GetById {
+            id: Uuid::from_u128(1),
+        },
+    ));
+    assert_eq!(
+        roundtrip(
+            &mut c,
+            Request::Authenticate {
+                token: "write-token".into()
+            }
+        ),
+        Response::Ok
+    );
+    assert!(matches!(
+        roundtrip(
+            &mut c,
+            Request::GetById {
+                id: Uuid::from_u128(1)
+            }
+        ),
+        Response::Record { .. }
+    ));
+    assert_eq!(
+        roundtrip(
+            &mut c,
+            Request::UpdateField {
+                id: Uuid::from_u128(1),
+                field: FIELD_AGE,
+                value: ScanValue::U32(9),
+            }
+        ),
+        Response::Ok
+    );
+    assert!(matches!(
+        roundtrip(
+            &mut c,
+            Request::FilterEq {
+                field: FIELD_AGE,
+                value: ScanValue::U32(9),
+            }
+        ),
+        Response::Err {
+            code: ErrorCode::Unsupported,
+            ..
+        }
+    ));
+    drop(c);
+
+    let access_events = access_sink.wait_until("three access events", |events| events.len() >= 3);
+    assert_eq!(access_events.len(), 3);
+    assert_eq!(access_events[0].request, RequestKind::GetById);
+    assert_eq!(access_events[0].outcome, Outcome::Ok);
+    assert_eq!(access_events[1].request, RequestKind::UpdateField);
+    assert_eq!(access_events[1].outcome, Outcome::Ok);
+    assert_eq!(access_events[2].request, RequestKind::FilterEq);
+    assert_eq!(
+        access_events[2].outcome,
+        Outcome::Err(ErrorCode::Unsupported)
+    );
+    assert!(access_events
+        .iter()
+        .all(|e| e.class == Some(TokenClass::ReadWrite)));
+
+    let audit_kinds: Vec<AuditKind> = audit_sink
+        .wait_until("the disconnect", |e| {
+            e.iter().any(|e| e.kind == AuditKind::Disconnected)
+        })
+        .into_iter()
+        .map(|e| e.kind)
+        .collect();
+    assert_eq!(
+        audit_kinds,
+        vec![
+            AuditKind::Admitted {
+                transport: Transport::Plain,
+                initial_class: None,
+            },
+            AuditKind::Refused {
+                class: None,
+                request: RequestKind::GetById,
+                code: ErrorCode::Unauthenticated,
+            },
+            AuditKind::Authenticated {
+                class: TokenClass::ReadWrite,
+            },
+            AuditKind::Disconnected,
+        ]
     );
 }

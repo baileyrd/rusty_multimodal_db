@@ -348,3 +348,8 @@ next to `error_message` — `Response::Err{code,..}`/`TransactionFailed{code,..}
   ("1, 2, 3, 4"), after the rusty_tls accessor (upstream, PR opened by
   a child session), rate limiting and lockout (Proposed), and
   stage-time validation (implemented). (PR #165.)
+- 2026-09-03: Accepted as proposed; implemented as `SERVER-001`
+  v0.23.0 / FR-033 (this PR), the owner's "Start Unit 28" immediately
+  after Unit 27 (`ADR-0030`) landed on the same still-open PR. Every
+  requirement `ACC-FR-001`–`008` delivered exactly as designed; every
+  acceptance criterion 1–5 holds; no deviation.

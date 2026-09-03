@@ -125,6 +125,7 @@
 //! ADR-0022 said it would (see `handle_connection`'s own "Transaction
 //! sessions" section).
 
+pub mod access;
 pub mod audit;
 pub mod client;
 pub mod dog;
@@ -317,6 +318,28 @@ fn err_response(code: ErrorCode) -> Response {
     }
 }
 
+/// `ACC-FR-001`: a dispatched request's outcome *shape*, for the access
+/// log — exhaustive over every `Response` variant, never its content.
+/// `NotFound`/`NoParent` are `Ok` (a normal outcome, per this crate's own
+/// convention); `Err`/`TransactionFailed` are `Err(code)`, the code alone.
+fn outcome_of(resp: &Response) -> access::Outcome {
+    match resp {
+        Response::Err { code, .. } | Response::TransactionFailed { code, .. } => {
+            access::Outcome::Err(*code)
+        }
+        Response::Record { .. }
+        | Response::RecordList { .. }
+        | Response::ScanValues { .. }
+        | Response::Id { .. }
+        | Response::Schema(_)
+        | Response::NotFound
+        | Response::NoParent
+        | Response::Ok
+        | Response::Hello { .. }
+        | Response::Staged { .. } => access::Outcome::Ok,
+    }
+}
+
 /// The two static permission classes a configured token can grant — see
 /// `docs/design/SERVER-AUTH-DESIGN.md`, ADR-0012. Deliberately coarse:
 /// `ReadOnly` is blocked only from [`Request::UpdateField`] and
@@ -352,6 +375,9 @@ pub struct AuthConfig {
     /// `Authenticate` budget; `None` is no budget. Shared across every
     /// connection thread through the `Arc`, same lifecycle as `audit`.
     rate_limit: Option<Arc<FailureTable>>,
+    /// `ACC-FR-003` (ADR-0031): where per-request access events are
+    /// recorded, independent of `audit`; `None` is [`access::NoAccessLog`].
+    access_log: Option<Arc<dyn access::AccessSink>>,
 }
 
 impl std::fmt::Debug for AuthConfig {
@@ -378,11 +404,20 @@ impl std::fmt::Debug for AuthConfig {
             )
             // `RL-FR-002`: the budget's numbers, never the tracked peers.
             .field("rate_limit", &self.rate_limit())
+            .field(
+                "access_log",
+                &if self.access_log.is_some() {
+                    "configured"
+                } else {
+                    "none"
+                },
+            )
             .finish()
     }
 }
 
 static NO_AUDIT: audit::NoAudit = audit::NoAudit;
+static NO_ACCESS_LOG: access::NoAccessLog = access::NoAccessLog;
 
 impl AuthConfig {
     /// Build directly from already-known tokens. Use this from tests and
@@ -396,6 +431,7 @@ impl AuthConfig {
             audit: None,
             certificate_classes: Vec::new(),
             rate_limit: None,
+            access_log: None,
         }
     }
 
@@ -469,6 +505,7 @@ impl AuthConfig {
             audit: None,
             certificate_classes: Vec::new(),
             rate_limit: None,
+            access_log: None,
         }
     }
 
@@ -542,6 +579,24 @@ impl AuthConfig {
         match (&self.rate_limit, peer) {
             (Some(table), Some(peer)) => table.note_failure(peer),
             _ => false,
+        }
+    }
+
+    /// `ACC-FR-003` (ADR-0031): record one [`access::AccessEvent`] per
+    /// dispatched request on `sink` — see [`access`]. Off unless called,
+    /// independent of `with_audit`: an operator's choice to turn on one
+    /// never implies the other's cost. Called after the response is
+    /// decided, outside every lock, in `handle_connection`.
+    pub fn with_access_log(mut self, sink: Arc<dyn access::AccessSink>) -> Self {
+        self.access_log = Some(sink);
+        self
+    }
+
+    /// The configured sink, or [`access::NoAccessLog`].
+    pub fn access_log(&self) -> &dyn access::AccessSink {
+        match &self.access_log {
+            Some(sink) => sink.as_ref(),
+            None => &NO_ACCESS_LOG,
         }
     }
 }
@@ -1380,6 +1435,13 @@ fn handle_connection<S: ConnectionStore + ?Sized>(
             continue;
         }
 
+        // `ACC-FR-004`: everything from here on is a dispatched request —
+        // past `Hello`/`Authenticate` (handled above) and the
+        // unauthenticated/`ReadOnly` gates (also above, each its own
+        // `continue`) — so `request_kind` is captured now, before the
+        // match below consumes `req`.
+        let request_kind = audit::RequestKind::of(&req);
+
         // `SESS-FR-002`/`SESS-FR-004`/`SESS-FR-006`: the session intercepts.
         let resp = match req {
             Request::Begin | Request::Commit | Request::Rollback if negotiated < 3 => {
@@ -1488,6 +1550,15 @@ fn handle_connection<S: ConnectionStore + ?Sized>(
             other => dispatch(store, other),
         };
         let resp = downgrade_for_version(resp, negotiated);
+        // `ACC-FR-004`: after the audit log's own recording for this path
+        // (if any — the gates above already returned), one access event
+        // per dispatched request, before the response is sent.
+        auth.access_log().record(&access::AccessEvent::now(
+            peer,
+            Some(class),
+            request_kind,
+            outcome_of(&resp),
+        ));
         if !send_response(&mut writer, &resp) {
             return;
         }
