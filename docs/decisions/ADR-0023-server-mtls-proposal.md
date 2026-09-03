@@ -176,12 +176,21 @@ Proposed: option 1. Concretely, at implementation:
 - Revisit if: class-from-certificate becomes wanted — first an upstream
   `rusty_tls` peer-certificate accessor, then an X.509 reading decision
   in this crate; this decision's admission gate stays as the base.
+  *Taken up as `ADR-0028` / `docs/design/SERVER-MTLS-CLASS-DESIGN.md`,
+  proposed in this PR: the accessor spelled out and verified by a local
+  patch probe; the X.509 decision answered by exact-DER pinning on
+  `AuthConfig` — no parser. Admission stays as this decision made it.*
 - Revisit if: revocation without a restart becomes a real operational
   need — an upstream `rusty_tls` change to expose a CRL on the server's
   client verifier comes first.
 - Revisit if: `rusty_tls` gains an eager-handshake or typed-handshake-
   error surface — a rejected identity could then be `ClientError::Tls`
   rather than `Frame(Io(..))`.
+  *Checked in `ADR-0028`'s probe: the pinned `rusty_tls` already has
+  `complete_handshake` on both streams, but under TLS 1.3 the server's
+  rejection arrives after the client's `Finished`, so an eager client
+  handshake returns `Ok` and the error still surfaces on the first read.
+  Trigger stays armed; the server side does get a typed reason.*
 
 ## Acceptance and implementation
 

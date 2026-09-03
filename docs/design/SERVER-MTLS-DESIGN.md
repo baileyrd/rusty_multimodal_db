@@ -436,7 +436,11 @@ error it already handles. Its module doc gains the third variable.
   likely the implementer's own) and how this crate reads a subject or
   SAN without adopting an X.509 parser it does not otherwise need.
   Neither is decided here; option 1 is designed so that step is purely
-  additive.
+  additive. *Both decided in `SERVER-MTLS-CLASS-DESIGN.md` / `ADR-0028`
+  (Proposed): the accessor is `TlsServerStream::peer_certificate_der`
+  (patch verbatim there, verified locally), and this crate reads no
+  subject or SAN at all — it pins the leaf's exact DER bytes to a class
+  on `AuthConfig`.*
 - **Revocation** without a restart (a CRL on the server's client
   verifier). `rustls` supports it; `rusty_tls` exposes it only
   client-side today. An upstream question first.
