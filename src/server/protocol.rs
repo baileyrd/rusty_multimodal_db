@@ -62,6 +62,7 @@
 //! | 5 | `SERVER-001` v0.18.0 | + `Request::BeginWith { flags }` (14) — a session opened with options; [`SESSION_READ_YOUR_WRITES`] makes the connection's own `GetById` see its staged writes (`RYW-FR-001`/`002`). `Malformed` below 5 (rule 3); sent only after negotiating ≥ 5 (rule 4). No new response shape or error code. ADR-0027 |
 //! | 6 | `SERVER-001` v0.20.0 | No new variant: `BeginWith` learns a flag bit, [`SESSION_VALIDATE_ON_STAGE`] — every `UpdateField` staged in such a session is validated when staged, refused with the code `Commit` would have given, nothing staged (`STV-FR-001`/`002`). A flag bit is introduced at a version exactly as a variant is: unknown (`Malformed`) below 6 (rule 3), sent only after negotiating ≥ 6 (rule 4). `ADR-0024`'s second trigger |
 //! | 7 | `SERVER-001` v0.26.0 | + `ErrorCode::Conflict` (10) — a snapshot-isolated session's read set was invalidated by a commit from another connection before its own `Commit` landed; carried by `Response::TransactionFailed { index: 0, .. }`, the same sentinel-index shape `ErrorCode::Journal` established, and downgraded to `Unsupported` on a connection negotiated below 7 (rule 3). `BeginWith` learns a third flag bit, [`SESSION_SNAPSHOT_ISOLATION`] — every session `GetById` records the committed value it returned into a read set re-checked atomically at `Commit` (`ISO-FR-001`–`003`). Unknown below 7 (rule 3), sent only after negotiating ≥ 7 (rule 4). ADR-0033 |
+//! | 8 | `SERVER-001` v0.27.0 | + [`Request::Query`] (15) and [`Response::Rows`] (12) — a read-only `SELECT`-shaped query (`Selection`/`Predicate`/`CompareOp`), parsed client-side from real SQL text and compiled to a new unconditional full-scan-then-filter, never an index — see `src/server/sql.rs`/[`super::client::SchemaDrivenClient::query`]. `Malformed` below 8 is not reachable (the client never sends one below 8, `SQL-FR-010`); no new `ErrorCode` — `UnknownField`/`Malformed` cover every rejection, reused. Not overlaid by a read-your-writes session and never tracked into a snapshot-isolated session's read set — the same "only `GetById`" line `RYW-FR`/`ISO-FR-002` already draw (`SQL-FR-009`). ADR-0034 |
 //!
 //! ## Compatibility rules (`PROTO-FR-005`)
 //!
@@ -96,7 +97,7 @@ use uuid::Uuid;
 /// versions" table. Bumped by exactly one in any change that appends a
 /// variant (rule 2). Version 1 is retroactively the `SERVER-001` v0.9.1
 /// shape: what a client that never sends [`Request::Hello`] speaks.
-pub const PROTOCOL_VERSION: u32 = 7;
+pub const PROTOCOL_VERSION: u32 = 8;
 
 /// `Request::BeginWith` flag bit 0 (protocol 5, `RYW-FR-001`, ADR-0027):
 /// the session's own point reads (`GetById`) see its staged writes —
@@ -167,6 +168,55 @@ pub enum ScanValue {
 pub struct TransactionOp {
     pub id: RecordId,
     pub field: FieldRef,
+    pub value: ScanValue,
+}
+
+/// [`Request::Query`]'s column list — `All` is SQL's bare `*`, `Fields`
+/// a specific, ordered subset. Protocol 8, `SQL-FR-003`, ADR-0034. See
+/// `docs/design/SERVER-SQL-SELECT-DESIGN.md`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum Selection {
+    All,
+    Fields(Vec<FieldRef>),
+}
+
+/// A [`Request::Query`] predicate's comparator. `Eq`/`Ne` are valid
+/// against every [`ScanValue`] kind; `Lt`/`Le`/`Gt`/`Ge` are valid only
+/// against `U32`/`I64` — a `Str`/`Bool` field paired with one of these is
+/// `ErrorCode::Malformed`, the same code a kind-mismatched literal
+/// already uses (`SQL-FR-007`). Protocol 8, ADR-0034.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CompareOp {
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+}
+
+impl CompareOp {
+    /// Whether this comparator only makes sense against an orderable
+    /// value kind (`U32`/`I64`) — `Str`/`Bool` paired with one of these
+    /// is `ErrorCode::Malformed` server-side (`SQL-FR-007`) and the
+    /// identical, shared rule a client-side query resolution rejects
+    /// before any frame is sent (`SQL-FR-010`).
+    pub fn is_ordering(self) -> bool {
+        matches!(
+            self,
+            CompareOp::Lt | CompareOp::Le | CompareOp::Gt | CompareOp::Ge
+        )
+    }
+}
+
+/// One `WHERE`-clause condition within a [`Request::Query`]. Every
+/// `Predicate` in a query's `filter` is `AND`-ed together — there is no
+/// `OR`, no parentheses (`SQL-FR-001`'s own non-goal). Protocol 8,
+/// ADR-0034.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Predicate {
+    pub field: FieldRef,
+    pub op: CompareOp,
     pub value: ScanValue,
 }
 
@@ -397,6 +447,30 @@ pub enum Request {
     BeginWith {
         flags: u32,
     },
+    /// Protocol 8 (`SQL-FR-003`, ADR-0034,
+    /// `docs/design/SERVER-SQL-SELECT-DESIGN.md`): a read-only,
+    /// `SELECT`-shaped query — the parsed, already-typed result of a real
+    /// SQL string parsed client-side by `src/server/sql.rs`, never raw text on
+    /// the wire. `select` names which fields come back (`Selection::All`
+    /// for every described field); `filter` is an `AND`-only list of
+    /// [`Predicate`]s, validated against this domain's schema before any
+    /// scan runs (`ErrorCode::UnknownField`/`Malformed`, no new code);
+    /// `limit` truncates the row count, nothing else. Unconditionally a
+    /// full scan (`ConnectionStore::scan_all`) — no index is ever
+    /// consulted, even for a field `FilterEq`/`GetById` could answer more
+    /// cheaply (`SQL-FR-004`). Read-only, gated exactly like
+    /// `GetById`/`FilterEq`/`ScanField`: authentication only, no
+    /// `TokenClass::ReadWrite` requirement. Never overlaid by a
+    /// read-your-writes session and never tracked into a
+    /// snapshot-isolation read set — always committed state
+    /// (`SQL-FR-009`). `Malformed` on a connection negotiated below 8;
+    /// [`super::client::SchemaDrivenClient`] checks this locally and
+    /// sends no frame below it (`SQL-FR-010`).
+    Query {
+        select: Selection,
+        filter: Vec<Predicate>,
+        limit: Option<usize>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -445,6 +519,15 @@ pub enum Response {
     /// Nothing has been applied yet (`SESS-FR-002`).
     Staged {
         index: u32,
+    },
+    /// Protocol 8. Answers [`Request::Query`]: every matching record's id
+    /// alongside its selected fields, in whatever unspecified order
+    /// `ConnectionStore::scan_all` enumerates them in — the same
+    /// "unspecified order" convention `ScanValues` already carries for a
+    /// full-column read (`SQL-FR-006`). `limit` truncates this list, not
+    /// a meaningful top-N (no `ORDER BY`).
+    Rows {
+        rows: Vec<(RecordId, Vec<(FieldRef, ScanValue)>)>,
     },
 }
 
@@ -613,6 +696,34 @@ mod tests {
             },
             &[0x0e, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x00],
         );
+        // Protocol 8 (`SQL-FR-003`, ADR-0034): `Query` at 15 — the first
+        // `Option` field on this wire; bincode encodes it as one byte
+        // (`0x00`/`0x01`), not the four-byte variant index every other
+        // enum here uses, confirmed empirically rather than assumed.
+        assert_golden(
+            "Query",
+            &Request::Query {
+                select: Selection::Fields(vec![1]),
+                filter: vec![Predicate {
+                    field: 1,
+                    op: CompareOp::Gt,
+                    value: ScanValue::U32(3),
+                }],
+                limit: Some(10),
+            },
+            &bytes(&[
+                &[0x0f, 0x00, 0x00, 0x00], // Query
+                &[0x01, 0x00, 0x00, 0x00], // Selection::Fields
+                &LEN1,
+                &[0x01, 0x00],                                     // field 1
+                &LEN1,                                             // filter: one predicate
+                &[0x01, 0x00],                                     // predicate.field
+                &[0x04, 0x00, 0x00, 0x00],                         // CompareOp::Gt
+                &[0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00], // ScanValue::U32(3)
+                &[0x01],                                           // limit: Some
+                &[0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], // 10usize
+            ]),
+        );
     }
 
     /// `BINENC-FR-004`: every `Response` variant's wire bytes, pinned —
@@ -741,6 +852,21 @@ mod tests {
             &Response::Staged { index: 2 },
             &[0x0b, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00],
         );
+        // Protocol 8 (`SQL-FR-003`, ADR-0034): `Rows` at 12.
+        assert_golden_eq(
+            "Rows",
+            &Response::Rows {
+                rows: vec![(id, vec![(1, ScanValue::U32(3))])],
+            },
+            &bytes(&[
+                &[0x0c, 0x00, 0x00, 0x00], // Rows
+                &LEN1,                     // rows: one (id, fields) pair
+                &ID1,
+                &LEN1, // fields: one (tag, value) pair
+                &[0x01, 0x00],
+                &[0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00], // ScanValue::U32(3)
+            ]),
+        );
         for (code, index) in [
             (ErrorCode::NoSession, 0x06u8),
             (ErrorCode::SessionOpen, 0x07),
@@ -767,14 +893,15 @@ mod tests {
     }
 
     /// `PROTO-FR-001`/`PROTO-FR-005` rule 2: the constant matches the
-    /// module docs' table — version 7 is the one that added
-    /// `ErrorCode::Conflict` and `SESSION_SNAPSHOT_ISOLATION` (6 added
-    /// `SESSION_VALIDATE_ON_STAGE`, 4 `ErrorCode::Journal`, 3 the session
-    /// variants, 2 `Hello`). A change that appends a variant bumps this
-    /// by exactly one and extends the table; this test is the reminder.
+    /// module docs' table — version 8 is the one that added
+    /// `Request::Query`/`Response::Rows` (7 added `ErrorCode::Conflict`
+    /// and `SESSION_SNAPSHOT_ISOLATION`, 6 `SESSION_VALIDATE_ON_STAGE`, 4
+    /// `ErrorCode::Journal`, 3 the session variants, 2 `Hello`). A change
+    /// that appends a variant bumps this by exactly one and extends the
+    /// table; this test is the reminder.
     #[test]
     fn protocol_version_is_the_one_the_table_names() {
-        assert_eq!(PROTOCOL_VERSION, 7);
+        assert_eq!(PROTOCOL_VERSION, 8);
     }
 
     /// `SESS-FR-001`: the session shapes round-trip through the codec like

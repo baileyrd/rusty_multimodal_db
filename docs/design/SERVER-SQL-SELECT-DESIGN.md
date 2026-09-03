@@ -517,3 +517,13 @@ impl SchemaDrivenClient {
   (PR #176.)
 - 2026-09-03: Accepted as proposed. No content change. Implementation
   follows as `SERVER-001`'s next minor / FR.
+- 2026-09-03: Implemented as `SERVER-001` v0.27.0 / FR-037, no deviation
+  from this document's "Proposed shape" — `Request::Query`/`Response::Rows`
+  at protocol version 8, `ConnectionStore::scan_all` backed by the new
+  `AllIds`/`AllIds<R>` trait (forwarded through `Reversed`/`Symmetric` and,
+  discovered mid-implementation, `MmapScanned` too — `OrderProductionStack`
+  wraps a third composition layer this round's earlier reading had missed),
+  the centralized `validate_query`/`evaluate_query` pair, and a client-side
+  tokenizer/parser (`src/server/sql.rs`) reached through
+  `SchemaDrivenClient::query`/`Session::query`. Every acceptance criterion
+  1–8 holds. (This PR.)

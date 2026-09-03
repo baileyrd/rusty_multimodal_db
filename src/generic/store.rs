@@ -16,7 +16,9 @@
 //! in. Every wrapper below forwards it, same as every other capability.
 
 use super::edge_blob::{self, EdgeBlob};
-use super::query::{Children, FilterEq, GetById, Neighbors, Parent, ScanField, UpdateField};
+use super::query::{
+    AllIds, Children, FilterEq, GetById, Neighbors, Parent, ScanField, UpdateField,
+};
 use super::traits::{ChildOf, IndexedField, Record, ScannableField, SchemaTag, SymmetricRelation};
 use super::NotFound;
 use crate::durability::DurabilityError;
@@ -552,6 +554,19 @@ where
     }
 }
 
+// Forwarding impl: `Symmetric<S, ..>` re-exposing `AllIds` (`SQL-FR-005`,
+// ADR-0034) — the identical shape every other capability is forwarded
+// through this layer in.
+impl<S, R, Marker> AllIds<R> for Symmetric<S, R, Marker>
+where
+    R: SymmetricRelation<Marker>,
+    S: AllIds<R>,
+{
+    fn all_ids(&self) -> Vec<R::Id> {
+        self.inner.all_ids()
+    }
+}
+
 impl<S, R, Marker> Flush for Symmetric<S, R, Marker>
 where
     R: SymmetricRelation<Marker>,
@@ -685,6 +700,20 @@ where
 {
     fn get(&self, id: C::Id) -> Option<C> {
         self.inner.get(id)
+    }
+}
+
+// Forwarding impl: `Reversed<S, ..>` re-exposing `AllIds` on the child
+// record type `C` (`SQL-FR-005`, ADR-0034) — the same "for `C`, not `P`"
+// shape `GetById`/`FilterEq`/`ScanField`/`UpdateField` above already take.
+impl<S, P, C, Marker> AllIds<C> for Reversed<S, P, C, Marker>
+where
+    P: Record,
+    C: ChildOf<Marker, ParentId = P::Id>,
+    S: AllIds<C>,
+{
+    fn all_ids(&self) -> Vec<C::Id> {
+        self.inner.all_ids()
     }
 }
 

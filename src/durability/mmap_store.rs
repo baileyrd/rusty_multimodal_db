@@ -322,6 +322,19 @@ impl MmapAgeStore {
         Self::record_count_for(self.mmap.len())
     }
 
+    /// Every id this store currently holds, unspecified order — `records`
+    /// is already the logical, up-to-date record set regardless of
+    /// gapless/non-gapless mmap layout (the same source `get`/`same_breed`/
+    /// `neighbors` already read). The one primitive `SERVER-001`'s
+    /// `Request::Query` needs and no `DogStore` backend exposes today
+    /// (`SQL-FR-005`, ADR-0034) — a `pub(crate)` addition here rather than
+    /// a new `DogStore` method, so the four `research`-gated backends
+    /// (never wrapped by a `ConnectionStore` adapter) stay untouched. See
+    /// `docs/design/SERVER-SQL-SELECT-DESIGN.md`.
+    pub(crate) fn ids(&self) -> Vec<Uuid> {
+        self.records.keys().copied().collect()
+    }
+
     /// One bounds check on a 4-byte slice, not four separate bounds checks
     /// on individual byte indices — see `scan_ages`'s own doc comment for
     /// why this matters far more there than it does for this single-position

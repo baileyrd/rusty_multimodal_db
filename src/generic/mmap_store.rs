@@ -416,7 +416,7 @@
 //! fails now.
 
 use super::mmap_field::MmapFieldValue;
-use super::query::{FilterEq, GetById, ScanField, UpdateField};
+use super::query::{AllIds, FilterEq, GetById, ScanField, UpdateField};
 use super::record_blob::{self, blob_path, GenericRecordBlob};
 use super::slot_file::SlotFile;
 use super::store::Flush;
@@ -746,6 +746,20 @@ where
         let position = *self.position_index.get(&id)?;
         record.set_scannable_value(self.file.read_value(position));
         Some(record)
+    }
+}
+
+impl<R, IndexMarker, ScanMarker> AllIds<R> for GenericMmapStore<R, IndexMarker, ScanMarker>
+where
+    R: IndexedField<IndexMarker> + ScannableField<ScanMarker>,
+    R::Id: MmapFieldValue,
+    R::ScanValue: MmapFieldValue,
+{
+    /// `records` is the logical, up-to-date record set regardless of the
+    /// underlying slot file's gapless/non-gapless layout — the same
+    /// source `get`'s own lookup already reads.
+    fn all_ids(&self) -> Vec<R::Id> {
+        self.records.keys().copied().collect()
     }
 }
 

@@ -158,6 +158,16 @@ impl ConnectionStore for EmployeeConnectionStore {
         })
     }
 
+    /// `SQL-FR-004`/`SQL-FR-005` (ADR-0034): every id from `all_ids`,
+    /// each mapped through this adapter's own `get`.
+    fn scan_all(&self) -> Vec<(RecordId, Vec<(FieldRef, ScanValue)>)> {
+        self.store
+            .all_ids::<Employee>()
+            .into_iter()
+            .filter_map(|id| self.get(id).map(|fields| (id, fields)))
+            .collect()
+    }
+
     fn filter_eq(&self, field: FieldRef, value: &ScanValue) -> Result<Vec<RecordId>, ErrorCode> {
         match (field, value) {
             (FIELD_DEPARTMENT, ScanValue::U32(raw)) => match department_from_u32(*raw) {

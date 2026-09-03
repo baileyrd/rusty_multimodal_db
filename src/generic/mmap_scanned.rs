@@ -84,7 +84,7 @@
 //! territory (`ADR-0013`), not this layer's.
 
 use super::mmap_field::MmapFieldValue;
-use super::query::{Children, FilterEq, GetById, Neighbors, ScanField, UpdateField};
+use super::query::{AllIds, Children, FilterEq, GetById, Neighbors, ScanField, UpdateField};
 use super::slot_file::SlotFile;
 use super::store::Flush;
 use super::traits::{ChildOf, IndexedField, Record, ScannableField, SchemaTag, SymmetricRelation};
@@ -295,6 +295,21 @@ where
             record.set_scannable_value(self.file.read_value(position));
         }
         Some(record)
+    }
+}
+
+// Forwarding impl: `MmapScanned<S, ..>` re-exposing `AllIds` (`SQL-FR-005`,
+// ADR-0034) — this layer adds one more durable field, never a new or
+// removed record, so the inner store's own id set is unchanged.
+impl<S, R, Marker> AllIds<R> for MmapScanned<S, R, Marker>
+where
+    R: ScannableField<Marker>,
+    R::Id: MmapFieldValue,
+    R::ScanValue: MmapFieldValue,
+    S: AllIds<R>,
+{
+    fn all_ids(&self) -> Vec<R::Id> {
+        self.inner.all_ids()
     }
 }
 

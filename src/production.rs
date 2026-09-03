@@ -345,6 +345,25 @@ impl TransactionalStore for ProductionStore {
     }
 }
 
+/// `server::dog::DogConnectionStore::scan_all`'s own primitive
+/// (`SQL-FR-005`, ADR-0034,
+/// `docs/design/SERVER-SQL-SELECT-DESIGN.md`) — a small, separate trait
+/// in this same shape as [`TransactionalStore`] above, for the identical
+/// reason: a server-facing-only capability, not part of the `DogStore`
+/// trait the four `research`-gated backends also implement, and (like
+/// `TransactionalStore`) never needed by them since none is ever wrapped
+/// by a `ConnectionStore` adapter.
+pub trait AllIds {
+    /// Every id this store currently holds, unspecified order.
+    fn all_ids(&self) -> Vec<Uuid>;
+}
+
+impl AllIds for ProductionStore {
+    fn all_ids(&self) -> Vec<Uuid> {
+        self.inner.read().expect(LOCK_POISONED).ids()
+    }
+}
+
 impl DogStore for ProductionStore {
     fn get(&self, id: Uuid) -> Option<DogRecord> {
         self.inner.read().expect(LOCK_POISONED).get(id)
