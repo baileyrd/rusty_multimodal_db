@@ -240,8 +240,8 @@ Accepted: option 3. Concretely, at implementation:
   needs a `[[test]]` `required-features = ["server", "research"]`
   registration, as every other server suite has — one line, no
   dependency. Full sweep green (337 lib tests, 333 + 4).
-- 2026-09-03: clarification at `SERVER-001` v0.20.0 / FR-030 (this
-  PR): rules 2–4 apply to a new flag bit inside an existing variant as
+- 2026-09-03: clarification at `SERVER-001` v0.20.0 / FR-030 (PR
+  #163): rules 2–4 apply to a new flag bit inside an existing variant as
   they apply to a variant — `PROTOCOL_VERSION` 6 introduces
   `BeginWith`'s `SESSION_VALIDATE_ON_STAGE` with no new variant, unknown
   below 6, sent only after negotiating ≥ 6. Recorded here and in
