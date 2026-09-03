@@ -17,7 +17,7 @@ use rusty_multimodal_db::server::dog::{DogConnectionStore, FIELD_AGE, FIELD_BREE
 use rusty_multimodal_db::server::framing::{read_message, write_message};
 use rusty_multimodal_db::server::protocol::{
     ErrorCode, Request, Response, ScanValue, TransactionOp, MAX_STAGED_OPS, PROTOCOL_VERSION,
-    SESSION_READ_YOUR_WRITES,
+    SESSION_READ_YOUR_WRITES, SESSION_VALIDATE_ON_STAGE,
 };
 use rusty_multimodal_db::server::{serve, AuthConfig, ConnectionStore};
 use rusty_multimodal_db::ProductionStore;
@@ -973,7 +973,7 @@ fn begin_with_is_gated_by_version_and_refuses_unknown_flags() {
 
     let mut c = connect_v3(addr);
     assert_err(
-        roundtrip(&mut c, Request::BeginWith { flags: 2 }),
+        roundtrip(&mut c, Request::BeginWith { flags: 4 }),
         ErrorCode::Malformed,
     );
     assert_eq!(stage(&mut c, id, 9), Response::Ok, "no session was opened");
@@ -987,4 +987,126 @@ fn begin_with_is_gated_by_version_and_refuses_unknown_flags() {
     assert_eq!(age_of(&mut c, id), 9, "flags: 0 is a plain session");
     assert_err(begin_read_your_writes(&mut c), ErrorCode::SessionOpen);
     assert_eq!(roundtrip(&mut c, Request::Rollback), Response::Ok);
+}
+
+// ---------------------------------------------------------------------------
+// Stage-time validation (`SERVER-001-FR-030`, `ADR-0024`'s second trigger)
+// ---------------------------------------------------------------------------
+
+/// `STV-FR-001`/`STV-FR-002`: in a validating session a bad write is
+/// refused at its own round trip with the code `Commit` would have
+/// given — a missing id, a read-only field, a kind mismatch — and nothing
+/// is staged; good writes stage and commit as before; combined with
+/// read-your-writes both bits work together.
+#[test]
+fn a_validating_session_refuses_bad_writes_when_staged() {
+    let addr = start_server(sample_records(), AuthConfig::default());
+    let mut c = connect_v3(addr);
+    let id = Uuid::from_u128(1);
+    assert_eq!(
+        roundtrip(
+            &mut c,
+            Request::BeginWith {
+                flags: SESSION_VALIDATE_ON_STAGE
+            }
+        ),
+        Response::Ok
+    );
+    assert_err(
+        stage(&mut c, Uuid::from_u128(99), 1),
+        ErrorCode::RecordNotFound,
+    );
+    assert_err(
+        roundtrip(
+            &mut c,
+            Request::UpdateField {
+                id,
+                field: FIELD_BREED,
+                value: ScanValue::Str("poodle".into()),
+            },
+        ),
+        ErrorCode::Unsupported,
+    );
+    assert_err(
+        roundtrip(
+            &mut c,
+            Request::UpdateField {
+                id,
+                field: FIELD_AGE,
+                value: ScanValue::Str("old".into()),
+            },
+        ),
+        ErrorCode::Malformed,
+    );
+    assert_err(
+        roundtrip(
+            &mut c,
+            Request::UpdateField {
+                id,
+                field: 7,
+                value: ScanValue::U32(1),
+            },
+        ),
+        ErrorCode::UnknownField,
+    );
+    // Nothing was staged: the first good write is index 0.
+    assert_eq!(stage(&mut c, id, 41), Response::Staged { index: 0 });
+    assert_eq!(
+        age_of(&mut c, id),
+        3,
+        "validation alone does not overlay reads"
+    );
+    assert_eq!(roundtrip(&mut c, Request::Commit), Response::Ok);
+    assert_eq!(age_of(&mut c, id), 41);
+
+    // Both bits: validated and read-your-writes.
+    assert_eq!(
+        roundtrip(
+            &mut c,
+            Request::BeginWith {
+                flags: SESSION_VALIDATE_ON_STAGE | SESSION_READ_YOUR_WRITES
+            }
+        ),
+        Response::Ok
+    );
+    assert_err(
+        stage(&mut c, Uuid::from_u128(99), 1),
+        ErrorCode::RecordNotFound,
+    );
+    assert_eq!(stage(&mut c, id, 42), Response::Staged { index: 0 });
+    assert_eq!(age_of(&mut c, id), 42);
+    assert_eq!(roundtrip(&mut c, Request::Rollback), Response::Ok);
+    assert_eq!(age_of(&mut c, id), 41);
+}
+
+/// `STV-FR-003`: the validate bit is introduced at protocol 6 like a
+/// variant — on a connection that negotiated 5 it is an unknown bit and
+/// `BeginWith` is `Malformed`, while read-your-writes alone still works
+/// there.
+#[test]
+fn the_validate_bit_is_unknown_below_protocol_6() {
+    let addr = start_server(sample_records(), AuthConfig::default());
+    let mut v5 = connect(addr);
+    assert_eq!(
+        roundtrip(
+            &mut v5,
+            Request::Hello {
+                protocol_version: 5
+            }
+        ),
+        Response::Hello {
+            protocol_version: 5
+        }
+    );
+    assert_err(
+        roundtrip(
+            &mut v5,
+            Request::BeginWith {
+                flags: SESSION_VALIDATE_ON_STAGE,
+            },
+        ),
+        ErrorCode::Malformed,
+    );
+    assert_eq!(begin_read_your_writes(&mut v5), Response::Ok);
+    assert_eq!(roundtrip(&mut v5, Request::Rollback), Response::Ok);
 }

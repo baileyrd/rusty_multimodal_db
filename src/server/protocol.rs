@@ -60,6 +60,7 @@
 //! | 4 | `SERVER-001` v0.15.0 | + `ErrorCode::Journal` (9) — a journaled adapter could not journal a batch (nothing applied); carried by `Response::TransactionFailed`, and downgraded to `Unsupported` on a connection negotiated below 4 (rule 3's "nearest older shape"). ADR-0025 |
 //! | 3 | `SERVER-001` v0.14.0 | + `Request::Begin`/`Commit`/`Rollback` (11–13), `Response::Staged` (11), `ErrorCode::NoSession`/`SessionOpen`/`SessionFull` (6–8) — the first *gated* variants: a server keeps the negotiated version per connection and answers the three requests `Malformed` below 3 (rule 3); a client sends them only after negotiating ≥ 3 (rule 4). ADR-0024 |
 //! | 5 | `SERVER-001` v0.18.0 | + `Request::BeginWith { flags }` (14) — a session opened with options; [`SESSION_READ_YOUR_WRITES`] makes the connection's own `GetById` see its staged writes (`RYW-FR-001`/`002`). `Malformed` below 5 (rule 3); sent only after negotiating ≥ 5 (rule 4). No new response shape or error code. ADR-0027 |
+//! | 6 | `SERVER-001` v0.20.0 | No new variant: `BeginWith` learns a flag bit, [`SESSION_VALIDATE_ON_STAGE`] — every `UpdateField` staged in such a session is validated when staged, refused with the code `Commit` would have given, nothing staged (`STV-FR-001`/`002`). A flag bit is introduced at a version exactly as a variant is: unknown (`Malformed`) below 6 (rule 3), sent only after negotiating ≥ 6 (rule 4). `ADR-0024`'s second trigger |
 //!
 //! ## Compatibility rules (`PROTO-FR-005`)
 //!
@@ -94,13 +95,20 @@ use uuid::Uuid;
 /// versions" table. Bumped by exactly one in any change that appends a
 /// variant (rule 2). Version 1 is retroactively the `SERVER-001` v0.9.1
 /// shape: what a client that never sends [`Request::Hello`] speaks.
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 6;
 
 /// `Request::BeginWith` flag bit 0 (protocol 5, `RYW-FR-001`, ADR-0027):
 /// the session's own point reads (`GetById`) see its staged writes —
 /// see `docs/design/SERVER-SESSION-READ-YOUR-WRITES-DESIGN.md`. Every
 /// other bit is unknown to this build and makes the request `Malformed`.
 pub const SESSION_READ_YOUR_WRITES: u32 = 1;
+
+/// `Request::BeginWith` flag bit 1 (protocol 6, `STV-FR-001`, `ADR-0024`'s
+/// second revisit trigger): every `UpdateField` staged in the session is
+/// validated when it is staged — `ConnectionStore::validate_op` — and
+/// refused, nothing staged, with the code `Commit` would have reported for
+/// it. Unknown below protocol 6 (`Malformed`, as any unknown bit).
+pub const SESSION_VALIDATE_ON_STAGE: u32 = 2;
 
 /// The most `UpdateField`s one connection may stage between
 /// [`Request::Begin`] and [`Request::Commit`] (`SESS-FR-004`, ADR-0024):
@@ -355,6 +363,9 @@ pub enum Request {
     /// `Malformed` and opens nothing; `SessionOpen` while one is open;
     /// `Malformed` on a connection negotiated below 5. Answered by
     /// `handle_connection` itself, never through [`super::dispatch`].
+    /// Protocol 6 adds [`SESSION_VALIDATE_ON_STAGE`]: each `UpdateField` is
+    /// validated as it is staged (`STV-FR-001`/`002`) — a bit a connection
+    /// below 6 does not know, so `Malformed` there.
     BeginWith {
         flags: u32,
     },
@@ -714,7 +725,7 @@ mod tests {
     /// extends the table; this test is the reminder.
     #[test]
     fn protocol_version_is_the_one_the_table_names() {
-        assert_eq!(PROTOCOL_VERSION, 5);
+        assert_eq!(PROTOCOL_VERSION, 6);
     }
 
     /// `SESS-FR-001`: the session shapes round-trip through the codec like

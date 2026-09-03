@@ -20,7 +20,7 @@ use rusty_multimodal_db::generic_spike::employee_impl::{
     create_employee_production_stack, Department, Employee,
 };
 use rusty_multimodal_db::record::DogRecord;
-use rusty_multimodal_db::server::client::{ClientError, SchemaDrivenClient};
+use rusty_multimodal_db::server::client::{ClientError, SchemaDrivenClient, SessionOptions};
 use rusty_multimodal_db::server::dog::DogConnectionStore;
 use rusty_multimodal_db::server::employee::EmployeeConnectionStore;
 use rusty_multimodal_db::server::order::OrderConnectionStore;
@@ -320,7 +320,7 @@ fn value_of(client: &mut SchemaDrivenClient, id: Uuid, field: &str) -> ScanValue
 #[test]
 fn sessions_stage_commit_and_roll_back_on_every_domain() {
     let mut dog = SchemaDrivenClient::connect(start_dog_server()).unwrap();
-    assert_eq!(dog.server_protocol_version(), 5);
+    assert_eq!(dog.server_protocol_version(), 6);
 
     let mut s = dog.begin().unwrap();
     assert_eq!(
@@ -452,4 +452,54 @@ fn read_your_writes_sessions_see_their_own_staged_writes_through_the_client() {
     assert!(s.get(Uuid::from_u128(99)).unwrap().is_none());
     s.commit().unwrap();
     assert_eq!(value_of(&mut dog, id, "age"), ScanValue::U32(22));
+}
+
+/// `STV-FR-004`: `begin_with(SessionOptions)` — a validating session's
+/// `update` reports a bad write as `ClientError::Server` with the code
+/// `commit` would have given and stages nothing; no options is `begin`;
+/// both options compose.
+#[test]
+fn validating_sessions_report_bad_writes_at_update_through_the_client() {
+    let mut dog = SchemaDrivenClient::connect(start_dog_server()).unwrap();
+    let id = Uuid::from_u128(1);
+
+    let mut s = dog
+        .begin_with(SessionOptions::new().validate_on_stage())
+        .unwrap();
+    assert!(s.validate_on_stage() && !s.read_your_writes());
+    assert!(matches!(
+        s.update(Uuid::from_u128(99), "age", ScanValue::U32(1)),
+        Err(ClientError::Server(ErrorCode::RecordNotFound, _))
+    ));
+    assert_eq!(s.update(id, "age", ScanValue::U32(31)).unwrap(), 0);
+    s.commit().unwrap();
+    assert_eq!(value_of(&mut dog, id, "age"), ScanValue::U32(31));
+
+    let mut s = dog
+        .begin_with(SessionOptions::new().validate_on_stage().read_your_writes())
+        .unwrap();
+    assert!(s.validate_on_stage() && s.read_your_writes());
+    assert_eq!(s.update(id, "age", ScanValue::U32(32)).unwrap(), 0);
+    assert!(s
+        .get(id)
+        .unwrap()
+        .unwrap()
+        .contains(&("age".to_string(), ScanValue::U32(32))));
+    s.rollback().unwrap();
+
+    let mut s = dog.begin_with(SessionOptions::new()).unwrap();
+    assert!(!s.validate_on_stage() && !s.read_your_writes());
+    assert_eq!(
+        s.update(Uuid::from_u128(99), "age", ScanValue::U32(1))
+            .unwrap(),
+        0
+    );
+    assert!(matches!(
+        s.commit(),
+        Err(ClientError::TransactionFailed {
+            index: 0,
+            code: ErrorCode::RecordNotFound,
+            ..
+        })
+    ));
 }

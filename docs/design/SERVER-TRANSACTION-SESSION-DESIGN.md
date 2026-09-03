@@ -667,3 +667,7 @@ addition, gated like any appended code. `dog_server` gains an optional
 - 2026-09-03: The read-your-writes open question pointed at `ADR-0027` /
   `SERVER-SESSION-READ-YOUR-WRITES-DESIGN.md` (Accepted). No other
   content change.
+- 2026-09-03: Stage-time validation — named in Part A's considered
+  options and `ADR-0024`'s second trigger — implemented as `SERVER-001`
+  v0.20.0 / FR-030 (this PR): `ConnectionStore::validate_op` and a
+  second `BeginWith` bit at protocol version 6. No other content change.
