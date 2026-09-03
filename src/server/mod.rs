@@ -140,8 +140,8 @@ pub mod protocol;
 
 use protocol::{
     DomainSchema, ErrorCode, FieldRef, ParentLookup, RecordId, Request, Response, ScanValue,
-    TransactionOp, MAX_STAGED_OPS, PROTOCOL_VERSION, SESSION_READ_YOUR_WRITES,
-    SESSION_VALIDATE_ON_STAGE,
+    TransactionOp, MAX_STAGED_OPS, MAX_TRACKED_READS, PROTOCOL_VERSION, SESSION_READ_YOUR_WRITES,
+    SESSION_SNAPSHOT_ISOLATION, SESSION_VALIDATE_ON_STAGE,
 };
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -229,7 +229,22 @@ pub trait ConnectionStore: Send + Sync {
     /// first operation that failed its precondition check — see
     /// `docs/design/SERVER-TRANSACTION-DESIGN.md`, ADR-0013,
     /// `TXN-FR-002`/`TXN-FR-003`.
-    fn apply_transaction(&self, updates: &[TransactionOp]) -> Result<(), (usize, ErrorCode)>;
+    ///
+    /// `read_set` (`ISO-FR-006`, ADR-0033) is a snapshot-isolated session's
+    /// tracked `(id, field) -> value` reads, empty when the session has
+    /// snapshot isolation off (`SESSION_SNAPSHOT_ISOLATION` unset) — every
+    /// entry is re-checked against current state inside the same exclusive
+    /// section this method already applies writes under, atomically with
+    /// that apply. Any mismatch fails the whole call with
+    /// `(0, ErrorCode::Conflict)` before any write happens, the same
+    /// sentinel-index shape a precondition failure from `updates` itself
+    /// uses. See `docs/design/SERVER-SESSION-SNAPSHOT-ISOLATION-DESIGN.md`,
+    /// `ISO-FR-002`.
+    fn apply_transaction(
+        &self,
+        updates: &[TransactionOp],
+        read_set: &[(RecordId, FieldRef, ScanValue)],
+    ) -> Result<(), (usize, ErrorCode)>;
 }
 
 /// One message per [`ErrorCode`] variant — shared by [`err_response`] (a
@@ -249,6 +264,9 @@ fn error_message(code: ErrorCode) -> &'static str {
         ErrorCode::SessionFull => "this session already holds the maximum number of staged writes",
         ErrorCode::Journal => {
             "the batch could not be journaled before applying it; nothing was applied"
+        }
+        ErrorCode::Conflict => {
+            "this session's read set no longer matches current state; nothing was applied"
         }
     }
 }
@@ -289,11 +307,34 @@ fn same_kind(a: &ScanValue, b: &ScanValue) -> bool {
     std::mem::discriminant(a) == std::mem::discriminant(b)
 }
 
+/// `ISO-FR-002`/`ISO-FR-004`/`ISO-FR-005` (ADR-0033): fold `id`'s raw,
+/// committed `fields` — the exact result `dispatch` returned, before any
+/// read-your-writes overlay — into a snapshot-isolated session's read
+/// set. Each `(id, field)` key holds the most recently read value; past
+/// `MAX_TRACKED_READS` distinct keys a *new* key is simply not added,
+/// while an already-tracked key keeps updating on re-read — the read
+/// never fails, and `Commit` still runs on whatever *was* tracked. A
+/// pure function over the map, the same shape `overlay_staged` is over
+/// `fields`.
+pub(crate) fn record_read_set(
+    reads: &mut HashMap<(RecordId, FieldRef), ScanValue>,
+    id: RecordId,
+    fields: &[(FieldRef, ScanValue)],
+) {
+    for (field, value) in fields {
+        let key = (id, *field);
+        if reads.contains_key(&key) || reads.len() < MAX_TRACKED_READS {
+            reads.insert(key, value.clone());
+        }
+    }
+}
+
 /// Compatibility rule 3's "nearest older shape" (`protocol.rs`): a
 /// response carrying a variant introduced after the connection's
-/// negotiated version is rewritten before it is sent. Today exactly one
-/// case exists — `ErrorCode::Journal` (version 4, ADR-0025) inside
-/// `TransactionFailed`, which a connection below 4 sees as `Unsupported`.
+/// negotiated version is rewritten before it is sent. Two cases exist —
+/// `ErrorCode::Journal` (version 4, ADR-0025) and `ErrorCode::Conflict`
+/// (version 7, ADR-0033), both inside `TransactionFailed`, each seen as
+/// `Unsupported` by a connection below the version that introduced it.
 /// The session shapes (version 3) never need this: they cannot arise on a
 /// connection that could not `Begin`.
 fn downgrade_for_version(resp: Response, negotiated: u32) -> Response {
@@ -303,6 +344,15 @@ fn downgrade_for_version(resp: Response, negotiated: u32) -> Response {
             code: ErrorCode::Journal,
             ..
         } if negotiated < 4 => Response::TransactionFailed {
+            index,
+            code: ErrorCode::Unsupported,
+            message: error_message(ErrorCode::Unsupported).to_string(),
+        },
+        Response::TransactionFailed {
+            index,
+            code: ErrorCode::Conflict,
+            ..
+        } if negotiated < 7 => Response::TransactionFailed {
             index,
             code: ErrorCode::Unsupported,
             message: error_message(ErrorCode::Unsupported).to_string(),
@@ -1102,7 +1152,10 @@ pub fn dispatch<S: ConnectionStore + ?Sized>(store: &S, req: Request) -> Respons
         Request::Begin | Request::BeginWith { .. } | Request::Commit | Request::Rollback => {
             err_response(ErrorCode::Unsupported)
         }
-        Request::Transaction { updates } => match store.apply_transaction(&updates) {
+        // A one-shot `Request::Transaction` has no session, so no
+        // snapshot-isolation read set to re-check — `ISO-FR-001` is
+        // exclusively a session (`BeginWith`) feature.
+        Request::Transaction { updates } => match store.apply_transaction(&updates, &[]) {
             Ok(()) => Response::Ok,
             Err((index, code)) => Response::TransactionFailed {
                 index,
@@ -1351,6 +1404,10 @@ fn handle_connection<S: ConnectionStore + ?Sized>(
     // `STV-FR-001`: whether the open session validates each write as it
     // is staged; cleared with the session.
     let mut validate_on_stage = false;
+    // `ISO-FR-002` (ADR-0033): `Some(read set)` while a snapshot-isolated
+    // session is open — every `GetById`'s raw, pre-overlay result is
+    // recorded here, keyed by `(id, field)`; cleared with the session.
+    let mut snapshot_reads: Option<HashMap<(RecordId, FieldRef), ScanValue>> = None;
     // `RL-FR-001`: this connection's own failed-`Authenticate` count,
     // never reset by a success — the fifth failure locks it out
     // regardless of how many succeeded around it.
@@ -1492,16 +1549,24 @@ fn handle_connection<S: ConnectionStore + ?Sized>(
                     session = Some(Vec::new());
                     read_your_writes = None;
                     validate_on_stage = false;
+                    snapshot_reads = None;
                     Response::Ok
                 }
             }
             Request::BeginWith { .. } if negotiated < 5 => err_response(ErrorCode::Malformed),
             Request::BeginWith { flags } => {
                 // A flag bit is introduced at a version like a variant
-                // (`STV-FR-003`): below 6 the validate bit is unknown.
+                // (`STV-FR-003`): below 6 the validate bit is unknown,
+                // below 7 the snapshot-isolation bit is unknown
+                // (`ISO-FR-001`).
                 let known = SESSION_READ_YOUR_WRITES
                     | if negotiated >= 6 {
                         SESSION_VALIDATE_ON_STAGE
+                    } else {
+                        0
+                    }
+                    | if negotiated >= 7 {
+                        SESSION_SNAPSHOT_ISOLATION
                     } else {
                         0
                     };
@@ -1521,21 +1586,34 @@ fn handle_connection<S: ConnectionStore + ?Sized>(
                             .collect()
                     });
                     validate_on_stage = flags & SESSION_VALIDATE_ON_STAGE != 0;
+                    snapshot_reads = (flags & SESSION_SNAPSHOT_ISOLATION != 0).then(HashMap::new);
                     Response::Ok
                 }
             }
             Request::Rollback => {
                 read_your_writes = None;
                 validate_on_stage = false;
+                snapshot_reads = None;
                 if session.take().is_some() {
                     Response::Ok
                 } else {
                     err_response(ErrorCode::NoSession)
                 }
             }
-            Request::GetById { id } if read_your_writes.is_some() && session.is_some() => {
+            Request::GetById { id }
+                if (read_your_writes.is_some() || snapshot_reads.is_some())
+                    && session.is_some() =>
+            {
                 match dispatch(store, Request::GetById { id }) {
                     Response::Record { id, mut fields } => {
+                        // `ISO-FR-002`/`ISO-FR-005`: record the raw,
+                        // committed values — before any read-your-writes
+                        // overlay — into the read set; only a found
+                        // record is tracked at all (`dispatch` returned
+                        // `Response::Record` here, so it was found).
+                        if let Some(reads) = snapshot_reads.as_mut() {
+                            record_read_set(reads, id, &fields);
+                        }
                         if let (Some(staged), Some(updatable)) =
                             (session.as_ref(), read_your_writes.as_ref())
                         {
@@ -1549,9 +1627,17 @@ fn handle_connection<S: ConnectionStore + ?Sized>(
             Request::Commit => {
                 read_your_writes = None;
                 validate_on_stage = false;
+                // `ISO-FR-003`: whatever this session tracked is handed
+                // to `apply_transaction` alongside the staged batch, to
+                // be re-checked atomically with the apply — empty when
+                // snapshot isolation was never turned on.
+                let read_set: Vec<(RecordId, FieldRef, ScanValue)> = snapshot_reads
+                    .take()
+                    .map(|reads| reads.into_iter().map(|((id, f), v)| (id, f, v)).collect())
+                    .unwrap_or_default();
                 match session.take() {
                     None => err_response(ErrorCode::NoSession),
-                    Some(batch) => match store.apply_transaction(&batch) {
+                    Some(batch) => match store.apply_transaction(&batch, &read_set) {
                         Ok(()) => Response::Ok,
                         Err((index, code)) => Response::TransactionFailed {
                             index,
@@ -1762,7 +1848,11 @@ mod tests {
                 },
             }
         }
-        fn apply_transaction(&self, updates: &[TransactionOp]) -> Result<(), (usize, ErrorCode)> {
+        fn apply_transaction(
+            &self,
+            updates: &[TransactionOp],
+            read_set: &[(RecordId, FieldRef, ScanValue)],
+        ) -> Result<(), (usize, ErrorCode)> {
             // Same validate-then-apply shape a real adapter uses, against
             // this fixture's own single-record, non-mutating "store" —
             // exercises dispatch's Request::Transaction arm without
@@ -1776,6 +1866,19 @@ mod tests {
                     }
                     (FIELD_A, _) => return Err((i, ErrorCode::Malformed)),
                     _ => return Err((i, ErrorCode::UnknownField)),
+                }
+            }
+            // `ISO-FR-002`/`ISO-FR-006`: re-check every tracked read
+            // against this fixture's own fixed state (id 1, FIELD_A = 7)
+            // the same way a real adapter re-checks against its store.
+            for (id, field, value) in read_set {
+                let current = if *id == RecordId::from_u128(1) && *field == FIELD_A {
+                    Some(ScanValue::U32(7))
+                } else {
+                    None
+                };
+                if current.as_ref() != Some(value) {
+                    return Err((0, ErrorCode::Conflict));
                 }
             }
             Ok(())
@@ -2092,6 +2195,83 @@ mod tests {
         );
         overlay_staged(other, &mut fields, &staged, &[1, 2]);
         assert_eq!(fields[1], (1, ScanValue::U32(99)));
+    }
+
+    /// `ISO-FR-002`: a second read of the same `(id, field)` replaces the
+    /// earlier entry — the read set always holds the most recently seen
+    /// value, not a stale first-read snapshot.
+    #[test]
+    fn record_read_set_replaces_a_repeated_key_with_the_latest_value() {
+        let id = RecordId::from_u128(1);
+        let mut reads = HashMap::new();
+        record_read_set(&mut reads, id, &[(1, ScanValue::U32(3))]);
+        assert_eq!(reads.get(&(id, 1)), Some(&ScanValue::U32(3)));
+        record_read_set(&mut reads, id, &[(1, ScanValue::U32(9))]);
+        assert_eq!(reads.len(), 1);
+        assert_eq!(reads.get(&(id, 1)), Some(&ScanValue::U32(9)));
+    }
+
+    /// `ISO-FR-002`: distinct fields on the same id, and the same field
+    /// across distinct ids, are independent keys.
+    #[test]
+    fn record_read_set_keys_by_both_id_and_field() {
+        let id = RecordId::from_u128(1);
+        let other = RecordId::from_u128(2);
+        let mut reads = HashMap::new();
+        record_read_set(
+            &mut reads,
+            id,
+            &[
+                (0, ScanValue::Str("labrador".into())),
+                (1, ScanValue::U32(3)),
+            ],
+        );
+        record_read_set(&mut reads, other, &[(1, ScanValue::U32(5))]);
+        assert_eq!(reads.len(), 3);
+        assert_eq!(
+            reads.get(&(id, 0)),
+            Some(&ScanValue::Str("labrador".into()))
+        );
+        assert_eq!(reads.get(&(id, 1)), Some(&ScanValue::U32(3)));
+        assert_eq!(reads.get(&(other, 1)), Some(&ScanValue::U32(5)));
+    }
+
+    /// `ISO-FR-004`: past `MAX_TRACKED_READS` distinct keys, a *new* key
+    /// is simply not added — the call never panics or truncates existing
+    /// entries, and an already-tracked key keeps updating even once the
+    /// map is at the cap.
+    #[test]
+    fn record_read_set_stops_adding_new_keys_past_the_cap_but_keeps_updating_old_ones() {
+        let mut reads = HashMap::new();
+        for i in 0..MAX_TRACKED_READS {
+            record_read_set(
+                &mut reads,
+                RecordId::from_u128(i as u128),
+                &[(0, ScanValue::U32(0))],
+            );
+        }
+        assert_eq!(reads.len(), MAX_TRACKED_READS);
+
+        // A new key past the cap is not added.
+        record_read_set(
+            &mut reads,
+            RecordId::from_u128(MAX_TRACKED_READS as u128),
+            &[(0, ScanValue::U32(0))],
+        );
+        assert_eq!(reads.len(), MAX_TRACKED_READS);
+        assert!(!reads.contains_key(&(RecordId::from_u128(MAX_TRACKED_READS as u128), 0)));
+
+        // An already-tracked key still updates at the cap.
+        record_read_set(
+            &mut reads,
+            RecordId::from_u128(0),
+            &[(0, ScanValue::U32(7))],
+        );
+        assert_eq!(reads.len(), MAX_TRACKED_READS);
+        assert_eq!(
+            reads.get(&(RecordId::from_u128(0), 0)),
+            Some(&ScanValue::U32(7))
+        );
     }
 
     /// Spin up `serve` over `FixtureStore` on a loopback port with

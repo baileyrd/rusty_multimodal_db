@@ -148,6 +148,27 @@ impl OrderConnectionStore {
         }
         Ok(())
     }
+
+    /// `ISO-FR-002`/`ISO-FR-006` — see `DogConnectionStore::check_read_set`
+    /// for the full contract; identical shape here.
+    fn check_read_set(
+        reads: &[(RecordId, FieldRef, ScanValue)],
+        get: impl Fn(RecordId) -> Option<Order>,
+    ) -> Result<(), (usize, ErrorCode)> {
+        for (id, field, value) in reads {
+            let current = get(*id).and_then(|order| match *field {
+                FIELD_AMOUNT => Some(ScanValue::I64(order.amount_cents)),
+                FIELD_STATUS => Some(ScanValue::U32(status_to_u32(order.status))),
+                FIELD_CREATED_AT => Some(ScanValue::I64(order.created_at_unix_ms)),
+                FIELD_DISCOUNT => Some(ScanValue::I64(order.discount_cents)),
+                _ => None,
+            });
+            if current.as_ref() != Some(value) {
+                return Err((0, ErrorCode::Conflict));
+            }
+        }
+        Ok(())
+    }
 }
 
 impl ConnectionStore for OrderConnectionStore {
@@ -277,12 +298,18 @@ impl ConnectionStore for OrderConnectionStore {
         }
     }
 
-    fn apply_transaction(&self, updates: &[TransactionOp]) -> Result<(), (usize, ErrorCode)> {
+    fn apply_transaction(
+        &self,
+        updates: &[TransactionOp],
+        read_set: &[(RecordId, FieldRef, ScanValue)],
+    ) -> Result<(), (usize, ErrorCode)> {
         // See `DogConnectionStore::apply_transaction` for the two paths
-        // (`GRP-FR-001`–`005`); identical here.
+        // (`GRP-FR-001`–`005`) and where the read-set check runs in each;
+        // identical here.
         match &self.journal {
             None => self.store.with_exclusive(|inner| {
                 Self::validate_batch(updates, |id| GetById::<Order>::get(inner, id).is_some())?;
+                Self::check_read_set(read_set, |id| GetById::<Order>::get(inner, id))?;
                 Self::apply_batch(inner, updates)
             }),
             Some(journal) => {
@@ -290,6 +317,7 @@ impl ConnectionStore for OrderConnectionStore {
                 journal
                     .commit(updates, |turn| {
                         self.store.with_exclusive(|inner| {
+                            Self::check_read_set(read_set, |id| GetById::<Order>::get(inner, id))?;
                             Self::apply_batch(inner, updates)?;
                             Ok(turn.checkpoint_due && inner.checkpoint_flush().is_ok())
                         })

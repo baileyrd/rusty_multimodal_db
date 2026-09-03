@@ -61,6 +61,7 @@
 //! | 3 | `SERVER-001` v0.14.0 | + `Request::Begin`/`Commit`/`Rollback` (11–13), `Response::Staged` (11), `ErrorCode::NoSession`/`SessionOpen`/`SessionFull` (6–8) — the first *gated* variants: a server keeps the negotiated version per connection and answers the three requests `Malformed` below 3 (rule 3); a client sends them only after negotiating ≥ 3 (rule 4). ADR-0024 |
 //! | 5 | `SERVER-001` v0.18.0 | + `Request::BeginWith { flags }` (14) — a session opened with options; [`SESSION_READ_YOUR_WRITES`] makes the connection's own `GetById` see its staged writes (`RYW-FR-001`/`002`). `Malformed` below 5 (rule 3); sent only after negotiating ≥ 5 (rule 4). No new response shape or error code. ADR-0027 |
 //! | 6 | `SERVER-001` v0.20.0 | No new variant: `BeginWith` learns a flag bit, [`SESSION_VALIDATE_ON_STAGE`] — every `UpdateField` staged in such a session is validated when staged, refused with the code `Commit` would have given, nothing staged (`STV-FR-001`/`002`). A flag bit is introduced at a version exactly as a variant is: unknown (`Malformed`) below 6 (rule 3), sent only after negotiating ≥ 6 (rule 4). `ADR-0024`'s second trigger |
+//! | 7 | `SERVER-001` v0.26.0 | + `ErrorCode::Conflict` (10) — a snapshot-isolated session's read set was invalidated by a commit from another connection before its own `Commit` landed; carried by `Response::TransactionFailed { index: 0, .. }`, the same sentinel-index shape `ErrorCode::Journal` established, and downgraded to `Unsupported` on a connection negotiated below 7 (rule 3). `BeginWith` learns a third flag bit, [`SESSION_SNAPSHOT_ISOLATION`] — every session `GetById` records the committed value it returned into a read set re-checked atomically at `Commit` (`ISO-FR-001`–`003`). Unknown below 7 (rule 3), sent only after negotiating ≥ 7 (rule 4). ADR-0033 |
 //!
 //! ## Compatibility rules (`PROTO-FR-005`)
 //!
@@ -95,7 +96,7 @@ use uuid::Uuid;
 /// versions" table. Bumped by exactly one in any change that appends a
 /// variant (rule 2). Version 1 is retroactively the `SERVER-001` v0.9.1
 /// shape: what a client that never sends [`Request::Hello`] speaks.
-pub const PROTOCOL_VERSION: u32 = 6;
+pub const PROTOCOL_VERSION: u32 = 7;
 
 /// `Request::BeginWith` flag bit 0 (protocol 5, `RYW-FR-001`, ADR-0027):
 /// the session's own point reads (`GetById`) see its staged writes —
@@ -110,6 +111,17 @@ pub const SESSION_READ_YOUR_WRITES: u32 = 1;
 /// it. Unknown below protocol 6 (`Malformed`, as any unknown bit).
 pub const SESSION_VALIDATE_ON_STAGE: u32 = 2;
 
+/// `Request::BeginWith` flag bit 2 (protocol 7, `ISO-FR-001`, ADR-0033):
+/// every session `GetById` records the raw, committed value it returned
+/// (before any read-your-writes overlay) into a per-session read set; at
+/// `Commit`, inside the same exclusive section the batch's own write
+/// validation and apply already use, every tracked key is re-checked
+/// against current state, refusing the whole commit atomically on any
+/// mismatch (`ErrorCode::Conflict`) — see
+/// `docs/design/SERVER-SESSION-SNAPSHOT-ISOLATION-DESIGN.md`. Unknown
+/// below protocol 7 (`Malformed`, as any unknown bit).
+pub const SESSION_SNAPSHOT_ISOLATION: u32 = 4;
+
 /// The most `UpdateField`s one connection may stage between
 /// [`Request::Begin`] and [`Request::Commit`] (`SESS-FR-004`, ADR-0024):
 /// the `MAX_STAGED_OPS + 1`-th is answered `ErrorCode::SessionFull` and
@@ -118,6 +130,14 @@ pub const SESSION_VALIDATE_ON_STAGE: u32 = 2;
 /// becomes one. Smaller than one `MAX_FRAME_BYTES` `Transaction` could
 /// carry, so a session never exceeds what a single request already may.
 pub const MAX_STAGED_OPS: usize = 4096;
+
+/// The most distinct `(id, field)` keys a snapshot-isolated session's own
+/// read set tracks (`ISO-FR-004`, ADR-0033): past the cap, a `GetById` for
+/// a *new* key is simply not added — the request still succeeds, `Commit`
+/// still runs, the session just loses the ability to detect a conflict on
+/// whatever went untracked. A constant, not a config, matching
+/// [`MAX_STAGED_OPS`]'s own precedent.
+pub const MAX_TRACKED_READS: usize = 4096;
 
 /// A record's id — every domain this crate has ever used is `Uuid`-keyed.
 pub type RecordId = Uuid;
@@ -265,6 +285,14 @@ pub enum ErrorCode {
     /// 0); on a connection negotiated below 4 the server sends
     /// [`ErrorCode::Unsupported`] in its place.
     Journal,
+    /// Protocol 7. A snapshot-isolated session's read set (`ISO-FR-002`,
+    /// ADR-0033) no longer matches current state at `Commit` — some
+    /// tracked `GetById` changed under another connection's commit before
+    /// this one landed. Nothing was applied. Only reachable via
+    /// [`Response::TransactionFailed`] (index 0, the same sentinel shape
+    /// [`ErrorCode::Journal`] uses); on a connection negotiated below 7
+    /// the server sends [`ErrorCode::Unsupported`] in its place.
+    Conflict,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -567,6 +595,24 @@ mod tests {
             },
             &[0x0e, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00],
         );
+        // Protocol 7 (`ISO-FR-001`): the third bit, and all three composed
+        // (`flags: 7`) — still `BeginWith` at 14, just a different flags word.
+        assert_golden(
+            "BeginWith(snapshot isolation)",
+            &Request::BeginWith {
+                flags: SESSION_SNAPSHOT_ISOLATION,
+            },
+            &[0x0e, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00],
+        );
+        assert_golden(
+            "BeginWith(all three bits)",
+            &Request::BeginWith {
+                flags: SESSION_READ_YOUR_WRITES
+                    | SESSION_VALIDATE_ON_STAGE
+                    | SESSION_SNAPSHOT_ISOLATION,
+            },
+            &[0x0e, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x00],
+        );
     }
 
     /// `BINENC-FR-004`: every `Response` variant's wire bytes, pinned —
@@ -701,6 +747,8 @@ mod tests {
             (ErrorCode::SessionFull, 0x08),
             // Protocol 4 (`JRN-FR-008`): `Journal` at 9.
             (ErrorCode::Journal, 0x09),
+            // Protocol 7 (`ISO-FR-003`): `Conflict` at 10.
+            (ErrorCode::Conflict, 0x0a),
         ] {
             assert_golden_eq(
                 "Err(session code)",
@@ -719,13 +767,14 @@ mod tests {
     }
 
     /// `PROTO-FR-001`/`PROTO-FR-005` rule 2: the constant matches the
-    /// module docs' table — version 4 is the one that added
-    /// `ErrorCode::Journal` (3 added the session variants, 2 `Hello`). A
-    /// change that appends a variant bumps this by exactly one and
-    /// extends the table; this test is the reminder.
+    /// module docs' table — version 7 is the one that added
+    /// `ErrorCode::Conflict` and `SESSION_SNAPSHOT_ISOLATION` (6 added
+    /// `SESSION_VALIDATE_ON_STAGE`, 4 `ErrorCode::Journal`, 3 the session
+    /// variants, 2 `Hello`). A change that appends a variant bumps this
+    /// by exactly one and extends the table; this test is the reminder.
     #[test]
     fn protocol_version_is_the_one_the_table_names() {
-        assert_eq!(PROTOCOL_VERSION, 6);
+        assert_eq!(PROTOCOL_VERSION, 7);
     }
 
     /// `SESS-FR-001`: the session shapes round-trip through the codec like

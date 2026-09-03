@@ -17,7 +17,7 @@ use rusty_multimodal_db::server::dog::{DogConnectionStore, FIELD_AGE, FIELD_BREE
 use rusty_multimodal_db::server::framing::{read_message, write_message};
 use rusty_multimodal_db::server::protocol::{
     ErrorCode, Request, Response, ScanValue, TransactionOp, MAX_STAGED_OPS, PROTOCOL_VERSION,
-    SESSION_READ_YOUR_WRITES, SESSION_VALIDATE_ON_STAGE,
+    SESSION_READ_YOUR_WRITES, SESSION_SNAPSHOT_ISOLATION, SESSION_VALIDATE_ON_STAGE,
 };
 use rusty_multimodal_db::server::{serve, ConnectionStore, ServeOptions};
 use rusty_multimodal_db::ProductionStore;
@@ -973,7 +973,9 @@ fn begin_with_is_gated_by_version_and_refuses_unknown_flags() {
 
     let mut c = connect_v3(addr);
     assert_err(
-        roundtrip(&mut c, Request::BeginWith { flags: 4 }),
+        // Bit 3 (value 8) is still unknown to this build — every bit
+        // through `SESSION_SNAPSHOT_ISOLATION` (value 4) is taken.
+        roundtrip(&mut c, Request::BeginWith { flags: 8 }),
         ErrorCode::Malformed,
     );
     assert_eq!(stage(&mut c, id, 9), Response::Ok, "no session was opened");
@@ -1109,4 +1111,235 @@ fn the_validate_bit_is_unknown_below_protocol_6() {
     );
     assert_eq!(begin_read_your_writes(&mut v5), Response::Ok);
     assert_eq!(roundtrip(&mut v5, Request::Rollback), Response::Ok);
+}
+
+// ---------------------------------------------------------------------------
+// Session snapshot isolation (`SERVER-001` next minor, ADR-0033,
+// `docs/design/SERVER-SESSION-SNAPSHOT-ISOLATION-DESIGN.md`)
+// ---------------------------------------------------------------------------
+
+fn begin_snapshot_isolation(stream: &mut TcpStream) -> Response {
+    roundtrip(
+        stream,
+        Request::BeginWith {
+            flags: SESSION_SNAPSHOT_ISOLATION,
+        },
+    )
+}
+
+/// Acceptance criterion 2: a session's `GetById` on an id, followed by a
+/// *different* connection committing a write to that same id/field,
+/// followed by this session's own unrelated `Commit`, fails with
+/// `Response::TransactionFailed { index: 0, code: Conflict }` and applies
+/// nothing — including when the session's own batch touches an entirely
+/// different id than the one it read.
+#[test]
+fn snapshot_isolation_detects_a_conflicting_commit_from_another_connection() {
+    let addr = start_server(sample_records(), ServeOptions::default());
+    let mut a = connect_v3(addr);
+    let mut b = connect(addr);
+    let read_id = Uuid::from_u128(1);
+    let write_id = Uuid::from_u128(2);
+
+    assert_eq!(begin_snapshot_isolation(&mut a), Response::Ok);
+    assert_eq!(age_of(&mut a, read_id), 3, "record the raw committed read");
+
+    // A different connection commits a write to the id `a` read — a
+    // plain `UpdateField`, the moral equivalent of another session's
+    // `Commit`.
+    assert_eq!(
+        roundtrip(
+            &mut b,
+            Request::UpdateField {
+                id: read_id,
+                field: FIELD_AGE,
+                value: ScanValue::U32(99),
+            },
+        ),
+        Response::Ok
+    );
+
+    // `a`'s own batch never touches `read_id` at all, and every write in
+    // it is itself perfectly valid — the conflict comes from the stale
+    // read alone.
+    assert_eq!(stage(&mut a, write_id, 40), Response::Staged { index: 0 });
+    assert_eq!(
+        roundtrip(&mut a, Request::Commit),
+        Response::TransactionFailed {
+            index: 0,
+            code: ErrorCode::Conflict,
+            message: "this session's read set no longer matches current state; nothing was applied"
+                .into(),
+        }
+    );
+    assert_eq!(
+        age_of(&mut a, write_id),
+        5,
+        "the refused batch applied nothing"
+    );
+    assert_eq!(
+        age_of(&mut a, read_id),
+        99,
+        "the other connection's write did land"
+    );
+}
+
+/// Acceptance criterion 3: the same sequence with no intervening write
+/// commits normally — a snapshot-isolated session pays no false
+/// conflicts.
+#[test]
+fn snapshot_isolation_commits_normally_with_no_conflicting_write() {
+    let addr = start_server(sample_records(), ServeOptions::default());
+    let mut a = connect_v3(addr);
+    let read_id = Uuid::from_u128(1);
+    let write_id = Uuid::from_u128(2);
+
+    assert_eq!(begin_snapshot_isolation(&mut a), Response::Ok);
+    assert_eq!(age_of(&mut a, read_id), 3);
+    assert_eq!(stage(&mut a, write_id, 40), Response::Staged { index: 0 });
+    assert_eq!(roundtrip(&mut a, Request::Commit), Response::Ok);
+    assert_eq!(age_of(&mut a, write_id), 40);
+    assert_eq!(age_of(&mut a, read_id), 3, "never written by anyone");
+}
+
+/// Acceptance criterion 4: a `GetById` returning `NotFound` is not
+/// tracked — reading a missing id inside a snapshot-isolated session
+/// never blocks that same session's later, unrelated commit.
+#[test]
+fn snapshot_isolation_does_not_track_a_not_found_read() {
+    let addr = start_server(sample_records(), ServeOptions::default());
+    let mut a = connect_v3(addr);
+    let write_id = Uuid::from_u128(2);
+
+    assert_eq!(begin_snapshot_isolation(&mut a), Response::Ok);
+    assert_eq!(
+        roundtrip(
+            &mut a,
+            Request::GetById {
+                id: Uuid::from_u128(99)
+            }
+        ),
+        Response::NotFound
+    );
+    assert_eq!(stage(&mut a, write_id, 40), Response::Staged { index: 0 });
+    assert_eq!(roundtrip(&mut a, Request::Commit), Response::Ok);
+    assert_eq!(age_of(&mut a, write_id), 40);
+}
+
+/// Acceptance criterion 6: `SESSION_READ_YOUR_WRITES` and
+/// `SESSION_SNAPSHOT_ISOLATION` together — the read set records the raw,
+/// pre-overlay value (so a session's own staged write to an id it also
+/// read never manufactures a false conflict against itself), a session
+/// still sees its own staged writes exactly as before, and it is still
+/// protected from everyone else's commits.
+#[test]
+fn snapshot_isolation_composes_with_read_your_writes() {
+    let addr = start_server(sample_records(), ServeOptions::default());
+    let mut a = connect_v3(addr);
+    let mut b = connect(addr);
+    let id = Uuid::from_u128(1);
+    let other_id = Uuid::from_u128(2);
+
+    assert_eq!(
+        roundtrip(
+            &mut a,
+            Request::BeginWith {
+                flags: SESSION_READ_YOUR_WRITES | SESSION_SNAPSHOT_ISOLATION,
+            },
+        ),
+        Response::Ok
+    );
+    assert_eq!(
+        age_of(&mut a, id),
+        3,
+        "raw committed read, before any stage"
+    );
+    assert_eq!(stage(&mut a, id, 30), Response::Staged { index: 0 });
+    assert_eq!(age_of(&mut a, id), 30, "still sees its own staged write");
+    // Nothing else committed since — the tracked raw read (3) still
+    // matches current state, so this commits cleanly even though the
+    // session's own overlay showed a different value.
+    assert_eq!(roundtrip(&mut a, Request::Commit), Response::Ok);
+    assert_eq!(age_of(&mut a, id), 30);
+
+    // Now with a real conflict: another connection's commit lands
+    // between the read and this session's own commit.
+    assert_eq!(
+        roundtrip(
+            &mut a,
+            Request::BeginWith {
+                flags: SESSION_READ_YOUR_WRITES | SESSION_SNAPSHOT_ISOLATION,
+            },
+        ),
+        Response::Ok
+    );
+    assert_eq!(age_of(&mut a, id), 30);
+    assert_eq!(
+        roundtrip(
+            &mut b,
+            Request::UpdateField {
+                id,
+                field: FIELD_AGE,
+                value: ScanValue::U32(77),
+            },
+        ),
+        Response::Ok
+    );
+    assert_eq!(stage(&mut a, other_id, 41), Response::Staged { index: 0 });
+    match roundtrip(&mut a, Request::Commit) {
+        Response::TransactionFailed {
+            index: 0,
+            code: ErrorCode::Conflict,
+            ..
+        } => {}
+        other => panic!("expected TransactionFailed {{ Conflict }}, got {other:?}"),
+    }
+    assert_eq!(age_of(&mut a, other_id), 5, "refused, nothing applied");
+}
+
+/// `ISO-FR-001`: the snapshot-isolation bit is introduced at protocol 7
+/// like a variant — on a connection that negotiated 6 it is an unknown
+/// bit and `BeginWith` is `Malformed`, while validate-on-stage and
+/// read-your-writes alone still work there; on a version-7 connection
+/// all three bits compose (`flags: 7`).
+#[test]
+fn the_snapshot_isolation_bit_is_unknown_below_protocol_7() {
+    let addr = start_server(sample_records(), ServeOptions::default());
+    let mut v6 = connect(addr);
+    assert_eq!(
+        roundtrip(
+            &mut v6,
+            Request::Hello {
+                protocol_version: 6
+            }
+        ),
+        Response::Hello {
+            protocol_version: 6
+        }
+    );
+    assert_err(begin_snapshot_isolation(&mut v6), ErrorCode::Malformed);
+    assert_eq!(
+        roundtrip(
+            &mut v6,
+            Request::BeginWith {
+                flags: SESSION_READ_YOUR_WRITES | SESSION_VALIDATE_ON_STAGE,
+            },
+        ),
+        Response::Ok
+    );
+    assert_eq!(roundtrip(&mut v6, Request::Rollback), Response::Ok);
+
+    let mut v7 = connect_v3(addr);
+    assert_eq!(
+        roundtrip(
+            &mut v7,
+            Request::BeginWith {
+                flags: SESSION_READ_YOUR_WRITES
+                    | SESSION_VALIDATE_ON_STAGE
+                    | SESSION_SNAPSHOT_ISOLATION,
+            },
+        ),
+        Response::Ok
+    );
+    assert_eq!(roundtrip(&mut v7, Request::Rollback), Response::Ok);
 }
