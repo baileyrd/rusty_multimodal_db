@@ -158,4 +158,4 @@ Proposed: option 1. Concretely, at implementation:
 - 2026-09-03: accepted as proposed (option (a); (b) and (c) declined).
   Implemented after `ADR-0027`'s unit and before `ADR-0028`'s
   crate-side unit (which waits upstream), as `SERVER-001`'s next minor
-  / FR, per `docs/design/SERVER-AUTH-AUDIT-DESIGN.md`. (This PR.)
+  / FR, per `docs/design/SERVER-AUTH-AUDIT-DESIGN.md`. (PR #153.)

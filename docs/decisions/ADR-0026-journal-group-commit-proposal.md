@@ -200,4 +200,4 @@ Proposed: option 1. Concretely, at implementation:
 - 2026-09-03: accepted as proposed (option (a); (b) and (c) declined —
   "a, a, a, a" across `ADR-0026`–`ADR-0029`). Implemented next, as
   `SERVER-001`'s next minor / FR, per
-  `docs/design/SERVER-JOURNAL-GROUP-COMMIT-DESIGN.md`. (This PR.)
+  `docs/design/SERVER-JOURNAL-GROUP-COMMIT-DESIGN.md`. (PR #153.)
