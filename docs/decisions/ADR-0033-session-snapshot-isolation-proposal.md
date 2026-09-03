@@ -1,6 +1,13 @@
 # ADR-0033: Optimistic read-set validation for sessions — snapshot isolation from other connections' commits
 
-- Status: **Proposed**
+- Status: **Accepted** (promoted from Proposed on 2026-09-03 — the owner
+  approved the design as proposed, option (a): a third `BeginWith`
+  bit, `SESSION_SNAPSHOT_ISOLATION`, optimistic read-set validation
+  checked and applied atomically at `Commit`; (b) tracking only the
+  single most recent read and (c) closing as not warranted declined;
+  no changes requested). Acceptance authorizes the design;
+  implementation follows as its own unit — see "Acceptance and
+  implementation" below.
 - Date: 2026-09-03
 - Deciders: baileyrd
 - Related: `docs/design/SERVER-SESSION-SNAPSHOT-ISOLATION-DESIGN.md`
@@ -174,4 +181,7 @@ Proposed: option 1. Concretely, at implementation:
   but far less useful (most sessions read more than one thing before
   deciding what to write); **(c)** close as not warranted — restate
   `SESS-FR-007`'s second half as still open, build nothing. Proposed
-  in this PR.
+  in PR #173.
+- 2026-09-03: accepted as proposed (option (a); (b) and (c) declined).
+  Implementation follows as `SERVER-001`'s next minor / FR, per
+  `docs/design/SERVER-SESSION-SNAPSHOT-ISOLATION-DESIGN.md`.

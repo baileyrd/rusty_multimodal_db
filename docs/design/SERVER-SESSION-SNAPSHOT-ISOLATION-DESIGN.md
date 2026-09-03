@@ -1,6 +1,11 @@
-# Server Session Snapshot Isolation Design (Proposed)
+# Server Session Snapshot Isolation Design (Accepted)
 
-- Status: **Proposed**
+- Status: **Accepted** (promoted from Proposed on 2026-09-03 — the owner
+  approved the design as proposed, `ADR-0033` option (a); tracking
+  only the single most recent read and closing as not warranted both
+  declined; no changes requested). Acceptance authorizes the design;
+  implementation follows as its own unit — see `ADR-0033`'s
+  "Acceptance and implementation" section.
 - Date: 2026-09-03
 - Related: `ADR-0024` / `docs/design/SERVER-TRANSACTION-SESSION-DESIGN.md`
   (the session mechanism this design extends; `SESS-FR-007` — *reads
@@ -448,4 +453,6 @@ fn apply_transaction(
   "real transactions" from `docs/FUTURE-GROWTH.md` as the direction to
   pursue, scoped down from that document's own "MVCC or log-based
   design" framing to the bounded, session-machinery-native slice this
-  document proposes.
+  document proposes. (PR #173.)
+- 2026-09-03: Accepted as proposed. No content change. Implementation
+  follows as `SERVER-001`'s next minor / FR.
