@@ -163,6 +163,12 @@ Proposed: option 1. Concretely, at implementation:
   `ServeOptions` (option 3) becomes worth its breaking change.
 - Revisit if: `ADR-0028` lands — `Admitted` may gain an explicit
   "classed by certificate" field.
+  *Taken: `SERVER-001` v0.24.0 / FR-034 (this PR), the owner's "Start
+  Unit 29" once `ADR-0028` (FR-031) had landed. `AuditKind::Admitted`
+  gained `classed_by_certificate: bool`, `true` exactly when
+  `initial_class` came from a matched, configured certificate; a
+  bounded, additive completion, no new ADR or design document. No
+  change to this decision.*
 
 ## Acceptance and implementation
 

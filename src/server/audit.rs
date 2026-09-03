@@ -96,10 +96,17 @@ impl RequestKind {
 #[non_exhaustive]
 pub enum AuditKind {
     /// A connection past the handshake, and the class it starts at
-    /// (`None`: it must authenticate).
+    /// (`None`: it must authenticate). `classed_by_certificate`
+    /// (`ADR-0029`'s fourth revisit trigger, taken once `ADR-0028`
+    /// landed): whether `initial_class` came from a matched, configured
+    /// certificate (`CLS-FR-004`) rather than `AuthConfig::is_configured`'s
+    /// unauthenticated/`ReadWrite` default — always `false` when
+    /// `initial_class` is `None`, since a certificate that classes a
+    /// connection always sets it.
     Admitted {
         transport: Transport,
         initial_class: Option<TokenClass>,
+        classed_by_certificate: bool,
     },
     /// The TLS handshake was refused; `reason` is the TLS error's
     /// `Display`, whitespace folded.
@@ -157,11 +164,13 @@ impl AuditEvent {
             AuditKind::Admitted {
                 transport,
                 initial_class,
+                classed_by_certificate,
             } => {
                 line.push_str("Admitted transport=");
                 line.push_str(&format!("{transport:?}"));
                 line.push_str(" initial_class=");
                 line.push_str(&class_name(*initial_class));
+                line.push_str(&format!(" classed_by_certificate={classed_by_certificate}"));
             }
             AuditKind::HandshakeFailed { reason } => {
                 line.push_str("HandshakeFailed reason=");
@@ -326,6 +335,7 @@ mod tests {
             AuditKind::Admitted {
                 transport: Transport::MutualTls,
                 initial_class: None,
+                classed_by_certificate: false,
             },
             AuditKind::HandshakeFailed {
                 reason: "no certificates presented".into(),
@@ -363,7 +373,7 @@ mod tests {
             .collect();
         assert_eq!(
             lines[0],
-            "audit at=7 peer=127.0.0.1:4242 event=Admitted transport=MutualTls initial_class=-"
+            "audit at=7 peer=127.0.0.1:4242 event=Admitted transport=MutualTls initial_class=- classed_by_certificate=false"
         );
         assert_eq!(
             lines[1],

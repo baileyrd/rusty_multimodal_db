@@ -448,6 +448,7 @@ fn every_gate_decision_is_recorded_in_order_with_the_peer() {
             AuditKind::Admitted {
                 transport: Transport::Plain,
                 initial_class: None,
+                classed_by_certificate: false,
             },
             AuditKind::AuthenticationFailed,
             AuditKind::Authenticated {
@@ -522,6 +523,7 @@ fn unauthenticated_refusals_and_open_servers_are_recorded_as_designed() {
             AuditKind::Admitted {
                 transport: Transport::Plain,
                 initial_class: Some(TokenClass::ReadWrite),
+                classed_by_certificate: false,
             },
             AuditKind::Disconnected,
         ]
@@ -620,6 +622,7 @@ fn the_fifth_failed_authenticate_locks_out_the_connection() {
             AuditKind::Admitted {
                 transport: Transport::Plain,
                 initial_class: None,
+                classed_by_certificate: false,
             },
             AuditKind::AuthenticationFailed,
             AuditKind::AuthenticationFailed,
@@ -849,6 +852,7 @@ fn access_log_and_audit_log_streams_stay_disjoint() {
             AuditKind::Admitted {
                 transport: Transport::Plain,
                 initial_class: None,
+                classed_by_certificate: false,
             },
             AuditKind::Refused {
                 class: None,
