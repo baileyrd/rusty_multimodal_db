@@ -141,4 +141,4 @@ Proposed: option 1. Concretely, at implementation:
   variant on the existing `AuditSink` (option 2 above), coupling the
   two switches for a smaller API surface; **(c)** close as not
   warranted — the audit log alone stands, `SERVER-AUTH-AUDIT-DESIGN.md`'s
-  non-goal stays a non-goal. Proposed in this PR.
+  non-goal stays a non-goal. Proposed in PR #165.

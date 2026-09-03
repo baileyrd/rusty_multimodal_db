@@ -349,4 +349,4 @@ next to `error_message` — `Response::Err{code,..}`/`TransactionFailed{code,..}
   access-logging design round as the fourth of four next directions
   ("1, 2, 3, 4"), after the rusty_tls accessor (upstream, PR opened by
   a child session), rate limiting and lockout (Proposed), and
-  stage-time validation (implemented).
+  stage-time validation (implemented). (PR #165.)
