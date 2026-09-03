@@ -669,5 +669,5 @@ addition, gated like any appended code. `dog_server` gains an optional
   content change.
 - 2026-09-03: Stage-time validation — named in Part A's considered
   options and `ADR-0024`'s second trigger — implemented as `SERVER-001`
-  v0.20.0 / FR-030 (this PR): `ConnectionStore::validate_op` and a
+  v0.20.0 / FR-030 (PR #163): `ConnectionStore::validate_op` and a
   second `BeginWith` bit at protocol version 6. No other content change.

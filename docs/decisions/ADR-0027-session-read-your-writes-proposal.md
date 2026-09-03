@@ -158,7 +158,7 @@ Proposed: option 1. Concretely, at implementation:
 - Revisit if: stage-time validation is taken (`ADR-0024`'s second
   trigger) — a second bit in `BeginWith`; the kind-mismatch rule here
   then never fires, and stays as belt-and-braces.
-  *Taken: `SERVER-001` v0.20.0 / FR-030 in this PR, as the second bit
+  *Taken: `SERVER-001` v0.20.0 / FR-030 in PR #163, as the second bit
   (`SESSION_VALIDATE_ON_STAGE`); the overlay's kind and updatable
   rules stay, since a session may ask for read-your-writes without
   validation.*

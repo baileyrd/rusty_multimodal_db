@@ -588,8 +588,8 @@ No change to `framing.rs`, `dog.rs`, `order.rs`, `employee.rs`,
   `[[test]]` registration `tests/server_protocol_version.rs` needs to
   compile under default features — no dependency change. `ADR-0022`'s
   acceptance log carries the same note.
-- 2026-09-03: Clarification at `SERVER-001` v0.20.0 / FR-030 (this
-  PR): a *flag bit* inside an existing variant (`BeginWith`'s
+- 2026-09-03: Clarification at `SERVER-001` v0.20.0 / FR-030 (PR
+  #163): a *flag bit* inside an existing variant (`BeginWith`'s
   `SESSION_VALIDATE_ON_STAGE`) is introduced at a version exactly as a
   variant is — `PROTOCOL_VERSION` is bumped to 6 with no new variant,
   the bit is unknown (`Malformed`) on a connection below 6 (rule 3's
