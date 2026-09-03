@@ -236,7 +236,9 @@ subtle = "2"
 # check" for the full reasoning. `dep:`-gated (only the `server` feature needs it), pinned to a
 # specific commit rather than tracking `main`, matching `rusty_tls`'s own sibling-pinning
 # convention (`rustils`' `docs/versioning.md` §3: a bare SHA carries the same guarantee as a tag).
-rusty_tls = { git = "https://github.com/Rusty-Mill/rusty_mill", rev = "9fd2e27c9cfd5d1b21a5e58b55e368258a0a2779", optional = true }
+# Bumped for `TlsServerStream::peer_certificate_der` (`CLS-FR-001`, ADR-0028's upstream
+# prerequisite for class-from-certificate) — Rusty-Mill/rusty_mill PR #148, no new dependency.
+rusty_tls = { git = "https://github.com/Rusty-Mill/rusty_mill", rev = "cf284712988f09ee444dddfa5086e7019f4f786c", optional = true }
 # External-database comparison benchmark (benches/external_db.rs, ADR-0015) — never used by this
 # crate's own library code, only by that one bench target, but declared here rather than under
 # `[dev-dependencies]` specifically because Cargo does not support optional dev-dependencies:

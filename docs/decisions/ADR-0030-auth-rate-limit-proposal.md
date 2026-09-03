@@ -1,6 +1,14 @@
 # ADR-0030: Bound failed authentication — a per-connection lockout on by default, a per-peer failure budget opt-in, both audited, nothing on the wire
 
-- Status: **Proposed** (not yet accepted; authorizes no implementation)
+- Status: **Accepted** (promoted from Proposed on 2026-09-03 — the owner
+  approved the design as proposed, option (a): a per-connection lockout
+  at `MAX_AUTH_FAILURES = 5` on by default, an opt-in per-peer
+  fixed-window budget, both answered `Unauthenticated` on the wire,
+  both audited as `LockedOut`/`Throttled`, `AuditKind`/`RequestKind`
+  marked `#[non_exhaustive]`; (b) both opt-in with a typed
+  `ErrorCode::RateLimited` and (c) close as not warranted declined; no
+  changes requested). Acceptance authorizes the design; implementation
+  follows as its own unit — see "Acceptance and implementation" below.
 - Date: 2026-09-03
 - Deciders: baileyrd
 - Related: `docs/design/SERVER-AUTH-RATE-LIMIT-DESIGN.md` (the full
@@ -151,3 +159,6 @@ Proposed: option 1. Concretely, at implementation:
   opt-in and a typed `ErrorCode::RateLimited` at protocol 6 for
   throttled attempts; **(c)** close as not warranted — the gap stays
   named, the audit log alone stands. Proposed in PR #161.
+- 2026-09-03: accepted as proposed (option (a); (b) and (c) declined).
+  Implementation follows as `SERVER-001`'s next minor / FR, per
+  `docs/design/SERVER-AUTH-RATE-LIMIT-DESIGN.md`. (This PR.)

@@ -396,3 +396,7 @@ justification comment gains one sentence naming the accessor.
   gated on the upstream `rusty_tls` accessor (`CLS-FR-001`), which this
   session cannot land; the crate-side unit is queued behind `ADR-0026`,
   `ADR-0027`, and `ADR-0029`. (PR #153.)
+- 2026-09-03: `CLS-FR-001` landed as `Rusty-Mill/rusty_mill` PR #148
+  (opened by a separately-spawned session, merged by the owner).
+  Implemented exactly as designed, no deviation, as `SERVER-001` v0.21.0
+  / FR-031. (This PR.)

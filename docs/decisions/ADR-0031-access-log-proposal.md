@@ -1,6 +1,13 @@
 # ADR-0031: A per-request access log — a second, independent sink family, kind and outcome only, never a payload
 
-- Status: **Proposed** (not yet accepted; authorizes no implementation)
+- Status: **Accepted** (promoted from Proposed on 2026-09-03 — the owner
+  approved the design as proposed, option (a): a second, independent
+  sink family (`AccessSink`/`AccessEvent`), kind and outcome shape
+  only, off by default, disjoint from the audit log by construction;
+  (b) fold into `AuditKind` as a `Handled` variant and (c) close as not
+  warranted declined; no changes requested). Acceptance authorizes the
+  design; implementation follows as its own unit — see "Acceptance and
+  implementation" below.
 - Date: 2026-09-03
 - Deciders: baileyrd
 - Related: `docs/design/SERVER-ACCESS-LOG-DESIGN.md` (the full design
@@ -141,4 +148,7 @@ Proposed: option 1. Concretely, at implementation:
   variant on the existing `AuditSink` (option 2 above), coupling the
   two switches for a smaller API surface; **(c)** close as not
   warranted — the audit log alone stands, `SERVER-AUTH-AUDIT-DESIGN.md`'s
-  non-goal stays a non-goal. Proposed in this PR.
+  non-goal stays a non-goal. Proposed in PR #165.
+- 2026-09-03: accepted as proposed (option (a); (b) and (c) declined).
+  Implementation follows as `SERVER-001`'s next minor / FR, per
+  `docs/design/SERVER-ACCESS-LOG-DESIGN.md`. (This PR.)
