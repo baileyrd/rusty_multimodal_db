@@ -394,4 +394,4 @@ justification comment gains one sentence naming the accessor.
   class-from-certificate as the third of four next directions
   ("1, 2, 3, 4"). The upstream accessor verified by a local patch probe
   (discarded) because the upstream repository could not be attached
-  from this session.
+  from this session. (PR #149.)

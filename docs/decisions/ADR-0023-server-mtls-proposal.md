@@ -177,7 +177,7 @@ Proposed: option 1. Concretely, at implementation:
   `rusty_tls` peer-certificate accessor, then an X.509 reading decision
   in this crate; this decision's admission gate stays as the base.
   *Taken up as `ADR-0028` / `docs/design/SERVER-MTLS-CLASS-DESIGN.md`,
-  proposed in this PR: the accessor spelled out and verified by a local
+  proposed in PR #149: the accessor spelled out and verified by a local
   patch probe; the X.509 decision answered by exact-DER pinning on
   `AuthConfig` — no parser. Admission stays as this decision made it.*
 - Revisit if: revocation without a restart becomes a real operational
