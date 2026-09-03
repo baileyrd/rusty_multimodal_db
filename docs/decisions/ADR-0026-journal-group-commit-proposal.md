@@ -1,6 +1,12 @@
 # ADR-0026: Group commit for the batch journal — the `fsync` leaves the exclusive section, one leader syncs for everyone, applies stay in journal order
 
-- Status: **Proposed** (not yet accepted; authorizes no implementation)
+- Status: **Accepted** (promoted from Proposed on 2026-09-03 — the owner
+  approved the design as proposed, option (a): leader/follower group
+  commit with no delay, the `fsync` outside the exclusive section,
+  ordered apply, quiescent checkpoint; (b) a fixed commit delay and (c)
+  close as not warranted declined; no changes requested). Acceptance
+  authorizes the design; implementation follows as its own unit — see
+  "Acceptance and implementation" below.
 - Date: 2026-09-03
 - Deciders: baileyrd
 - Related: `docs/design/SERVER-JOURNAL-GROUP-COMMIT-DESIGN.md` (the
@@ -191,3 +197,7 @@ Proposed: option 1. Concretely, at implementation:
   warranted — the `fsync` stays inside the exclusive section,
   `ADR-0025`'s trigger stays armed for a real workload. Proposed in
   PR #145.
+- 2026-09-03: accepted as proposed (option (a); (b) and (c) declined —
+  "a, a, a, a" across `ADR-0026`–`ADR-0029`). Implemented next, as
+  `SERVER-001`'s next minor / FR, per
+  `docs/design/SERVER-JOURNAL-GROUP-COMMIT-DESIGN.md`. (This PR.)

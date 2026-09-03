@@ -1,14 +1,11 @@
-# Server mTLS Class-from-Certificate Design (Proposed)
+# Server mTLS Class-from-Certificate Design (Accepted)
 
-- Status: **Proposed** (not yet accepted; no implementation authorized).
-  One decision, `ADR-0028`: an admitted client certificate may *decide
-  the connection's class* — by exact match of its DER bytes against
-  certificates the operator configured per `TokenClass` — after an
-  eager server-side handshake, on top of an upstream `rusty_tls`
-  accessor whose patch is spelled out and verified below. Acceptance
-  authorizes the design; implementation follows as its own unit, and
-  begins upstream — see `ADR-0028`'s "Acceptance and implementation"
-  section.
+- Status: **Accepted** (promoted from Proposed on 2026-09-03 — the owner
+  approved the design as proposed, `ADR-0028` option (a); SPKI pinning
+  and closing declined; no changes requested). Acceptance authorizes
+  the design; implementation begins upstream (`CLS-FR-001`) and proceeds
+  in this crate only once the accessor lands — see `ADR-0028`'s
+  "Acceptance and implementation" section.
 - Date: 2026-09-03
 - Related: `docs/design/SERVER-MTLS-DESIGN.md` / `ADR-0023` (mutual TLS
   as an admission gate, `SERVER-001` v0.13.0 / FR-023; its "Class from
@@ -395,3 +392,7 @@ justification comment gains one sentence naming the accessor.
   ("1, 2, 3, 4"). The upstream accessor verified by a local patch probe
   (discarded) because the upstream repository could not be attached
   from this session. (PR #149.)
+- 2026-09-03: Accepted as proposed. No content change. Implementation is
+  gated on the upstream `rusty_tls` accessor (`CLS-FR-001`), which this
+  session cannot land; the crate-side unit is queued behind `ADR-0026`,
+  `ADR-0027`, and `ADR-0029`. (This PR.)

@@ -1,6 +1,13 @@
 # ADR-0029: An audit log of admission, authentication, and authorization decisions — a sink on `AuthConfig`, off by default, fail-open with one notice
 
-- Status: **Proposed** (not yet accepted; authorizes no implementation)
+- Status: **Accepted** (promoted from Proposed on 2026-09-03 — the owner
+  approved the design as proposed, option (a): decisions-only events,
+  the sink on `AuthConfig`, `NoAudit` by default, `StderrAudit` and
+  `FileAudit`, fail-open with one notice, the eager handshake; (b)
+  fail-closed and (c) close as not warranted declined; no changes
+  requested). Acceptance authorizes the design; implementation follows
+  as its own unit, after `ADR-0027`'s — see "Acceptance and
+  implementation" below.
 - Date: 2026-09-03
 - Deciders: baileyrd
 - Related: `docs/design/SERVER-AUTH-AUDIT-DESIGN.md` (the full design
@@ -148,3 +155,7 @@ Proposed: option 1. Concretely, at implementation:
   sink write failure ends the connection rather than dropping the
   event; **(c)** close as not warranted — the gap stays named as it
   has been since `ADR-0012`. Proposed in PR #151.
+- 2026-09-03: accepted as proposed (option (a); (b) and (c) declined).
+  Implemented after `ADR-0027`'s unit and before `ADR-0028`'s
+  crate-side unit (which waits upstream), as `SERVER-001`'s next minor
+  / FR, per `docs/design/SERVER-AUTH-AUDIT-DESIGN.md`. (This PR.)
