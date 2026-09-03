@@ -191,6 +191,12 @@ Proposed: option 1. Concretely, at implementation:
 - Revisit if: the journal's `fsync` cost dominates a real workload — a
   group-commit (one `fsync` per several batches, across connections)
   is the standard answer and a separate design.
+  *Fired by `RESULTS.md`'s FR-025 rows (throughput flat at ~3.3k
+  batches/s from 1 to 64 connections) and taken up as `ADR-0026` /
+  `docs/design/SERVER-JOURNAL-GROUP-COMMIT-DESIGN.md`, proposed in
+  this PR: the `fsync` leaves the exclusive section, one leader syncs
+  for everyone, applies stay in journal order. No change to this
+  decision; the journal's format and guarantees are unchanged there.*
 - Revisit if: always-on is judged the right default after the bench
   row lands — a one-line constructor change, but a decision.
 

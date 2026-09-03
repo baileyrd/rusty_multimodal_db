@@ -533,7 +533,10 @@ addition, gated like any appended code. `dog_server` gains an optional
   operation of it is known durable (`flush` returned).
 - The lock discipline is unchanged: append, apply, and checkpoint all
   happen inside the one `with_exclusive` closure the batch already
-  held.
+  held. *Amended by `ADR-0026` / `SERVER-JOURNAL-GROUP-COMMIT-DESIGN.md`
+  (Proposed): the append and `fsync` leave the exclusive section and
+  become a leader/follower group commit; the apply stays inside it, in
+  journal order. Every other invariant in this list is preserved there.*
 
 ### Errors, failure, recovery, and observability
 
@@ -652,3 +655,7 @@ addition, gated like any appended code. `dog_server` gains an optional
   without naming the bump; rule 3's downgrade to `Unsupported` below 4
   is its first real use. `ADR-0025`'s acceptance log carries the same
   note.
+- 2026-09-03: Part B's lock-discipline invariant amended by pointer to
+  `ADR-0026` / `SERVER-JOURNAL-GROUP-COMMIT-DESIGN.md` (Proposed) — the
+  group-commit design `ADR-0025`'s third revisit trigger asked for,
+  after `RESULTS.md`'s FR-025 rows fired it. No other content change.
