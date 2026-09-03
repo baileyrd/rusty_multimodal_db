@@ -1039,6 +1039,27 @@ Markedly lower than both prior environments (container ~37–39 µs, `Beast` ~29
 
 **The `fsync` is the whole story, and it serializes.** Latency rises by roughly 254 µs per batch — this container's `fsync` — against a 67 µs network round trip, so a journaled batch is about 4.8× slower single-connection. Throughput tells the sharper part: it is flat at 3.2–3.8k batches/sec at *every* thread count, where the unjournaled rows climb to ~200k at 4 threads. The append and `fsync` run inside the same exclusive section the batch already holds, so concurrent connections queue behind one `fsync` at a time; adding connections adds nothing. That is the design's cost accepted with open eyes (opt-in, off by default, paid only by journaled adapters), and it is also the exact profile ADR-0025's revisit trigger anticipated: *if the journal's `fsync` cost dominates a real workload, a group commit — one `fsync` per several batches, across connections — is the standard answer and a separate design.* This row set is the number that decision would start from. No change to any unjournaled row: `dog-txn`, `order-txn`, and `employee-txn` are within this container's run-to-run band of the follow-up above.
 
+#### Group commit (FR-027): the same rows, re-measured
+
+**Added alongside `SERVER-001` v0.17.0** (ADR-0026, Accepted; `docs/design/SERVER-JOURNAL-GROUP-COMMIT-DESIGN.md`): the trigger the paragraph above named was taken. `CommitGroup` moves the journal's append and `fsync` out of the store's exclusive section and shares one `fsync` across every batch appended while the previous one was in flight (leader/follower, no timer, no delay, no thread), keeps applies in journal order through a turn gate, and checkpoints only at a quiescent moment. The harness is unchanged — same `dog-jrnl-txn` rows, same two-op batches, same 20-id pool, same `THREAD_COUNTS`/`LATENCY_ITERATIONS`/`OPS_PER_THREAD`, same container class — so the difference between the two row sets is exactly the discipline.
+
+**Single-connection, zero-contention round-trip latency** (µs/op, average of 5,000 sequential two-op batches):
+
+| Row | v0.15.0 (per-batch `fsync`) | v0.17.0 (group commit) |
+|---|---:|---:|
+| `dog-jrnl-txn` | 320.7 | 304.3 |
+| `dog-txn` (unjournaled, for reference) | 67.1 | 59.9 |
+
+**Aggregate throughput vs. concurrent client connections** (ops/sec, thread-per-connection):
+
+| Row | 1 thread | 4 threads | 32 threads | 64 threads |
+|---|---:|---:|---:|---:|
+| `dog-jrnl-txn`, v0.15.0 | 3,182 | 3,843 | 3,395 | 3,337 |
+| `dog-jrnl-txn`, v0.17.0 | 3,169 | 5,906 | 14,276 | 15,322 |
+| `dog-txn` (unjournaled), v0.17.0 run | 15,966 | 112,450 | 139,940 | 140,278 |
+
+**The `fsync` now scales with concurrency.** Single-connection latency is within the v0.15.0 band (304 µs against 321 — one `fsync`, as designed: a lone connection is its own leader). Throughput rises with connections instead of sitting flat: 3.2k → 5.9k → 14.3k → 15.3k batches/s, 4.6× at 64 connections against v0.15.0's 3,337. The absolute numbers are this container's, and it is a slower container today — every unjournaled row is 25–45% below the FR-025 run's — so the fair comparison is within the run: at 64 connections journaled throughput is now 11% of unjournaled (15.3k against 140k) where the v0.15.0 run put it at 1.7% (3.3k against 192k). Two notes from getting here. First, the first implementation used a condvar for the turn gate and measured 3.3k at 32 connections — flat, exactly v0.15.0's number — because releasing one turn woke every waiter, a herd quadratic in the group size; parking each waiter by sequence and unparking exactly its successor is the whole difference between that run and this one, and is recorded because the design did not anticipate it. Second, the gap to the design probe's ~29k/s is the apply step and the network round trip the probe did not have: it measured the journal step alone.
+
 ## External database comparison
 
 **This section is genuinely separate from everything above it**, same as `## Generic schema library`: every prior section compares backends this crate itself implements; this one is the first comparison against real, external, general-purpose databases — SQLite (`rusqlite`), Postgres (`postgres`, a locally-run server), and DuckDB (`duckdb`) — on the same three access-pattern shapes this document has always used: `get` (full-record read by UUID), `scan_ages` (whole-table average-age aggregate), and one-hop `littermate_of` traversal (here, a depth-bounded `WITH RECURSIVE` query over an adjacency table, since none of the three speak `DogStore::neighbors` natively). See ADR-0015 (Accepted) and `docs/specifications/storage/STORAGE-013-external-database-benchmark.md` for the full scope and methodology decisions; `benches/external_db.rs` for the implementation. `ProductionStore` is re-run fresh in the same process/session as the three external engines, not read back from an older run elsewhere in this document.

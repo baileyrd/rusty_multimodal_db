@@ -18,7 +18,7 @@ use rusty_multimodal_db::server::framing::{read_message, write_message};
 use rusty_multimodal_db::server::protocol::{
     ErrorCode, Request, Response, ScanValue, TransactionOp, MAX_STAGED_OPS, PROTOCOL_VERSION,
 };
-use rusty_multimodal_db::server::{serve, AuthConfig};
+use rusty_multimodal_db::server::{serve, AuthConfig, ConnectionStore};
 use rusty_multimodal_db::ProductionStore;
 use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
@@ -717,4 +717,85 @@ fn a_journaled_server_journals_transactions_and_session_commits_only() {
         "a single UpdateField must not journal"
     );
     assert_eq!(age_of(&mut c, Uuid::from_u128(1)), 31);
+}
+
+// ---------------------------------------------------------------------------
+// Group commit (`SERVER-001-FR-027`, ADR-0026,
+// `docs/design/SERVER-JOURNAL-GROUP-COMMIT-DESIGN.md`)
+// ---------------------------------------------------------------------------
+
+/// `GRP-FR-002`/`GRP-FR-003` (design criterion 3, through the server):
+/// eight connections fire transactions at a journaled server
+/// concurrently; afterwards, replaying the journal onto pristine
+/// pre-batch files yields exactly the state the live server serves — so
+/// the order the journal holds is the order the store applied.
+#[test]
+fn concurrent_journaled_transactions_replay_to_the_live_state() {
+    let (addr, journal) = start_journaled_server(sample_records());
+    let ids = [Uuid::from_u128(1), Uuid::from_u128(2), Uuid::from_u128(3)];
+    let clients: Vec<_> = (0..8u32)
+        .map(|t| {
+            thread::spawn(move || {
+                let mut c = connect(addr);
+                for i in 0..30u32 {
+                    let v = 100 + t * 1_000 + i;
+                    let a = ids[(t as usize + i as usize) % 3];
+                    let b = ids[(t as usize + i as usize + 1) % 3];
+                    let resp = roundtrip(
+                        &mut c,
+                        Request::Transaction {
+                            updates: vec![
+                                TransactionOp {
+                                    id: a,
+                                    field: FIELD_AGE,
+                                    value: ScanValue::U32(v),
+                                },
+                                TransactionOp {
+                                    id: b,
+                                    field: FIELD_AGE,
+                                    value: ScanValue::U32(v + 500),
+                                },
+                            ],
+                        },
+                    );
+                    assert_eq!(resp, Response::Ok);
+                }
+            })
+        })
+        .collect();
+    for c in clients {
+        c.join().unwrap();
+    }
+    let mut reader = connect(addr);
+    let live: Vec<u32> = ids.iter().map(|&id| age_of(&mut reader, id)).collect();
+
+    // Replay a copy of the journal onto pre-batch files.
+    let dir = unique_dir("server_transaction_integration_group_replay");
+    std::fs::create_dir_all(&dir).unwrap();
+    let copy = dir.join("txn.journal");
+    std::fs::copy(&journal, &copy).unwrap();
+    let replayed = DogConnectionStore::with_journal(
+        ProductionStore::create(sample_records(), Vec::new(), &dir.join("dogs.mmap")).unwrap(),
+        &copy,
+    )
+    .unwrap();
+    let from_journal: Vec<u32> = ids
+        .iter()
+        .map(|&id| {
+            match replayed
+                .get(id)
+                .unwrap()
+                .into_iter()
+                .find(|(field, _)| *field == FIELD_AGE)
+            {
+                Some((_, ScanValue::U32(age))) => age,
+                other => panic!("expected an age, got {other:?}"),
+            }
+        })
+        .collect();
+    assert_eq!(from_journal, live);
+    assert!(
+        live.iter().all(|&age| age >= 100),
+        "every id was written: {live:?}"
+    );
 }

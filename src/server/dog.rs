@@ -4,7 +4,7 @@
 //! `Children` are unsupported here — see [`super::order`] for the
 //! complementary case).
 
-use super::journal::{BatchJournal, CheckpointFlush, JournalError};
+use super::journal::{CheckpointFlush, CommitError, CommitGroup, JournalError};
 use super::protocol::{
     DomainSchema, ErrorCode, FieldCapabilities, FieldDescriptor, FieldRef, ParentLookup, RecordId,
     RelationCapabilities, ScanValue, TransactionOp, ValueKind,
@@ -14,7 +14,6 @@ use crate::concurrency::{ConcurrencyError, ConcurrentStore};
 use crate::production::TransactionalStore;
 use crate::store::{DogStore, StoreError};
 use std::path::Path;
-use std::sync::Mutex;
 
 /// `Dog::breed` — read-only over this protocol: no `ScannableField`/
 /// `UpdateField` exists for it in-process either (only `age` is mutable,
@@ -33,9 +32,10 @@ pub const FIELD_AGE: FieldRef = 1;
 pub struct DogConnectionStore<S> {
     store: S,
     /// `JRN-FR-001` (ADR-0025): the batch journal, when this adapter was
-    /// built with [`DogConnectionStore::with_journal`]. Locked only
-    /// inside `with_exclusive`, so it never contends with anything.
-    journal: Option<Mutex<BatchJournal>>,
+    /// built with [`DogConnectionStore::with_journal`] — behind the
+    /// group-commit discipline of `GRP-FR-001`–`004` (ADR-0026), so its
+    /// `fsync` never runs inside `with_exclusive`.
+    journal: Option<CommitGroup>,
 }
 
 impl<S> DogConnectionStore<S> {
@@ -62,12 +62,16 @@ where
     /// or fully replayed by the next `with_journal` open — never partial.
     /// Opening replays every complete entry (an idempotent overwrite per
     /// operation), flushes the store, and truncates the journal; a torn
-    /// tail is dropped. Costs one `fsync` per batch; single
-    /// `UpdateField`s are not journaled (`JRN-FR-007`). Opening the same
+    /// tail is dropped. Costs one `fsync` per batch on a lone
+    /// connection, and one per *group* of concurrent batches (`GRP-FR-002`,
+    /// ADR-0026) — the `fsync` runs outside the store's exclusive section,
+    /// batches apply in journal order, and a checkpoint waits for a
+    /// quiescent moment; single `UpdateField`s are not journaled
+    /// (`JRN-FR-007`). Opening the same
     /// files *without* a journal after a crash forgoes the replay — the
     /// one way to lose the guarantee, so open the same way every time.
     pub fn with_journal(store: S, journal_path: &Path) -> Result<Self, JournalError> {
-        let (mut journal, batches) = BatchJournal::open(journal_path)?;
+        let (journal, batches) = CommitGroup::open(journal_path)?;
         store.with_exclusive(|inner| -> Result<(), JournalError> {
             for (batch_index, batch) in batches.iter().enumerate() {
                 Self::apply_batch(inner, batch).map_err(|(index, code)| JournalError::Replay {
@@ -81,7 +85,7 @@ where
         })?;
         Ok(Self {
             store,
-            journal: Some(Mutex::new(journal)),
+            journal: Some(journal),
         })
     }
 
@@ -89,18 +93,21 @@ where
     /// `Dog`'s only mutable field is `age`; existence is the only thing
     /// that can vary at runtime (field/type validity is a pure match
     /// against the request itself, same as `update_field`'s own arms).
-    /// Safe under one continuously held lock: this crate never deletes a
-    /// record at runtime, so an id checked here stays valid for the apply
-    /// phase — see `docs/design/SERVER-TRANSACTION-DESIGN.md`'s own "no
-    /// runtime deletion" invariant.
+    /// Safe under one continuously held lock *and* — on the journaled
+    /// path, `GRP-FR-001` — outside any lock at all: this crate never
+    /// deletes a record at runtime, so an id `exists` says yes to stays
+    /// valid for the apply phase, and field/type validity is a pure
+    /// function of the request — see
+    /// `docs/design/SERVER-TRANSACTION-DESIGN.md`'s own "no runtime
+    /// deletion" invariant.
     fn validate_batch(
-        inner: &S::Exclusive,
         updates: &[TransactionOp],
+        exists: impl Fn(RecordId) -> bool,
     ) -> Result<(), (usize, ErrorCode)> {
         for (i, op) in updates.iter().enumerate() {
             match (op.field, &op.value) {
                 (FIELD_AGE, ScanValue::U32(_)) => {
-                    if DogStore::get(inner, op.id).is_none() {
+                    if !exists(op.id) {
                         return Err((i, ErrorCode::RecordNotFound));
                     }
                 }
@@ -232,29 +239,35 @@ where
     }
 
     fn apply_transaction(&self, updates: &[TransactionOp]) -> Result<(), (usize, ErrorCode)> {
-        self.store.with_exclusive(|inner| {
-            Self::validate_batch(inner, updates)?;
-            // `JRN-FR-002`: with a journal, the batch is durable *before*
-            // its first write; a journal failure is the batch's failure,
-            // with nothing applied. `JRN-FR-004`: after the writes, a
-            // checkpoint when the journal has grown past its threshold —
-            // flush first, then truncate; a failed flush or truncate
-            // just leaves a longer journal, which replays idempotently.
-            match &self.journal {
-                None => Self::apply_batch(inner, updates),
-                Some(journal) => {
-                    let mut journal = journal.lock().map_err(|_| (0, ErrorCode::Journal))?;
-                    journal
-                        .append(updates)
-                        .map_err(|_| (0, ErrorCode::Journal))?;
-                    Self::apply_batch(inner, updates)?;
-                    if journal.needs_checkpoint() && inner.checkpoint_flush().is_ok() {
-                        let _ = journal.truncate();
-                    }
-                    Ok(())
-                }
+        match &self.journal {
+            // The v0.7.0 path, unchanged: validate then apply under one
+            // exclusive section.
+            None => self.store.with_exclusive(|inner| {
+                Self::validate_batch(updates, |id| DogStore::get(inner, id).is_some())?;
+                Self::apply_batch(inner, updates)
+            }),
+            // `GRP-FR-001`: validate with per-call reads, then append,
+            // group-`fsync`, and take the apply turn *before* the
+            // exclusive section — which now holds only the writes and, at
+            // a quiescent checkpoint, the store flush. `JRN-FR-002` still
+            // holds by step order: durable before the first write; a
+            // journal or `fsync` failure is the batch's failure with
+            // nothing applied (`GRP-FR-005`).
+            Some(journal) => {
+                Self::validate_batch(updates, |id| DogStore::get(&self.store, id).is_some())?;
+                journal
+                    .commit(updates, |turn| {
+                        self.store.with_exclusive(|inner| {
+                            Self::apply_batch(inner, updates)?;
+                            Ok(turn.checkpoint_due && inner.checkpoint_flush().is_ok())
+                        })
+                    })
+                    .map_err(|e| match e {
+                        CommitError::Journal(_) => (0, ErrorCode::Journal),
+                        CommitError::Apply(e) => e,
+                    })
             }
-        })
+        }
     }
 }
 
@@ -263,6 +276,7 @@ mod tests {
     use super::*;
     use crate::production::ProductionStore;
     use crate::record::DogRecord;
+    use crate::server::journal::BatchJournal;
     use crate::test_support::fresh_temp_dir;
     use uuid::Uuid;
 
@@ -459,6 +473,56 @@ mod tests {
                 code: ErrorCode::RecordNotFound
             })
         ));
+    }
+
+    /// `GRP-FR-001` (ADR-0026, design criterion 1): the journal's `fsync`
+    /// never runs under the store's write lock — while a leader is held
+    /// before its sync, another thread's read and single write on the
+    /// same adapter both complete.
+    #[test]
+    fn the_fsync_never_holds_the_store_lock() {
+        use std::sync::{mpsc, Arc, Mutex};
+        let dir = fresh_temp_dir("server_dog_journal_lock").unwrap();
+        let records = vec![
+            DogRecord::new(Uuid::from_u128(1), "labrador", 3),
+            DogRecord::new(Uuid::from_u128(2), "labrador", 5),
+        ];
+        let adapter = Arc::new(
+            DogConnectionStore::with_journal(
+                ProductionStore::create(records, Vec::new(), &dir.join("dogs.mmap")).unwrap(),
+                &dir.join("txn.journal"),
+            )
+            .unwrap(),
+        );
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let release_rx = Mutex::new(release_rx);
+        adapter
+            .journal
+            .as_ref()
+            .unwrap()
+            .set_sync_hook(Box::new(move || {
+                let _ = entered_tx.send(());
+                if let Ok(rx) = release_rx.lock() {
+                    let _ = rx.recv();
+                }
+                Ok(())
+            }));
+        let leader = {
+            let adapter = Arc::clone(&adapter);
+            std::thread::spawn(move || adapter.apply_transaction(&[op(1, 30)]))
+        };
+        entered_rx.recv().unwrap();
+        // The leader is inside its sync step: the store must be free.
+        assert_eq!(age_of(&adapter, 1), 3, "nothing applied before the sync");
+        assert_eq!(
+            adapter.update_field(Uuid::from_u128(2), FIELD_AGE, ScanValue::U32(7)),
+            Ok(true)
+        );
+        release_tx.send(()).unwrap();
+        leader.join().unwrap().unwrap();
+        assert_eq!(age_of(&adapter, 1), 30);
+        assert_eq!(age_of(&adapter, 2), 7);
     }
 
     /// `JRN-FR-004` (design criterion 4): past `JOURNAL_CHECKPOINT_BYTES`

@@ -14,7 +14,8 @@
 //! for mutual TLS, ADR-0023 — an optional `SERVER_TLS_CLIENT_CA_PATH`
 //! naming the CA roots every client certificate must chain to; and
 //! `SERVER_TXN_JOURNAL_PATH`, ADR-0025, making every transaction batch
-//! crash-atomic at one `fsync` per batch) — with none of them set, this
+//! crash-atomic at one `fsync` per batch, shared across concurrent batches
+//! by ADR-0026's group commit) — with none of them set, this
 //! behaves exactly as it did before any of these features existed: no
 //! auth, no encryption, no journal. Do not expose this beyond a
 //! trusted, localhost/development network unless both are configured —
