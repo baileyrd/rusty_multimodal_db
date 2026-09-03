@@ -59,6 +59,7 @@
 //! | 2 | `SERVER-001` v0.10.0 | + `Request::Hello` (index 10), `Response::Hello` (index 10) |
 //! | 4 | `SERVER-001` v0.15.0 | + `ErrorCode::Journal` (9) — a journaled adapter could not journal a batch (nothing applied); carried by `Response::TransactionFailed`, and downgraded to `Unsupported` on a connection negotiated below 4 (rule 3's "nearest older shape"). ADR-0025 |
 //! | 3 | `SERVER-001` v0.14.0 | + `Request::Begin`/`Commit`/`Rollback` (11–13), `Response::Staged` (11), `ErrorCode::NoSession`/`SessionOpen`/`SessionFull` (6–8) — the first *gated* variants: a server keeps the negotiated version per connection and answers the three requests `Malformed` below 3 (rule 3); a client sends them only after negotiating ≥ 3 (rule 4). ADR-0024 |
+//! | 5 | `SERVER-001` v0.18.0 | + `Request::BeginWith { flags }` (14) — a session opened with options; [`SESSION_READ_YOUR_WRITES`] makes the connection's own `GetById` see its staged writes (`RYW-FR-001`/`002`). `Malformed` below 5 (rule 3); sent only after negotiating ≥ 5 (rule 4). No new response shape or error code. ADR-0027 |
 //!
 //! ## Compatibility rules (`PROTO-FR-005`)
 //!
@@ -93,7 +94,13 @@ use uuid::Uuid;
 /// versions" table. Bumped by exactly one in any change that appends a
 /// variant (rule 2). Version 1 is retroactively the `SERVER-001` v0.9.1
 /// shape: what a client that never sends [`Request::Hello`] speaks.
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
+
+/// `Request::BeginWith` flag bit 0 (protocol 5, `RYW-FR-001`, ADR-0027):
+/// the session's own point reads (`GetById`) see its staged writes —
+/// see `docs/design/SERVER-SESSION-READ-YOUR-WRITES-DESIGN.md`. Every
+/// other bit is unknown to this build and makes the request `Malformed`.
+pub const SESSION_READ_YOUR_WRITES: u32 = 1;
 
 /// The most `UpdateField`s one connection may stage between
 /// [`Request::Begin`] and [`Request::Commit`] (`SESS-FR-004`, ADR-0024):
@@ -334,6 +341,23 @@ pub enum Request {
     /// Protocol 3. Discard the session's staged writes and close it.
     /// `NoSession` without one open.
     Rollback,
+    /// Protocol 5. [`Request::Begin`] with options (`RYW-FR-001`, ADR-0027,
+    /// `docs/design/SERVER-SESSION-READ-YOUR-WRITES-DESIGN.md`): `flags: 0`
+    /// is exactly `Begin`; [`SESSION_READ_YOUR_WRITES`] makes this
+    /// connection's own [`Request::GetById`] answer with its staged writes
+    /// laid over the committed record — last staged write per field wins,
+    /// only for fields the record carries, only when the staged value's
+    /// kind matches and the schema marks the field updatable, so a write
+    /// that would fail at `Commit` never produces a misleading read
+    /// (`RYW-FR-002`). Set reads (`ScanField`, `FilterEq`, the relation
+    /// reads), plain `Begin` sessions, and every other connection keep
+    /// committed-state reads (`RYW-FR-003`/`004`). Any other bit set is
+    /// `Malformed` and opens nothing; `SessionOpen` while one is open;
+    /// `Malformed` on a connection negotiated below 5. Answered by
+    /// `handle_connection` itself, never through [`super::dispatch`].
+    BeginWith {
+        flags: u32,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -524,6 +548,14 @@ mod tests {
         assert_golden("Begin", &Request::Begin, &[0x0b, 0x00, 0x00, 0x00]);
         assert_golden("Commit", &Request::Commit, &[0x0c, 0x00, 0x00, 0x00]);
         assert_golden("Rollback", &Request::Rollback, &[0x0d, 0x00, 0x00, 0x00]);
+        // Protocol 5 (`RYW-FR-006`): `BeginWith` at 14, its flags word LE.
+        assert_golden(
+            "BeginWith",
+            &Request::BeginWith {
+                flags: SESSION_READ_YOUR_WRITES,
+            },
+            &[0x0e, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00],
+        );
     }
 
     /// `BINENC-FR-004`: every `Response` variant's wire bytes, pinned —
@@ -682,14 +714,19 @@ mod tests {
     /// extends the table; this test is the reminder.
     #[test]
     fn protocol_version_is_the_one_the_table_names() {
-        assert_eq!(PROTOCOL_VERSION, 4);
+        assert_eq!(PROTOCOL_VERSION, 5);
     }
 
     /// `SESS-FR-001`: the session shapes round-trip through the codec like
     /// every existing variant.
     #[test]
     fn session_shapes_round_trip_through_the_codec() {
-        for req in [Request::Begin, Request::Commit, Request::Rollback] {
+        for req in [
+            Request::Begin,
+            Request::Commit,
+            Request::Rollback,
+            Request::BeginWith { flags: 1 },
+        ] {
             let bytes = crate::codec::encode(&req).unwrap();
             let decoded: Request = crate::codec::decode(&bytes).unwrap();
             assert!(matches!(
@@ -697,6 +734,10 @@ mod tests {
                 (Request::Begin, Request::Begin)
                     | (Request::Commit, Request::Commit)
                     | (Request::Rollback, Request::Rollback)
+                    | (
+                        Request::BeginWith { flags: 1 },
+                        Request::BeginWith { flags: 1 }
+                    )
             ));
         }
         let resp = Response::Staged { index: 7 };

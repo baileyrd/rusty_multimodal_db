@@ -175,3 +175,16 @@ Proposed: option 1. Concretely, at implementation:
   Implemented after `ADR-0026`'s unit, as `SERVER-001`'s next minor /
   FR, per `docs/design/SERVER-SESSION-READ-YOUR-WRITES-DESIGN.md`.
   (PR #153.)
+- 2026-09-03: implemented as `SERVER-001` v0.18.0 (FR-028) in this PR
+  — `Request::BeginWith { flags }` at index 14 and protocol version 5,
+  `SESSION_READ_YOUR_WRITES`, the `GetById` overlay (`overlay_staged`, a
+  pure function), `begin_read_your_writes` / `Session::get` /
+  `Session::read_your_writes` in the client, the unknown-index probe
+  moved to 15. One clarification, not a deviation: the overlay also
+  skips fields the schema marks non-updatable (the tags are read once
+  at `BeginWith`), because a read-only field of the right kind —
+  `Dog::breed` — passed the design's two checks and would have shown a
+  write `Commit` refuses; the guarantee the design states is kept by
+  the tighter rule. Every acceptance criterion 1–7 holds. Full sweep
+  green (353 lib tests, 352 + 1; transaction suite 15/15, client suite
+  6/6).

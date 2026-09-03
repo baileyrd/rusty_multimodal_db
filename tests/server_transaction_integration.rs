@@ -13,10 +13,11 @@
 //! limitation).
 
 use rusty_multimodal_db::record::DogRecord;
-use rusty_multimodal_db::server::dog::{DogConnectionStore, FIELD_AGE};
+use rusty_multimodal_db::server::dog::{DogConnectionStore, FIELD_AGE, FIELD_BREED};
 use rusty_multimodal_db::server::framing::{read_message, write_message};
 use rusty_multimodal_db::server::protocol::{
     ErrorCode, Request, Response, ScanValue, TransactionOp, MAX_STAGED_OPS, PROTOCOL_VERSION,
+    SESSION_READ_YOUR_WRITES,
 };
 use rusty_multimodal_db::server::{serve, AuthConfig, ConnectionStore};
 use rusty_multimodal_db::ProductionStore;
@@ -798,4 +799,192 @@ fn concurrent_journaled_transactions_replay_to_the_live_state() {
         live.iter().all(|&age| age >= 100),
         "every id was written: {live:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Read-your-writes sessions (`SERVER-001-FR-028`, ADR-0027,
+// `docs/design/SERVER-SESSION-READ-YOUR-WRITES-DESIGN.md`)
+// ---------------------------------------------------------------------------
+
+fn begin_read_your_writes(stream: &mut TcpStream) -> Response {
+    roundtrip(
+        stream,
+        Request::BeginWith {
+            flags: SESSION_READ_YOUR_WRITES,
+        },
+    )
+}
+
+fn breed_of(stream: &mut TcpStream, id: Uuid) -> String {
+    match roundtrip(stream, Request::GetById { id }) {
+        Response::Record { fields, .. } => {
+            match fields.into_iter().find(|(field, _)| *field == FIELD_BREED) {
+                Some((_, ScanValue::Str(breed))) => breed,
+                other => panic!("expected a breed, got {other:?}"),
+            }
+        }
+        other => panic!("expected a record, got {other:?}"),
+    }
+}
+
+/// `RYW-FR-002`/`RYW-FR-004` (design criteria 2 and 3): in a
+/// read-your-writes session the connection's own `GetById` shows its
+/// staged writes — the later of two stages wins — while another
+/// connection sees committed state throughout; after `Rollback` the
+/// session's own read is committed state again; after `Commit` both
+/// connections see the batch.
+#[test]
+fn a_read_your_writes_session_sees_its_own_staged_writes_and_nobody_else_does() {
+    let addr = start_server(sample_records(), AuthConfig::default());
+    let mut c = connect_v3(addr);
+    let mut other = connect(addr);
+    let id = Uuid::from_u128(1);
+
+    assert_eq!(begin_read_your_writes(&mut c), Response::Ok);
+    assert_eq!(stage(&mut c, id, 30), Response::Staged { index: 0 });
+    assert_eq!(age_of(&mut c, id), 30, "own read sees the staged write");
+    assert_eq!(breed_of(&mut c, id), "labrador", "other fields untouched");
+    assert_eq!(age_of(&mut other, id), 3, "another connection does not");
+    assert_eq!(stage(&mut c, id, 31), Response::Staged { index: 1 });
+    assert_eq!(age_of(&mut c, id), 31, "the last staged write wins");
+    assert_eq!(
+        age_of(&mut c, Uuid::from_u128(2)),
+        5,
+        "an unstaged id reads committed"
+    );
+    assert_eq!(roundtrip(&mut c, Request::Rollback), Response::Ok);
+    assert_eq!(
+        age_of(&mut c, id),
+        3,
+        "committed state again after rollback"
+    );
+
+    assert_eq!(begin_read_your_writes(&mut c), Response::Ok);
+    assert_eq!(stage(&mut c, id, 40), Response::Staged { index: 0 });
+    assert_eq!(age_of(&mut other, id), 3);
+    assert_eq!(roundtrip(&mut c, Request::Commit), Response::Ok);
+    assert_eq!(age_of(&mut c, id), 40);
+    assert_eq!(age_of(&mut other, id), 40);
+}
+
+/// `RYW-FR-002`/`RYW-FR-003` (design criteria 4 and 5): a staged write
+/// that would fail at `Commit` never produces a misleading read — a
+/// missing id stays `NotFound`, a read-only field and a kind-mismatched
+/// value are not overlaid — and set reads (`ScanField`) see committed
+/// state even in a read-your-writes session; each bad write then fails
+/// at `Commit` by its index.
+#[test]
+fn read_your_writes_never_shows_a_write_that_commit_would_refuse() {
+    let addr = start_server(sample_records(), AuthConfig::default());
+    let mut c = connect_v3(addr);
+    let id = Uuid::from_u128(1);
+    assert_eq!(begin_read_your_writes(&mut c), Response::Ok);
+
+    // A missing id: staged (nothing validates at stage time), never a record.
+    assert_eq!(
+        stage(&mut c, Uuid::from_u128(99), 1),
+        Response::Staged { index: 0 }
+    );
+    assert_eq!(
+        roundtrip(
+            &mut c,
+            Request::GetById {
+                id: Uuid::from_u128(99)
+            }
+        ),
+        Response::NotFound
+    );
+    // A read-only field of the right kind: not overlaid.
+    assert_eq!(
+        roundtrip(
+            &mut c,
+            Request::UpdateField {
+                id,
+                field: FIELD_BREED,
+                value: ScanValue::Str("poodle".into()),
+            }
+        ),
+        Response::Staged { index: 1 }
+    );
+    assert_eq!(breed_of(&mut c, id), "labrador");
+    // A kind mismatch on an updatable field: not overlaid.
+    assert_eq!(
+        roundtrip(
+            &mut c,
+            Request::UpdateField {
+                id,
+                field: FIELD_AGE,
+                value: ScanValue::Str("old".into()),
+            }
+        ),
+        Response::Staged { index: 2 }
+    );
+    assert_eq!(age_of(&mut c, id), 3);
+    // A good write is overlaid on the point read but not on a scan.
+    assert_eq!(stage(&mut c, id, 77), Response::Staged { index: 3 });
+    assert_eq!(age_of(&mut c, id), 77);
+    match roundtrip(&mut c, Request::ScanField { field: FIELD_AGE }) {
+        Response::ScanValues { values } => {
+            assert!(
+                !values.contains(&ScanValue::U32(77)),
+                "scan must be committed state: {values:?}"
+            );
+        }
+        other => panic!("expected scan values, got {other:?}"),
+    }
+    // Commit refuses the batch at the first bad write.
+    match roundtrip(&mut c, Request::Commit) {
+        Response::TransactionFailed {
+            index: 0,
+            code: ErrorCode::RecordNotFound,
+            ..
+        } => {}
+        other => panic!("expected TransactionFailed at 0, got {other:?}"),
+    }
+    assert_eq!(age_of(&mut c, id), 3);
+}
+
+/// `RYW-FR-001`/`RYW-FR-006` (design criterion 1): `BeginWith` is
+/// `Malformed` on a silent connection and on one that negotiated 4; on a
+/// version-5 connection an unknown flag bit is `Malformed` and opens
+/// nothing (the next `UpdateField` applies immediately), `flags: 0` is
+/// exactly `Begin` (no overlay), and a second open is `SessionOpen`.
+#[test]
+fn begin_with_is_gated_by_version_and_refuses_unknown_flags() {
+    let addr = start_server(sample_records(), AuthConfig::default());
+    let id = Uuid::from_u128(1);
+
+    let mut silent = connect(addr);
+    assert_err(begin_read_your_writes(&mut silent), ErrorCode::Malformed);
+
+    let mut v4 = connect(addr);
+    assert_eq!(
+        roundtrip(
+            &mut v4,
+            Request::Hello {
+                protocol_version: 4
+            }
+        ),
+        Response::Hello {
+            protocol_version: 4
+        }
+    );
+    assert_err(begin_read_your_writes(&mut v4), ErrorCode::Malformed);
+
+    let mut c = connect_v3(addr);
+    assert_err(
+        roundtrip(&mut c, Request::BeginWith { flags: 2 }),
+        ErrorCode::Malformed,
+    );
+    assert_eq!(stage(&mut c, id, 9), Response::Ok, "no session was opened");
+    assert_eq!(age_of(&mut c, id), 9);
+
+    assert_eq!(
+        roundtrip(&mut c, Request::BeginWith { flags: 0 }),
+        Response::Ok
+    );
+    assert_eq!(stage(&mut c, id, 10), Response::Staged { index: 0 });
+    assert_eq!(age_of(&mut c, id), 9, "flags: 0 is a plain session");
+    assert_err(begin_read_your_writes(&mut c), ErrorCode::SessionOpen);
+    assert_eq!(roundtrip(&mut c, Request::Rollback), Response::Ok);
 }

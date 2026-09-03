@@ -99,6 +99,16 @@
 //! API (compatibility rule 4): against a server that negotiated below 3
 //! it is [`ClientError::Unsupported`] with no frame sent.
 //!
+//! [`SchemaDrivenClient::begin_read_your_writes`] (`SERVER-001-FR-028`,
+//! ADR-0027, protocol version 5) opens the one exception: on that
+//! session, [`Session::get`] — the session's own point read — returns
+//! the committed record with the session's staged writes laid over it
+//! (last write per field wins; a write the server would refuse at commit
+//! is not shown). Scans, filters, and every other connection still see
+//! committed state. [`Session::get`] exists on every session, since a
+//! `Session` borrows the client mutably and no other read is reachable
+//! while one is open; on a plain session it reads committed state.
+//!
 //! # Transport encryption (`TlsConfig`), `SERVER-001-FR-022`
 //!
 //! A `TlsConfig`-configured server completes a TLS handshake before it
@@ -133,7 +143,7 @@
 use super::framing::{self, FrameError};
 use super::protocol::{
     DomainSchema, ErrorCode, FieldDescriptor, ParentLookup, RecordId, Request, Response, ScanValue,
-    PROTOCOL_VERSION,
+    PROTOCOL_VERSION, SESSION_READ_YOUR_WRITES,
 };
 use super::{pem, TlsConfigError};
 use std::fmt;
@@ -402,6 +412,7 @@ impl Write for Transport {
 pub struct Session<'a> {
     client: &'a mut SchemaDrivenClient,
     open: bool,
+    read_your_writes: bool,
 }
 
 impl Session<'_> {
@@ -453,6 +464,20 @@ impl Session<'_> {
             Response::Err { code, message } => Err(ClientError::Server(code, message)),
             _ => Err(ClientError::UnexpectedResponse("Ok or TransactionFailed")),
         }
+    }
+
+    /// Full-record read through this session (`RYW-FR-007`): on a
+    /// session opened by [`SchemaDrivenClient::begin_read_your_writes`]
+    /// the record carries this session's staged writes (`RYW-FR-002`);
+    /// on a plain [`SchemaDrivenClient::begin`] session it is committed
+    /// state, exactly [`SchemaDrivenClient::get`]. Fields come back named.
+    pub fn get(&mut self, id: RecordId) -> Result<Option<Vec<(String, ScanValue)>>, ClientError> {
+        self.client.get(id)
+    }
+
+    /// Whether this session was opened with read-your-writes.
+    pub fn read_your_writes(&self) -> bool {
+        self.read_your_writes
     }
 
     /// Discard every staged write and close the session.
@@ -676,6 +701,29 @@ impl SchemaDrivenClient {
         Ok(Session {
             client: self,
             open: true,
+            read_your_writes: false,
+        })
+    }
+
+    /// Open a transaction session whose own point reads see its staged
+    /// writes (`FR-028`, ADR-0027; see this module's own "Transaction
+    /// sessions" section) — `Request::BeginWith { SESSION_READ_YOUR_WRITES }`.
+    /// Requires a server that negotiated protocol version 5 or later —
+    /// `ClientError::Unsupported("read-your-writes session")` otherwise,
+    /// before any frame is sent (compatibility rule 4). Everything else is
+    /// [`SchemaDrivenClient::begin`].
+    pub fn begin_read_your_writes(&mut self) -> Result<Session<'_>, ClientError> {
+        if self.server_protocol_version < 5 {
+            return Err(ClientError::Unsupported("read-your-writes session"));
+        }
+        let resp = self.roundtrip(Request::BeginWith {
+            flags: SESSION_READ_YOUR_WRITES,
+        })?;
+        Self::expect_ok(resp)?;
+        Ok(Session {
+            client: self,
+            open: true,
+            read_your_writes: true,
         })
     }
 

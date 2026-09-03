@@ -255,7 +255,7 @@ fn hello_zero_and_a_late_hello_are_malformed_and_a_silent_client_is_served() {
 fn schema_driven_client_negotiates_the_current_version_on_every_domain() {
     let mut dog = SchemaDrivenClient::connect(start_dog_server(AuthConfig::default())).unwrap();
     assert_eq!(dog.server_protocol_version(), PROTOCOL_VERSION);
-    assert_eq!(dog.server_protocol_version(), 4);
+    assert_eq!(dog.server_protocol_version(), 5);
     let fields = dog.get(Uuid::from_u128(1)).unwrap().unwrap();
     assert!(fields
         .iter()
@@ -273,17 +273,17 @@ fn schema_driven_client_negotiates_the_current_version_on_every_domain() {
 /// Criterion 8: a request index this build does not know (the one just
 /// past `Rollback`, the highest at protocol version 3) is a decode error,
 /// and the connection closes with no reply — the pre-hello failure mode,
-/// unchanged and pinned. This test moved once already, when version 3
-/// appended 11–13 (ADR-0024); the next version that appends a variant
-/// moves it again.
+/// unchanged and pinned. This test has moved twice: when version 3
+/// appended 11–13 (ADR-0024) and when version 5 appended 14 (ADR-0027);
+/// the next version that appends a variant moves it again.
 #[test]
 fn an_unknown_request_index_closes_the_connection_without_a_reply() {
     let addr = start_dog_server(AuthConfig::default());
     let (mut reader, mut writer) = connect(addr);
 
     // Frame: u32 LE length 4, then a `Request` whose declaration index is
-    // 14 — one past `Request::Rollback` (13), the highest this build knows.
-    writer.write_all(&[0x04, 0, 0, 0, 0x0e, 0, 0, 0]).unwrap();
+    // 15 — one past `Request::BeginWith` (14), the highest this build knows.
+    writer.write_all(&[0x04, 0, 0, 0, 0x0f, 0, 0, 0]).unwrap();
     writer.flush().unwrap();
 
     let reply: Result<Response, _> = read_message(&mut reader);
@@ -445,6 +445,11 @@ fn a_pre_hello_server_is_reconnected_to_without_a_hello_unless_hello_is_required
     assert!(matches!(
         client.begin().map(|_| ()),
         Err(ClientError::Unsupported(_))
+    ));
+    // `RYW-FR-007`: the version-5 API is gated the same way, with no frame.
+    assert!(matches!(
+        client.begin_read_your_writes().map(|_| ()),
+        Err(ClientError::Unsupported("read-your-writes session"))
     ));
 
     match SchemaDrivenClient::connect_with(addr, ConnectOptions::new().require_hello()).map(|_| ())

@@ -627,7 +627,8 @@ addition, gated like any appended code. `dog_server` gains an optional
 - Read-your-writes inside a session: out of scope here; if ever wanted,
   a per-connection overlay on `GetById`/`ScanField` is the shape, at a
   real cost on every read path. *Taken up as `ADR-0027` /
-  `SERVER-SESSION-READ-YOUR-WRITES-DESIGN.md` (Accepted): `GetById`
+  `SERVER-SESSION-READ-YOUR-WRITES-DESIGN.md` (Accepted; implemented as
+  `SERVER-001` v0.18.0 / FR-028): `GetById`
   only — `ScanField` answers by position with no ids, so it cannot be
   overlaid — opt-in per session, at a cost only on the reads that asked.*
 - Whether Part B's journal should one day absorb single writes
