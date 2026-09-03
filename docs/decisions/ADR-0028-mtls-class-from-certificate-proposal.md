@@ -163,4 +163,4 @@ Proposed: option 1. Concretely, at implementation:
   stands, `ADR-0023`'s trigger stays armed. Whichever is chosen, the
   upstream `rusty_tls` PR is the first step and needs either the
   repository attached to a session or the owner applying the design's
-  patch. Proposed in this PR.
+  patch. Proposed in PR #149.
