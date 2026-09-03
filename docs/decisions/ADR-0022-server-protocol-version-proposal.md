@@ -159,7 +159,10 @@ Accepted: option 3. Concretely, at implementation:
   `DescribeSchema` it already pays). Nothing per request.
 - A pre-hello server (every server built before v0.10.0) drops a
   hello-sending client with no reply. There is no such deployed server
-  to protect; it is named, not mitigated.
+  to protect; it is named, not mitigated. *Mitigated in the client at
+  v0.16.0 / FR-026, at the owner's call (see the revisit trigger
+  below): `SchemaDrivenClient` reconnects once without a `Hello` and
+  speaks version 1.*
 - Rule (iii) is a discipline with no enforcing code at version 2: the
   first version-3 response shape must add the per-connection state and
   the branch. The rule says so; the golden vectors and the "introduced
@@ -201,7 +204,12 @@ Accepted: option 3. Concretely, at implementation:
   leaving the hello's field a `u32`.
 - Revisit if: a pre-hello server is found deployed against a
   hello-sending client — a reconnect-without-hello fallback in the
-  client library becomes worth its heuristic.
+  client library becomes worth its heuristic. *Taken ahead of the
+  trigger, at the owner's explicit call and against this ADR's own
+  "not while none is deployed": `SERVER-001` v0.16.0 / FR-026 in the PR
+  after #142 — default-on, bounded to one silent reconnect on an
+  EOF-class error under the `Hello`, with `ConnectOptions::require_hello()`
+  as the opt-out. No change to this decision's wire shape.*
 - Revisit if: `SchemaDrivenClient` is used against an auth-configured
   server — it has no `authenticate` today (pre-existing, independent of
   this design); a separate unit. *Taken: `SERVER-001` v0.11.0 / FR-021

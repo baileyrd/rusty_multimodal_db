@@ -467,7 +467,10 @@ No change to `framing.rs`, `dog.rs`, `order.rs`, `employee.rs`,
   EOF, `ClientError::Frame(FrameError::Io(..))`. Named in
   `SchemaDrivenClient::connect`'s docs. Not distinguishable from a
   network fault on the wire, and not worth a reconnect-without-hello
-  heuristic while no such server is deployed.
+  heuristic while no such server is deployed. *Since `SERVER-001`
+  v0.16.0 / FR-026, at the owner's call: `SchemaDrivenClient` reconnects
+  once without a `Hello` on exactly that EOF and speaks version 1;
+  `ConnectOptions::require_hello()` restores this row's behavior.*
 - `Hello` with version 0, or after the first frame:
   `Response::Err { code: Malformed, .. }`; connection stays open; the
   negotiated version is unchanged (1 in the second case, since no valid
@@ -567,7 +570,10 @@ No change to `framing.rs`, `dog.rs`, `order.rs`, `employee.rs`,
   `DescribeSchema` itself) plus `authenticate(&mut self, token)`.*
 - Whether a pre-hello server should ever be given a reconnect-without-
   hello fallback in the client library. Not while none is deployed;
-  re-arm if one is.
+  re-arm if one is. *Resolved the other way, by the owner: `SERVER-001`
+  v0.16.0 / FR-026 ships it default-on, bounded to one silent reconnect
+  on an EOF-class error under the `Hello`, with `require_hello()` as the
+  opt-out — over the recommendation to close it.*
 
 ## Change history
 
