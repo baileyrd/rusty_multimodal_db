@@ -65,6 +65,7 @@ pub enum RequestKind {
     Commit,
     Rollback,
     BeginWith,
+    Query,
 }
 
 impl RequestKind {
@@ -85,6 +86,7 @@ impl RequestKind {
             Request::Commit => RequestKind::Commit,
             Request::Rollback => RequestKind::Rollback,
             Request::BeginWith { .. } => RequestKind::BeginWith,
+            Request::Query { .. } => RequestKind::Query,
         }
     }
 }

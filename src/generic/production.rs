@@ -29,7 +29,9 @@
 //! quadrupling the trait surface for a wrapper that only ever has one
 //! real implementation strategy (take the lock, delegate).
 
-use super::query::{Children, FilterEq, GetById, Neighbors, Parent, ScanField, UpdateField};
+use super::query::{
+    AllIds, Children, FilterEq, GetById, Neighbors, Parent, ScanField, UpdateField,
+};
 use super::store::Flush;
 use super::traits::{ChildOf, IndexedField, Record, ScannableField, SymmetricRelation};
 use super::NotFound;
@@ -177,6 +179,21 @@ impl<S> GenericProductionStore<S> {
         S: GetById<R>,
     {
         self.inner.read().expect(LOCK_POISONED).get(id)
+    }
+
+    /// Every id this store holds for `R`, unspecified order —
+    /// `SQL-FR-005`, ADR-0034, the same "for `R`" shape every other
+    /// method here already takes.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the lock is poisoned — see `LOCK_POISONED`.
+    pub fn all_ids<R>(&self) -> Vec<R::Id>
+    where
+        R: Record,
+        S: AllIds<R>,
+    {
+        self.inner.read().expect(LOCK_POISONED).all_ids()
     }
 
     /// # Panics

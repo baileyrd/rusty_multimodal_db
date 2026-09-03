@@ -14,6 +14,15 @@ pub trait GetById<R: Record> {
     fn get(&self, id: R::Id) -> Option<R>;
 }
 
+/// Every id this store holds, unspecified order — the one primitive
+/// `SERVER-001`'s `Request::Query` needs and no existing query trait
+/// exposes (`SQL-FR-005`, ADR-0034, `docs/design/SERVER-SQL-SELECT-DESIGN.md`):
+/// `GetById` needs an id already in hand, `FilterEq` needs an index,
+/// `ScanField` returns values with no id attached.
+pub trait AllIds<R: Record> {
+    fn all_ids(&self) -> Vec<R::Id>;
+}
+
 /// Generalizes `same_breed` — filter by equality on any `IndexedField`.
 pub trait FilterEq<R, Marker>
 where

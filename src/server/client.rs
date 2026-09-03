@@ -149,10 +149,11 @@
 
 use super::framing::{self, FrameError};
 use super::protocol::{
-    DomainSchema, ErrorCode, FieldDescriptor, ParentLookup, RecordId, Request, Response, ScanValue,
-    PROTOCOL_VERSION, SESSION_READ_YOUR_WRITES, SESSION_SNAPSHOT_ISOLATION,
-    SESSION_VALIDATE_ON_STAGE,
+    DomainSchema, ErrorCode, FieldDescriptor, FieldRef, ParentLookup, Predicate, RecordId, Request,
+    Response, ScanValue, Selection, ValueKind, PROTOCOL_VERSION, SESSION_READ_YOUR_WRITES,
+    SESSION_SNAPSHOT_ISOLATION, SESSION_VALIDATE_ON_STAGE,
 };
+use super::sql;
 use super::{pem, TlsConfigError};
 use std::fmt;
 use std::io::{self, BufReader, Read, Write};
@@ -193,6 +194,15 @@ pub enum ClientError {
         message: String,
     },
     UnexpectedResponse(&'static str),
+    /// A SQL string given to [`SchemaDrivenClient::query`] failed to
+    /// parse, or resolved to something invalid against this domain's
+    /// schema — an unresolvable column name (reported as
+    /// [`ClientError::UnknownField`] instead, matching every other
+    /// name-addressed method), a `WHERE` literal that doesn't match its
+    /// field's real type, or an ordering comparator (`<`/`<=`/`>`/`>=`)
+    /// against a `Str`/`Bool` field. Never a round trip — the server
+    /// never sees invalid SQL (`SQL-FR-001`/`002`, ADR-0034).
+    Sql(String),
 }
 
 impl fmt::Display for ClientError {
@@ -218,6 +228,7 @@ impl fmt::Display for ClientError {
             ClientError::UnexpectedResponse(expected) => {
                 write!(f, "expected a {expected} response, got a different shape")
             }
+            ClientError::Sql(message) => write!(f, "invalid SQL query: {message}"),
         }
     }
 }
@@ -553,6 +564,18 @@ impl Session<'_> {
         self.client.get(id)
     }
 
+    /// [`SchemaDrivenClient::query`] through this session — a `Session`
+    /// borrows the client mutably, so this is the only way to run a
+    /// `Query` while one is open. Unlike [`Session::get`], this is
+    /// **never** overlaid with the session's own staged writes and
+    /// **never** tracked into a snapshot-isolated session's read set —
+    /// `Query` is a set-shaped read, the same "only `GetById`" line
+    /// `RYW-FR`/`ISO-FR-002` already draw (`SQL-FR-009`, ADR-0034):
+    /// always committed state, on every session kind.
+    pub fn query(&mut self, sql: &str) -> Result<Vec<QueryRow>, ClientError> {
+        self.client.query(sql)
+    }
+
     /// Whether this session was opened with read-your-writes.
     pub fn read_your_writes(&self) -> bool {
         self.read_your_writes
@@ -586,6 +609,40 @@ impl Drop for Session<'_> {
         if self.open {
             let _ = self.client.roundtrip(Request::Rollback);
         }
+    }
+}
+
+/// One [`SchemaDrivenClient::query`] result row: the record's id and its
+/// selected fields, named not tagged — named purely to keep that
+/// method's own signature readable, not a type a caller needs to spell
+/// out.
+pub type QueryRow = (RecordId, Vec<(String, ScanValue)>);
+
+/// [`SchemaDrivenClient::query`]'s own resolution step (`SQL-FR-002`):
+/// turn one parsed `WHERE`-clause literal into the [`ScanValue`] its
+/// field's real [`ValueKind`] demands — `U32`/`I64`/`Bool`/`Str` each
+/// accept exactly one [`sql::Literal`] shape; anything else, including a
+/// `U32` literal too large to fit, is a client-side `ClientError::Sql`,
+/// never a round trip.
+fn resolve_literal(
+    field_name: &str,
+    kind: ValueKind,
+    literal: &sql::Literal,
+) -> Result<ScanValue, ClientError> {
+    match (kind, literal) {
+        (ValueKind::U32, sql::Literal::Number(n)) => {
+            u32::try_from(*n).map(ScanValue::U32).map_err(|_| {
+                ClientError::Sql(format!(
+                    "{field_name}: {n} does not fit in this field's u32 type"
+                ))
+            })
+        }
+        (ValueKind::I64, sql::Literal::Number(n)) => Ok(ScanValue::I64(*n)),
+        (ValueKind::Bool, sql::Literal::Bool(b)) => Ok(ScanValue::Bool(*b)),
+        (ValueKind::Str, sql::Literal::Str(s)) => Ok(ScanValue::Str(s.clone())),
+        _ => Err(ClientError::Sql(format!(
+            "{field_name}: this literal does not match the field's type ({kind:?})"
+        ))),
     }
 }
 
@@ -927,6 +984,87 @@ impl SchemaDrivenClient {
             Response::ScanValues { values } => Ok(values),
             Response::Err { code, message } => Err(ClientError::Server(code, message)),
             _ => Err(ClientError::UnexpectedResponse("ScanValues")),
+        }
+    }
+
+    /// A real, minimal SQL `SELECT` — tokenized and parsed entirely
+    /// client-side, never sent as text on the wire (`SQL-FR-001`/`002`/
+    /// `003`, ADR-0034; see `src/server/sql.rs`'s own grammar and
+    /// `docs/design/SERVER-SQL-SELECT-DESIGN.md`). `Ok(rows)` names
+    /// every matching id and its selected fields, named not tagged, in
+    /// whatever unspecified order the server returned them — the same
+    /// "no meaningful order" convention `get`/`scan` already carry (no
+    /// `ORDER BY`). A syntax error (`ClientError::Sql`), an unknown
+    /// column (`ClientError::UnknownField`, matching every other
+    /// name-addressed method), a `WHERE` literal that doesn't match its
+    /// field's real type, or an ordering comparator (`<`/`<=`/`>`/`>=`)
+    /// against a `Str`/`Bool` field are each resolved — and rejected,
+    /// where invalid — entirely client-side, no round trip. Requires a
+    /// server negotiated at protocol version 8 or later —
+    /// `ClientError::Unsupported("sql query")`, no frame sent, otherwise
+    /// (`SQL-FR-010`).
+    pub fn query(&mut self, sql: &str) -> Result<Vec<QueryRow>, ClientError> {
+        if self.server_protocol_version < 8 {
+            return Err(ClientError::Unsupported("sql query"));
+        }
+        let parsed = sql::parse(sql).map_err(|e| ClientError::Sql(e.to_string()))?;
+
+        let select = match parsed.columns {
+            sql::ParsedColumns::All => Selection::All,
+            sql::ParsedColumns::Named(names) => {
+                let mut tags: Vec<FieldRef> = Vec::with_capacity(names.len());
+                for name in &names {
+                    tags.push(self.field(name)?.tag);
+                }
+                Selection::Fields(tags)
+            }
+        };
+
+        let mut filter = Vec::with_capacity(parsed.conditions.len());
+        for condition in &parsed.conditions {
+            let field = self.field(&condition.name)?;
+            let tag = field.tag;
+            let kind = field.value_kind;
+            if condition.op.is_ordering() && !matches!(kind, ValueKind::U32 | ValueKind::I64) {
+                return Err(ClientError::Sql(format!(
+                    "{}: an ordering comparator (<, <=, >, >=) needs a U32 or I64 field, not {kind:?}",
+                    condition.name
+                )));
+            }
+            let value = resolve_literal(&condition.name, kind, &condition.value)?;
+            filter.push(Predicate {
+                field: tag,
+                op: condition.op,
+                value,
+            });
+        }
+
+        match self.roundtrip(Request::Query {
+            select,
+            filter,
+            limit: parsed.limit,
+        })? {
+            Response::Rows { rows } => Ok(rows
+                .into_iter()
+                .map(|(id, fields)| {
+                    let named = fields
+                        .into_iter()
+                        .map(|(tag, value)| {
+                            let name = self
+                                .schema
+                                .fields
+                                .iter()
+                                .find(|f| f.tag == tag)
+                                .map(|f| f.name.clone())
+                                .unwrap_or_else(|| tag.to_string());
+                            (name, value)
+                        })
+                        .collect();
+                    (id, named)
+                })
+                .collect()),
+            Response::Err { code, message } => Err(ClientError::Server(code, message)),
+            _ => Err(ClientError::UnexpectedResponse("Rows")),
         }
     }
 

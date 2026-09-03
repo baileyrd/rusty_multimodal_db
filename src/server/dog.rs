@@ -11,7 +11,7 @@ use super::protocol::{
 };
 use super::ConnectionStore;
 use crate::concurrency::{ConcurrencyError, ConcurrentStore};
-use crate::production::TransactionalStore;
+use crate::production::{AllIds, TransactionalStore};
 use crate::record::DogRecord;
 use crate::store::{DogStore, StoreError};
 use std::path::Path;
@@ -165,7 +165,7 @@ where
     }
 }
 
-impl<S: DogStore + ConcurrentStore + TransactionalStore + Send + Sync> ConnectionStore
+impl<S: DogStore + ConcurrentStore + TransactionalStore + AllIds + Send + Sync> ConnectionStore
     for DogConnectionStore<S>
 where
     S::Exclusive: CheckpointFlush,
@@ -177,6 +177,18 @@ where
                 (FIELD_AGE, ScanValue::U32(record.age)),
             ]
         })
+    }
+
+    /// `SQL-FR-004`/`SQL-FR-005` (ADR-0034): every id from `AllIds`, each
+    /// mapped through this adapter's own `get` — the exact per-record
+    /// shape `ConnectionStore::scan_all` needs, reused rather than
+    /// duplicated.
+    fn scan_all(&self) -> Vec<(RecordId, Vec<(FieldRef, ScanValue)>)> {
+        self.store
+            .all_ids()
+            .into_iter()
+            .filter_map(|id| self.get(id).map(|fields| (id, fields)))
+            .collect()
     }
 
     fn filter_eq(&self, _field: FieldRef, _value: &ScanValue) -> Result<Vec<RecordId>, ErrorCode> {
@@ -355,6 +367,35 @@ mod tests {
             ]
         );
         assert!(adapter.get(Uuid::from_u128(99)).is_none());
+    }
+
+    /// `SQL-FR-004`/`SQL-FR-005`: `scan_all` returns every record with
+    /// every field — exactly what `get` would return per id, for every
+    /// id `all_ids` names.
+    #[test]
+    fn scan_all_returns_every_record_and_field() {
+        let adapter = sample_adapter();
+        let mut rows = adapter.scan_all();
+        rows.sort_by_key(|(id, _)| *id);
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    Uuid::from_u128(1),
+                    vec![
+                        (FIELD_BREED, ScanValue::Str("labrador".into())),
+                        (FIELD_AGE, ScanValue::U32(3)),
+                    ]
+                ),
+                (
+                    Uuid::from_u128(2),
+                    vec![
+                        (FIELD_BREED, ScanValue::Str("labrador".into())),
+                        (FIELD_AGE, ScanValue::U32(5)),
+                    ]
+                ),
+            ]
+        );
     }
 
     #[test]

@@ -137,11 +137,13 @@ pub mod journal;
 pub mod order;
 mod pem;
 pub mod protocol;
+mod sql;
 
 use protocol::{
-    DomainSchema, ErrorCode, FieldRef, ParentLookup, RecordId, Request, Response, ScanValue,
-    TransactionOp, MAX_STAGED_OPS, MAX_TRACKED_READS, PROTOCOL_VERSION, SESSION_READ_YOUR_WRITES,
-    SESSION_SNAPSHOT_ISOLATION, SESSION_VALIDATE_ON_STAGE,
+    CompareOp, DomainSchema, ErrorCode, FieldRef, ParentLookup, Predicate, RecordId, Request,
+    Response, ScanValue, Selection, TransactionOp, MAX_STAGED_OPS, MAX_TRACKED_READS,
+    PROTOCOL_VERSION, SESSION_READ_YOUR_WRITES, SESSION_SNAPSHOT_ISOLATION,
+    SESSION_VALIDATE_ON_STAGE,
 };
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -240,6 +242,16 @@ pub trait ConnectionStore: Send + Sync {
     /// sentinel-index shape a precondition failure from `updates` itself
     /// uses. See `docs/design/SERVER-SESSION-SNAPSHOT-ISOLATION-DESIGN.md`,
     /// `ISO-FR-002`.
+    /// Every record's id and full field set, unspecified order — the
+    /// `ScanField`-style "no meaningful order" convention, generalized
+    /// from one field to all of them. The one new primitive
+    /// `Request::Query` needs (`SQL-FR-004`, ADR-0034): unconditionally a
+    /// full scan, no index — `dispatch`'s `Query` arm filters, projects,
+    /// and limits the result centrally, the same way for every domain, so
+    /// this method itself does neither. See
+    /// `docs/design/SERVER-SQL-SELECT-DESIGN.md`.
+    fn scan_all(&self) -> Vec<(RecordId, Vec<(FieldRef, ScanValue)>)>;
+
     fn apply_transaction(
         &self,
         updates: &[TransactionOp],
@@ -329,14 +341,135 @@ pub(crate) fn record_read_set(
     }
 }
 
+/// `SQL-FR-007` (ADR-0034): every rejection `Request::Query` can produce,
+/// checked against `schema` alone — before `ConnectionStore::scan_all`
+/// ever runs, so a malformed query costs nothing beyond this. An unknown
+/// tag in `select` or `filter` is `ErrorCode::UnknownField`; a predicate
+/// whose value kind doesn't match its field's real type, or whose
+/// comparator is an ordering one (`Lt`/`Le`/`Gt`/`Ge`) against a
+/// `Str`/`Bool` field, is `ErrorCode::Malformed` — both existing codes,
+/// no new wire addition.
+fn validate_query(
+    schema: &DomainSchema,
+    select: &Selection,
+    filter: &[Predicate],
+) -> Result<(), ErrorCode> {
+    let kind_of = |tag: FieldRef| {
+        schema
+            .fields
+            .iter()
+            .find(|f| f.tag == tag)
+            .map(|f| f.value_kind)
+    };
+    if let Selection::Fields(fields) = select {
+        for &tag in fields {
+            if kind_of(tag).is_none() {
+                return Err(ErrorCode::UnknownField);
+            }
+        }
+    }
+    for predicate in filter {
+        let kind = kind_of(predicate.field).ok_or(ErrorCode::UnknownField)?;
+        if !value_matches_kind(kind, &predicate.value) {
+            return Err(ErrorCode::Malformed);
+        }
+        let orderable_kind = matches!(kind, protocol::ValueKind::U32 | protocol::ValueKind::I64);
+        if predicate.op.is_ordering() && !orderable_kind {
+            return Err(ErrorCode::Malformed);
+        }
+    }
+    Ok(())
+}
+
+fn value_matches_kind(kind: protocol::ValueKind, value: &ScanValue) -> bool {
+    matches!(
+        (kind, value),
+        (protocol::ValueKind::U32, ScanValue::U32(_))
+            | (protocol::ValueKind::I64, ScanValue::I64(_))
+            | (protocol::ValueKind::Bool, ScanValue::Bool(_))
+            | (protocol::ValueKind::Str, ScanValue::Str(_))
+    )
+}
+
+/// `SQL-FR-006` (ADR-0034): filter, project, and limit `rows` — the one
+/// place this logic is written, shared by every domain's
+/// `Request::Query` (`ConnectionStore::scan_all` itself returns every
+/// record's every field, unfiltered and unprojected). `filter`'s
+/// predicates are `AND`-ed; `limit` truncates whatever order the input
+/// arrived in, not a meaningful top-N (no `ORDER BY`).
+fn evaluate_query(
+    rows: Vec<(RecordId, Vec<(FieldRef, ScanValue)>)>,
+    select: &Selection,
+    filter: &[Predicate],
+    limit: Option<usize>,
+) -> Vec<(RecordId, Vec<(FieldRef, ScanValue)>)> {
+    let mut matched: Vec<_> = rows
+        .into_iter()
+        .filter(|(_, fields)| filter.iter().all(|p| predicate_matches(fields, p)))
+        .map(|(id, fields)| (id, select_fields(fields, select)))
+        .collect();
+    if let Some(limit) = limit {
+        matched.truncate(limit);
+    }
+    matched
+}
+
+fn predicate_matches(fields: &[(FieldRef, ScanValue)], predicate: &Predicate) -> bool {
+    fields
+        .iter()
+        .find(|(field, _)| *field == predicate.field)
+        .is_some_and(|(_, value)| compare(value, predicate.op, &predicate.value))
+}
+
+/// `validate_query` already refused an ordering comparator against a
+/// `Str`/`Bool` field before this ever runs, so the `_ => false` arm
+/// below is unreachable through `dispatch` — kept as a safe default
+/// rather than a `match` that could panic if that invariant ever broke.
+fn compare(actual: &ScanValue, op: CompareOp, expected: &ScanValue) -> bool {
+    match op {
+        CompareOp::Eq => actual == expected,
+        CompareOp::Ne => actual != expected,
+        CompareOp::Lt | CompareOp::Le | CompareOp::Gt | CompareOp::Ge => match (actual, expected) {
+            (ScanValue::U32(a), ScanValue::U32(b)) => ordering_matches(a.cmp(b), op),
+            (ScanValue::I64(a), ScanValue::I64(b)) => ordering_matches(a.cmp(b), op),
+            _ => false,
+        },
+    }
+}
+
+fn ordering_matches(ordering: std::cmp::Ordering, op: CompareOp) -> bool {
+    use std::cmp::Ordering::{Equal, Greater, Less};
+    matches!(
+        (op, ordering),
+        (CompareOp::Lt, Less)
+            | (CompareOp::Gt, Greater)
+            | (CompareOp::Le, Less | Equal)
+            | (CompareOp::Ge, Greater | Equal)
+    )
+}
+
+fn select_fields(
+    fields: Vec<(FieldRef, ScanValue)>,
+    select: &Selection,
+) -> Vec<(FieldRef, ScanValue)> {
+    match select {
+        Selection::All => fields,
+        Selection::Fields(wanted) => fields
+            .into_iter()
+            .filter(|(field, _)| wanted.contains(field))
+            .collect(),
+    }
+}
+
 /// Compatibility rule 3's "nearest older shape" (`protocol.rs`): a
 /// response carrying a variant introduced after the connection's
 /// negotiated version is rewritten before it is sent. Two cases exist —
 /// `ErrorCode::Journal` (version 4, ADR-0025) and `ErrorCode::Conflict`
 /// (version 7, ADR-0033), both inside `TransactionFailed`, each seen as
 /// `Unsupported` by a connection below the version that introduced it.
-/// The session shapes (version 3) never need this: they cannot arise on a
-/// connection that could not `Begin`.
+/// The session shapes (version 3) and `Request::Query`/`Response::Rows`
+/// (version 8) never need this: neither can arise on a connection that
+/// could not send the gated request that produces it.
 fn downgrade_for_version(resp: Response, negotiated: u32) -> Response {
     match resp {
         Response::TransactionFailed {
@@ -386,7 +519,8 @@ fn outcome_of(resp: &Response) -> access::Outcome {
         | Response::NoParent
         | Response::Ok
         | Response::Hello { .. }
-        | Response::Staged { .. } => access::Outcome::Ok,
+        | Response::Staged { .. }
+        | Response::Rows { .. } => access::Outcome::Ok,
     }
 }
 
@@ -1115,6 +1249,23 @@ pub fn dispatch<S: ConnectionStore + ?Sized>(store: &S, req: Request) -> Respons
             Ok(values) => Response::ScanValues { values },
             Err(code) => err_response(code),
         },
+        // `SQL-FR-004`/`SQL-FR-007` (ADR-0034): validated against the
+        // schema alone before `scan_all` ever runs; a read, gated like
+        // `GetById`/`FilterEq`/`ScanField` above, never overlaid or
+        // read-set-tracked by a session (`SQL-FR-009`) — the intercepts
+        // for those live in `handle_connection`, keyed on `GetById`
+        // alone, so `Query` reaching `dispatch` at all already means
+        // neither applies.
+        Request::Query {
+            select,
+            filter,
+            limit,
+        } => match validate_query(&store.describe(), &select, &filter) {
+            Ok(()) => Response::Rows {
+                rows: evaluate_query(store.scan_all(), &select, &filter, limit),
+            },
+            Err(code) => err_response(code),
+        },
         Request::UpdateField { id, field, value } => match store.update_field(id, field, value) {
             Ok(true) => Response::Ok,
             Ok(false) => Response::NotFound,
@@ -1781,6 +1932,9 @@ mod tests {
                 None
             }
         }
+        fn scan_all(&self) -> Vec<(RecordId, Vec<(FieldRef, ScanValue)>)> {
+            vec![(RecordId::from_u128(1), vec![(FIELD_A, ScanValue::U32(7))])]
+        }
         fn filter_eq(
             &self,
             field: FieldRef,
@@ -1989,6 +2143,42 @@ mod tests {
         assert_eq!(
             dispatch(&store, Request::DescribeSchema),
             Response::Schema(store.describe())
+        );
+    }
+
+    /// `SQL-FR-004` end to end through `dispatch`: a valid `Query`
+    /// against `FixtureStore` answers `Response::Rows`; an unknown field
+    /// answers the typed error, never a panic.
+    #[test]
+    fn dispatch_answers_query_with_rows_or_a_typed_error() {
+        let store = FixtureStore;
+        assert_eq!(
+            dispatch(
+                &store,
+                Request::Query {
+                    select: Selection::All,
+                    filter: vec![Predicate {
+                        field: FIELD_A,
+                        op: CompareOp::Eq,
+                        value: ScanValue::U32(7),
+                    }],
+                    limit: None,
+                }
+            ),
+            Response::Rows {
+                rows: vec![(RecordId::from_u128(1), vec![(FIELD_A, ScanValue::U32(7))])]
+            }
+        );
+        assert_eq!(
+            dispatch(
+                &store,
+                Request::Query {
+                    select: Selection::Fields(vec![99]),
+                    filter: vec![],
+                    limit: None,
+                }
+            ),
+            err_response(ErrorCode::UnknownField)
         );
     }
 
@@ -2272,6 +2462,221 @@ mod tests {
             reads.get(&(RecordId::from_u128(0), 0)),
             Some(&ScanValue::U32(7))
         );
+    }
+
+    /// `SQL-FR-007` (ADR-0034): a two-field schema — one numeric
+    /// (`age`, `U32`), one string (`breed`, `Str`), the latter with
+    /// every capability flag `false` — for `validate_query`/
+    /// `evaluate_query` tests independent of any real domain adapter.
+    fn sql_test_schema() -> DomainSchema {
+        use protocol::{FieldCapabilities, FieldDescriptor, RelationCapabilities, ValueKind};
+        DomainSchema {
+            fields: vec![
+                FieldDescriptor {
+                    tag: 1,
+                    name: "age".into(),
+                    value_kind: ValueKind::U32,
+                    capabilities: FieldCapabilities {
+                        filter_eq: false,
+                        scan: true,
+                        update: true,
+                    },
+                },
+                FieldDescriptor {
+                    tag: 2,
+                    name: "breed".into(),
+                    value_kind: ValueKind::Str,
+                    capabilities: FieldCapabilities {
+                        filter_eq: false,
+                        scan: false,
+                        update: false,
+                    },
+                },
+            ],
+            relations: RelationCapabilities {
+                parent_children: false,
+                neighbors: false,
+            },
+        }
+    }
+
+    /// `SQL-FR-007`: an unknown field in `select` or `filter` is
+    /// `UnknownField`; an ordering comparator against `breed` (`Str`) is
+    /// `Malformed`; a kind-mismatched literal against `age` (`U32`) is
+    /// `Malformed`; a fully valid query is `Ok`, including one that
+    /// selects/filters `breed` — every capability flag `false` there
+    /// doesn't stop `Query` from reaching it (`SQL-FR-008`).
+    #[test]
+    fn validate_query_reports_unknown_fields_and_kind_mismatches() {
+        let schema = sql_test_schema();
+        assert_eq!(
+            validate_query(&schema, &Selection::Fields(vec![99]), &[]),
+            Err(ErrorCode::UnknownField)
+        );
+        assert_eq!(
+            validate_query(
+                &schema,
+                &Selection::All,
+                &[Predicate {
+                    field: 99,
+                    op: CompareOp::Eq,
+                    value: ScanValue::U32(1)
+                }]
+            ),
+            Err(ErrorCode::UnknownField)
+        );
+        assert_eq!(
+            validate_query(
+                &schema,
+                &Selection::All,
+                &[Predicate {
+                    field: 2,
+                    op: CompareOp::Gt,
+                    value: ScanValue::Str("a".into())
+                }]
+            ),
+            Err(ErrorCode::Malformed),
+            "an ordering comparator against a Str field is Malformed"
+        );
+        assert_eq!(
+            validate_query(
+                &schema,
+                &Selection::All,
+                &[Predicate {
+                    field: 1,
+                    op: CompareOp::Eq,
+                    value: ScanValue::Str("3".into())
+                }]
+            ),
+            Err(ErrorCode::Malformed),
+            "a Str literal against a U32 field is Malformed"
+        );
+        assert_eq!(
+            validate_query(
+                &schema,
+                &Selection::Fields(vec![2]),
+                &[Predicate {
+                    field: 2,
+                    op: CompareOp::Eq,
+                    value: ScanValue::Str("labrador".into())
+                }]
+            ),
+            Ok(()),
+            "breed has every capability flag false but is still queryable"
+        );
+    }
+
+    fn sql_test_rows() -> Vec<(RecordId, Vec<(FieldRef, ScanValue)>)> {
+        vec![
+            (
+                RecordId::from_u128(1),
+                vec![
+                    (1, ScanValue::U32(3)),
+                    (2, ScanValue::Str("labrador".into())),
+                ],
+            ),
+            (
+                RecordId::from_u128(2),
+                vec![(1, ScanValue::U32(5)), (2, ScanValue::Str("poodle".into()))],
+            ),
+            (
+                RecordId::from_u128(3),
+                vec![
+                    (1, ScanValue::U32(9)),
+                    (2, ScanValue::Str("labrador".into())),
+                ],
+            ),
+        ]
+    }
+
+    /// `SQL-FR-006`: an empty filter matches every row; a filter matching
+    /// nothing returns an empty `Vec`, never an error.
+    #[test]
+    fn evaluate_query_empty_filter_matches_everything_and_a_filter_matching_nothing_is_empty() {
+        let all = evaluate_query(sql_test_rows(), &Selection::All, &[], None);
+        assert_eq!(all.len(), 3);
+        let none = evaluate_query(
+            sql_test_rows(),
+            &Selection::All,
+            &[Predicate {
+                field: 1,
+                op: CompareOp::Gt,
+                value: ScanValue::U32(100),
+            }],
+            None,
+        );
+        assert!(none.is_empty());
+    }
+
+    /// `SQL-FR-006`: `AND`-ed predicates across every comparator kind —
+    /// only the row(s) matching every predicate come back.
+    #[test]
+    fn evaluate_query_ands_every_predicate_across_every_comparator() {
+        let result = evaluate_query(
+            sql_test_rows(),
+            &Selection::All,
+            &[
+                Predicate {
+                    field: 1,
+                    op: CompareOp::Ge,
+                    value: ScanValue::U32(5),
+                },
+                Predicate {
+                    field: 2,
+                    op: CompareOp::Eq,
+                    value: ScanValue::Str("labrador".into()),
+                },
+            ],
+            None,
+        );
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0, RecordId::from_u128(3));
+
+        for (op, expected_ids) in [
+            (CompareOp::Eq, vec![2]),
+            (CompareOp::Ne, vec![1, 3]),
+            (CompareOp::Lt, vec![1]),
+            (CompareOp::Le, vec![1, 2]),
+            (CompareOp::Gt, vec![3]),
+            (CompareOp::Ge, vec![2, 3]),
+        ] {
+            let rows = evaluate_query(
+                sql_test_rows(),
+                &Selection::All,
+                &[Predicate {
+                    field: 1,
+                    op,
+                    value: ScanValue::U32(5),
+                }],
+                None,
+            );
+            let mut ids: Vec<u128> = rows.iter().map(|(id, _)| id.as_u128() % 1000).collect();
+            ids.sort();
+            assert_eq!(ids, expected_ids, "comparator {op:?}");
+        }
+    }
+
+    /// `SQL-FR-003`: `Selection::All` returns every field;
+    /// `Selection::Fields` returns only the named subset.
+    #[test]
+    fn evaluate_query_selection_all_vs_named_fields() {
+        let all = evaluate_query(sql_test_rows(), &Selection::All, &[], None);
+        assert_eq!(all[0].1.len(), 2);
+        let named = evaluate_query(sql_test_rows(), &Selection::Fields(vec![2]), &[], None);
+        assert_eq!(named[0].1, vec![(2, ScanValue::Str("labrador".into()))]);
+    }
+
+    /// `SQL-FR-001`: `limit` truncates the row count and nothing else —
+    /// shorter than the match count truncates, longer (or `None`) leaves
+    /// every match.
+    #[test]
+    fn evaluate_query_limit_truncates_the_row_count_only() {
+        let limited = evaluate_query(sql_test_rows(), &Selection::All, &[], Some(2));
+        assert_eq!(limited.len(), 2);
+        let unbounded = evaluate_query(sql_test_rows(), &Selection::All, &[], Some(100));
+        assert_eq!(unbounded.len(), 3);
+        let zero = evaluate_query(sql_test_rows(), &Selection::All, &[], Some(0));
+        assert!(zero.is_empty());
     }
 
     /// Spin up `serve` over `FixtureStore` on a loopback port with

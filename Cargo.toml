@@ -145,6 +145,10 @@ required-features = ["server"]
 name = "server_protocol_version"
 required-features = ["server", "research"]
 
+[[test]]
+name = "server_sql_integration"
+required-features = ["server", "research"]
+
 # Same treatment, same reason.
 [[example]]
 name = "memory_footprint"
