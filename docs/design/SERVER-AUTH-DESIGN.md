@@ -340,7 +340,10 @@ if any, was closest to matching.
   `ADR-0029` (Accepted; implemented as `SERVER-001` v0.19.0 / FR-029):
   a decisions-only record on an `AuditSink` hung on `AuthConfig`, off
   by default. Rate limiting and lockout stay named, now with the record
-  they would be tuned from.*
+  they would be tuned from.* *Those two taken up as
+  `SERVER-AUTH-RATE-LIMIT-DESIGN.md` / `ADR-0030` (Proposed): a
+  per-connection lockout on by default, an opt-in per-peer budget,
+  nothing on the wire.*
 
 ## Security, privacy, and compatibility
 
