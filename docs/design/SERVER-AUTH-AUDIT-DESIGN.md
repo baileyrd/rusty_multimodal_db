@@ -374,7 +374,7 @@ the same discipline `dispatch` uses.
   directions ("1, 2, 3, 4"). (PR #151.)
 - 2026-09-03: Accepted as proposed. No content change. Implementation
   after `ADR-0027`'s unit, as `SERVER-001`'s next minor / FR. (PR #153.)
-- 2026-09-03: Implemented as `SERVER-001` v0.19.0 / FR-029 (this PR),
+- 2026-09-03: Implemented as `SERVER-001` v0.19.0 / FR-029 (PR #159),
   per the verification plan: acceptance criteria 1–7 hold as written,
   no deviation. `Disconnected` is emitted by a drop guard, so the
   "exactly one per admitted connection" invariant is structural; the
