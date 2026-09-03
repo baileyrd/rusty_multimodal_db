@@ -16,7 +16,10 @@
 //! ADR-0028, `SERVER_AUTH_READ_ONLY_CLIENT_CERTS`/
 //! `SERVER_AUTH_READ_WRITE_CLIENT_CERTS` (`:`-separated PEM files)
 //! classing a presented certificate by exact match — refused at startup
-//! without `SERVER_TLS_CLIENT_CA_PATH` (`CLS-FR-005`); and
+//! without `SERVER_TLS_CLIENT_CA_PATH` (`CLS-FR-005`); and, since
+//! ADR-0030, an opt-in per-peer failed-`Authenticate` budget,
+//! `SERVER_AUTH_RATE_LIMIT="<failures>/<seconds>"` (a per-connection
+//! lockout after five failures is on by default, not configurable); and
 //! `SERVER_TXN_JOURNAL_PATH`, ADR-0025, making every transaction batch
 //! crash-atomic at one `fsync` per batch, shared across concurrent batches
 //! by ADR-0026's group commit) — with none of them set, this
@@ -29,7 +32,7 @@
 use rusty_multimodal_db::record::DogRecord;
 use rusty_multimodal_db::server::audit::{AuditSink, FileAudit, StderrAudit};
 use rusty_multimodal_db::server::dog::DogConnectionStore;
-use rusty_multimodal_db::server::{serve, AuthConfig, TlsConfig, TokenClass};
+use rusty_multimodal_db::server::{serve, AuthConfig, RateLimit, TlsConfig, TokenClass};
 use rusty_multimodal_db::ProductionStore;
 use std::net::TcpListener;
 use std::path::Path;
@@ -92,6 +95,15 @@ fn main() {
         std::env::var("SERVER_TLS_CLIENT_CA_PATH").ok().as_deref(),
     )
     .unwrap_or_else(|e| panic!("{e}"));
+    // `SERVER_AUTH_RATE_LIMIT` (ADR-0030, `RL-FR-006`): an opt-in
+    // per-peer failed-`Authenticate` budget; the per-connection lockout
+    // at `MAX_AUTH_FAILURES` is always on and has no variable.
+    let auth = rate_limit_from_env_value(
+        auth,
+        std::env::var("SERVER_AUTH_RATE_LIMIT").ok().as_deref(),
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+    let rate_limited = auth.rate_limit().is_some();
     let audited = std::env::var_os("SERVER_AUDIT_LOG").is_some();
     let tls = match TlsConfig::from_env() {
         None => None,
@@ -101,7 +113,7 @@ fn main() {
         ),
     };
     eprintln!(
-        "dog_server listening on {addr} (auth: {}, TLS: {}, transaction journal: {}, audit log: {} — see ADR-0012/ADR-0014/ADR-0023/ADR-0025/ADR-0029; do not expose beyond a trusted network unless auth and TLS are both configured)",
+        "dog_server listening on {addr} (auth: {}, TLS: {}, transaction journal: {}, audit log: {}, auth rate limit: {} — see ADR-0012/ADR-0014/ADR-0023/ADR-0025/ADR-0029/ADR-0030; do not expose beyond a trusted network unless auth and TLS are both configured)",
         if auth.is_configured() { "configured" } else { "NOT configured" },
         match &tls {
             None => "NOT configured",
@@ -110,6 +122,7 @@ fn main() {
         },
         if journaled { "configured" } else { "NOT configured" },
         if audited { "configured" } else { "NOT configured" },
+        if rate_limited { "configured" } else { "lockout only (default)" },
     );
 
     serve(listener, connection_store, auth, tls);
@@ -173,9 +186,43 @@ fn certificate_classes_from_env_values(
     Ok(auth)
 }
 
+/// `SERVER_AUTH_RATE_LIMIT`'s decision table (`RL-FR-006`), factored so a
+/// test can drive it without touching the process environment: unset →
+/// `auth` unchanged; set → `RateLimit::parse`d and applied via
+/// `AuthConfig::with_rate_limit`; a malformed value names the variable in
+/// its error.
+fn rate_limit_from_env_value(auth: AuthConfig, value: Option<&str>) -> Result<AuthConfig, String> {
+    match value {
+        None => Ok(auth),
+        Some(value) => RateLimit::parse(value)
+            .map(|limit| auth.with_rate_limit(limit))
+            .map_err(|e| format!("SERVER_AUTH_RATE_LIMIT configured but invalid: {e}")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `RL-FR-006`: the startup decision table for `SERVER_AUTH_RATE_LIMIT`.
+    #[test]
+    fn rate_limit_from_env_value_follows_the_documented_table() {
+        let auth = rate_limit_from_env_value(AuthConfig::default(), None).unwrap();
+        assert!(auth.rate_limit().is_none());
+
+        let auth = rate_limit_from_env_value(AuthConfig::default(), Some("10/60")).unwrap();
+        assert_eq!(
+            auth.rate_limit(),
+            Some(RateLimit {
+                failures: 10,
+                window: std::time::Duration::from_secs(60)
+            })
+        );
+
+        let err =
+            rate_limit_from_env_value(AuthConfig::default(), Some("not-a-limit")).unwrap_err();
+        assert!(err.contains("SERVER_AUTH_RATE_LIMIT"));
+    }
 
     /// `CLS-FR-005`: the startup decision table for the certificate-class
     /// environment variables, driven directly rather than through the

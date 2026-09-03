@@ -143,12 +143,14 @@ use protocol::{
     SESSION_VALIDATE_ON_STAGE,
 };
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::io::{self, BufReader, BufWriter, Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{IpAddr, TcpListener, TcpStream};
 use std::path::Path;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::{Duration, Instant};
 
 /// One shared trait the dispatch loop is generic over, implemented by a
 /// thin per-domain adapter — the dispatch loop itself never depends on
@@ -346,6 +348,10 @@ pub struct AuthConfig {
     /// slices — no parsing, no constant-time requirement (certificates
     /// are public material).
     certificate_classes: Vec<(Vec<u8>, TokenClass)>,
+    /// `RL-FR-002`/`RL-FR-003` (ADR-0030): the opt-in per-peer failed-
+    /// `Authenticate` budget; `None` is no budget. Shared across every
+    /// connection thread through the `Arc`, same lifecycle as `audit`.
+    rate_limit: Option<Arc<FailureTable>>,
 }
 
 impl std::fmt::Debug for AuthConfig {
@@ -370,6 +376,8 @@ impl std::fmt::Debug for AuthConfig {
                     "none"
                 },
             )
+            // `RL-FR-002`: the budget's numbers, never the tracked peers.
+            .field("rate_limit", &self.rate_limit())
             .finish()
     }
 }
@@ -387,6 +395,7 @@ impl AuthConfig {
             read_write_token,
             audit: None,
             certificate_classes: Vec::new(),
+            rate_limit: None,
         }
     }
 
@@ -459,6 +468,7 @@ impl AuthConfig {
             read_write_token: std::env::var("SERVER_AUTH_READ_WRITE_TOKEN").ok(),
             audit: None,
             certificate_classes: Vec::new(),
+            rate_limit: None,
         }
     }
 
@@ -495,6 +505,193 @@ impl AuthConfig {
             }
         }
         result
+    }
+
+    /// `RL-FR-002` (ADR-0030): opt-in — count failed `Authenticate`s per
+    /// peer IP over `limit.window`; once a peer is at or over
+    /// `limit.failures` in its current window, every further
+    /// `Authenticate` from that address is refused before any comparison,
+    /// audited as `Throttled` — see `handle_connection`. Off unless
+    /// called; bounded by `MAX_TRACKED_PEERS` regardless of how many
+    /// addresses fail (`RL-FR-003`).
+    pub fn with_rate_limit(mut self, limit: RateLimit) -> Self {
+        self.rate_limit = Some(Arc::new(FailureTable::new(limit)));
+        self
+    }
+
+    /// The configured budget, if any.
+    pub fn rate_limit(&self) -> Option<RateLimit> {
+        self.rate_limit.as_ref().map(|table| table.limit)
+    }
+
+    /// `RL-FR-002`: whether `peer` is currently over its configured
+    /// budget — `false` with no budget configured or no peer address (a
+    /// `peer_addr` failure never throttles; it still locks out per
+    /// connection).
+    fn is_throttled(&self, peer: Option<IpAddr>) -> bool {
+        match (&self.rate_limit, peer) {
+            (Some(table), Some(peer)) => table.is_throttled(peer),
+            _ => false,
+        }
+    }
+
+    /// `RL-FR-002`: record one failed `Authenticate` from `peer` against
+    /// the configured budget — a no-op with no budget configured or no
+    /// peer address. Returns whether `peer` is now over budget.
+    fn note_failure(&self, peer: Option<IpAddr>) -> bool {
+        match (&self.rate_limit, peer) {
+            (Some(table), Some(peer)) => table.note_failure(peer),
+            _ => false,
+        }
+    }
+}
+
+/// `RL-FR-001` (ADR-0030): a connection's fifth failed `Authenticate` is
+/// answered `Unauthenticated` as any wrong token is, then the server
+/// records `LockedOut` and closes the connection. On by default and not
+/// configurable — the `MAX_STAGED_OPS` precedent: a knob nobody has asked
+/// for yet, not one designed in speculatively.
+pub const MAX_AUTH_FAILURES: u32 = 5;
+
+/// `RL-FR-003` (ADR-0030): the per-peer failure table never grows past
+/// this many tracked addresses — bounded memory under an address flood.
+/// On insert, expired entries are dropped first, then the oldest window
+/// start if the table is still full: the budget degrades toward "no
+/// budget" under a flood, never toward "no service."
+pub const MAX_TRACKED_PEERS: usize = 4096;
+
+/// `RL-FR-002` (ADR-0030): an opt-in per-peer failed-`Authenticate`
+/// budget — at most `failures` failures per `window`, per peer IP.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RateLimit {
+    pub failures: u32,
+    pub window: Duration,
+}
+
+/// `RateLimit::parse` failed — `SERVER_AUTH_RATE_LIMIT` was set but not
+/// `"<failures>/<seconds>"`, or one half was zero.
+#[derive(Debug)]
+pub struct RateLimitParseError(String);
+
+impl std::fmt::Display for RateLimitParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "invalid rate limit {:?}: expected \"<failures>/<seconds>\", both nonzero",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for RateLimitParseError {}
+
+impl RateLimit {
+    /// `RL-FR-006`: parse `"<failures>/<seconds>"` (e.g. `"10/60"`) —
+    /// both halves nonzero integers, or an error naming the whole input.
+    pub fn parse(s: &str) -> Result<Self, RateLimitParseError> {
+        let invalid = || RateLimitParseError(s.to_string());
+        let (failures, seconds) = s.split_once('/').ok_or_else(invalid)?;
+        let failures: u32 = failures.parse().map_err(|_| invalid())?;
+        let seconds: u64 = seconds.parse().map_err(|_| invalid())?;
+        if failures == 0 || seconds == 0 {
+            return Err(invalid());
+        }
+        Ok(Self {
+            failures,
+            window: Duration::from_secs(seconds),
+        })
+    }
+}
+
+/// One peer's current window: when it started (monotonic — never
+/// wall-clock, so a clock step cannot shorten or lengthen it) and how
+/// many failures have landed in it.
+#[derive(Debug, Clone, Copy)]
+struct Window {
+    started: Instant,
+    failures: u32,
+}
+
+/// `RL-FR-002`/`RL-FR-003`: the shared per-peer failure table backing
+/// [`AuthConfig::with_rate_limit`]. One mutex, touched only on the
+/// `Authenticate` path of a server with a budget configured, for one
+/// lookup or insert (`RL-FR-007`).
+#[derive(Debug)]
+struct FailureTable {
+    limit: RateLimit,
+    peers: Mutex<HashMap<IpAddr, Window>>,
+}
+
+impl FailureTable {
+    fn new(limit: RateLimit) -> Self {
+        Self {
+            limit,
+            peers: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// A poisoned mutex fails open — "not throttled" — trading a
+    /// vanishingly unlikely availability gap (another thread panicked
+    /// mid-update) for never wedging every connection's `Authenticate`
+    /// path; the per-connection lockout still holds regardless.
+    fn is_throttled(&self, peer: IpAddr) -> bool {
+        let Ok(peers) = self.peers.lock() else {
+            return false;
+        };
+        match peers.get(&peer) {
+            Some(window) => {
+                Instant::now().duration_since(window.started) < self.limit.window
+                    && window.failures >= self.limit.failures
+            }
+            None => false,
+        }
+    }
+
+    /// Record one failure for `peer`: a fresh window if none is tracked
+    /// or the current one expired, otherwise one more failure in it. If
+    /// tracking a new peer would exceed `MAX_TRACKED_PEERS`, expired
+    /// entries are purged first, then the oldest window start is evicted
+    /// if the table is still full (`RL-FR-003`). Returns whether `peer`
+    /// is now over budget.
+    fn note_failure(&self, peer: IpAddr) -> bool {
+        let Ok(mut peers) = self.peers.lock() else {
+            return false;
+        };
+        let now = Instant::now();
+        if let Some(window) = peers.get_mut(&peer) {
+            if now.duration_since(window.started) >= self.limit.window {
+                *window = Window {
+                    started: now,
+                    failures: 1,
+                };
+            } else {
+                window.failures += 1;
+            }
+        } else {
+            if peers.len() >= MAX_TRACKED_PEERS {
+                let window = self.limit.window;
+                peers.retain(|_, w| now.duration_since(w.started) < window);
+                if peers.len() >= MAX_TRACKED_PEERS {
+                    if let Some(oldest) = peers
+                        .iter()
+                        .min_by_key(|(_, w)| w.started)
+                        .map(|(addr, _)| *addr)
+                    {
+                        peers.remove(&oldest);
+                    }
+                }
+            }
+            peers.insert(
+                peer,
+                Window {
+                    started: now,
+                    failures: 1,
+                },
+            );
+        }
+        peers
+            .get(&peer)
+            .is_some_and(|w| w.failures >= self.limit.failures)
     }
 }
 
@@ -1061,6 +1258,11 @@ fn handle_connection<S: ConnectionStore + ?Sized>(
     // `STV-FR-001`: whether the open session validates each write as it
     // is staged; cleared with the session.
     let mut validate_on_stage = false;
+    // `RL-FR-001`: this connection's own failed-`Authenticate` count,
+    // never reset by a success — the fifth failure locks it out
+    // regardless of how many succeeded around it.
+    let mut failures: u32 = 0;
+    let peer_ip = peer.map(|addr| addr.ip());
 
     loop {
         let req: Request = match framing::read_message(&mut reader) {
@@ -1094,6 +1296,16 @@ fn handle_connection<S: ConnectionStore + ?Sized>(
                     },
                 ));
                 Response::Ok
+            } else if auth.is_throttled(peer_ip) {
+                // `RL-FR-002`: over budget — refused before any
+                // comparison, and it still counts toward the
+                // per-connection lockout below.
+                failures += 1;
+                sink.record(&audit::AuditEvent::now(
+                    peer,
+                    audit::AuditKind::Throttled { failures },
+                ));
+                err_response(ErrorCode::Unauthenticated)
             } else {
                 match auth.check(token) {
                     Some(class) => {
@@ -1105,6 +1317,8 @@ fn handle_connection<S: ConnectionStore + ?Sized>(
                         Response::Ok
                     }
                     None => {
+                        failures += 1;
+                        auth.note_failure(peer_ip);
                         sink.record(&audit::AuditEvent::now(
                             peer,
                             audit::AuditKind::AuthenticationFailed,
@@ -1114,6 +1328,15 @@ fn handle_connection<S: ConnectionStore + ?Sized>(
                 }
             };
             if !send_response(&mut writer, &resp) {
+                return;
+            }
+            // `RL-FR-001`: the response above is sent either way; only
+            // *when the connection closes* changes.
+            if failures >= MAX_AUTH_FAILURES {
+                sink.record(&audit::AuditEvent::now(
+                    peer,
+                    audit::AuditKind::LockedOut { failures },
+                ));
                 return;
             }
             continue;
@@ -2022,6 +2245,75 @@ mod tests {
         assert!(printed.contains("read_write_certificates: 2"));
         assert!(!printed.contains("171")); // 0xAB as decimal — no raw byte ever printed
         assert!(!printed.contains("[171, 205]"));
+    }
+
+    /// `RL-FR-006`, acceptance criterion 6: valid input parses, every
+    /// documented malformed shape is rejected.
+    #[test]
+    fn rate_limit_parse_accepts_valid_and_rejects_malformed_input() {
+        assert_eq!(
+            RateLimit::parse("10/60").unwrap(),
+            RateLimit {
+                failures: 10,
+                window: Duration::from_secs(60),
+            }
+        );
+        for bad in ["10", "0/60", "10/0", "a/b", "10/", "/60", "", "10/60/1"] {
+            assert!(
+                RateLimit::parse(bad).is_err(),
+                "{bad:?} should have been rejected"
+            );
+        }
+    }
+
+    /// Acceptance criterion 3: two peers are tracked independently.
+    #[test]
+    fn failure_table_tracks_each_peer_independently() {
+        let table = FailureTable::new(RateLimit {
+            failures: 3,
+            window: Duration::from_secs(60),
+        });
+        let a: IpAddr = "127.0.0.1".parse().unwrap();
+        let b: IpAddr = "127.0.0.2".parse().unwrap();
+        for _ in 0..3 {
+            table.note_failure(a);
+        }
+        assert!(table.is_throttled(a));
+        assert!(!table.is_throttled(b));
+    }
+
+    /// Acceptance criterion 4: after the window elapses, a peer that was
+    /// over budget is under budget again.
+    #[test]
+    fn failure_table_forgets_a_peer_once_its_window_elapses() {
+        let table = FailureTable::new(RateLimit {
+            failures: 1,
+            window: Duration::from_millis(20),
+        });
+        let peer: IpAddr = "127.0.0.1".parse().unwrap();
+        table.note_failure(peer);
+        assert!(table.is_throttled(peer));
+        std::thread::sleep(Duration::from_millis(30));
+        assert!(!table.is_throttled(peer));
+    }
+
+    /// Acceptance criterion 5: inserting more addresses than
+    /// `MAX_TRACKED_PEERS` evicts (here, since nothing has expired) the
+    /// oldest entries first — the table never exceeds the cap, and the
+    /// earliest-tracked peer is the one that falls out.
+    #[test]
+    fn failure_table_never_exceeds_max_tracked_peers() {
+        let table = FailureTable::new(RateLimit {
+            failures: 1,
+            window: Duration::from_secs(3600),
+        });
+        let first = IpAddr::V4(std::net::Ipv4Addr::from(0u32));
+        for i in 0..(MAX_TRACKED_PEERS as u32 + 10) {
+            let peer = IpAddr::V4(std::net::Ipv4Addr::from(i));
+            table.note_failure(peer);
+            assert!(table.peers.lock().unwrap().len() <= MAX_TRACKED_PEERS);
+        }
+        assert!(!table.peers.lock().unwrap().contains_key(&first));
     }
 
     /// `AUTH-FR-006`'s empirical half: a wrong token that differs from the

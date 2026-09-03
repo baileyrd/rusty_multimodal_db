@@ -144,7 +144,10 @@ Proposed: option 1. Concretely, at implementation:
   opt-in per-peer budget, both recorded here as `LockedOut`/`Throttled`;
   it also proposes marking `AuditKind` and `RequestKind`
   `#[non_exhaustive]`, which this decision intended by designing them
-  to grow with the gates. No change to this decision.*
+  to grow with the gates. No change to this decision. Implemented as
+  `SERVER-001` v0.22.0 / FR-032 (This PR.): `AuditKind` gained
+  `LockedOut`/`Throttled` and both enums are now `#[non_exhaustive]`,
+  exactly as proposed.*
 - Revisit if: access logging is wanted — a volume and privacy
   decision, a second sink or a second event family.
   *Taken up as `ADR-0031` / `docs/design/SERVER-ACCESS-LOG-DESIGN.md`,

@@ -16,7 +16,7 @@ use rusty_multimodal_db::server::client::{ClientError, SchemaDrivenClient};
 use rusty_multimodal_db::server::dog::{DogConnectionStore, FIELD_AGE};
 use rusty_multimodal_db::server::framing::{read_message, write_message};
 use rusty_multimodal_db::server::protocol::{ErrorCode, Request, Response, ScanValue};
-use rusty_multimodal_db::server::{serve, AuthConfig, TokenClass};
+use rusty_multimodal_db::server::{serve, AuthConfig, RateLimit, TokenClass};
 use rusty_multimodal_db::ProductionStore;
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
@@ -579,4 +579,147 @@ fn a_file_sink_appends_one_line_per_event_through_the_server() {
         .iter()
         .all(|l| l.starts_with("audit at=") && l.contains(" peer=127.0.0.1:")));
     assert_eq!(sink.dropped(), 0);
+}
+
+// ---------------------------------------------------------------------------
+// Rate limiting and lockout (`SERVER-001` next minor / FR, ADR-0030,
+// `docs/design/SERVER-AUTH-RATE-LIMIT-DESIGN.md`)
+// ---------------------------------------------------------------------------
+
+/// Acceptance criterion 1: the fifth failed `Authenticate` on one
+/// connection is answered `Unauthenticated` and the connection then
+/// closes — the next read is an error, not a hang; the audit log shows
+/// `AuthenticationFailed` ×5, then `LockedOut { 5 }`, then `Disconnected`.
+#[test]
+fn the_fifth_failed_authenticate_locks_out_the_connection() {
+    let (addr, sink) = start_audited_server(auth_config());
+    let mut c = connect(addr);
+    for _ in 0..5 {
+        assert_unauthenticated(roundtrip(
+            &mut c,
+            Request::Authenticate {
+                token: "wrong".into(),
+            },
+        ));
+    }
+    let after_lockout: Result<Response, _> =
+        write_message(&mut c, &Request::DescribeSchema).and_then(|()| read_message(&mut c));
+    assert!(after_lockout.is_err());
+
+    let kinds: Vec<AuditKind> = sink
+        .wait_until("the lockout sequence", |e| {
+            e.iter().any(|e| e.kind == AuditKind::Disconnected)
+        })
+        .into_iter()
+        .map(|e| e.kind)
+        .collect();
+    assert_eq!(
+        kinds,
+        vec![
+            AuditKind::Admitted {
+                transport: Transport::Plain,
+                initial_class: None,
+            },
+            AuditKind::AuthenticationFailed,
+            AuditKind::AuthenticationFailed,
+            AuditKind::AuthenticationFailed,
+            AuditKind::AuthenticationFailed,
+            AuditKind::AuthenticationFailed,
+            AuditKind::LockedOut { failures: 5 },
+            AuditKind::Disconnected,
+        ]
+    );
+}
+
+/// Acceptance criterion 1's other half: four failures then a success
+/// leaves the connection open and authenticated — the counter is never
+/// reset by success, but nothing below the fifth failure closes anything.
+#[test]
+fn four_failures_then_a_success_leaves_the_connection_open() {
+    let addr = start_server(auth_config());
+    let mut c = connect(addr);
+    for _ in 0..4 {
+        assert_unauthenticated(roundtrip(
+            &mut c,
+            Request::Authenticate {
+                token: "wrong".into(),
+            },
+        ));
+    }
+    assert_eq!(
+        roundtrip(
+            &mut c,
+            Request::Authenticate {
+                token: "write-token".into()
+            }
+        ),
+        Response::Ok
+    );
+    assert!(matches!(
+        roundtrip(
+            &mut c,
+            Request::GetById {
+                id: Uuid::from_u128(1)
+            }
+        ),
+        Response::Record { .. }
+    ));
+}
+
+/// Acceptance criteria 2/4: with a per-peer budget of 3 failures per
+/// window, three failures spread over two connections from this peer put
+/// it over budget; a fourth attempt with the *correct* token is still
+/// refused `Unauthenticated` and recorded `Throttled` — no comparison
+/// runs. After the (short, test-only) window elapses, the same correct
+/// token authenticates. Criterion 3 (a second, unaffected peer) is
+/// covered directly on `FailureTable` by `src/server/mod.rs`'s own unit
+/// tests, since loopback offers only one address here.
+#[test]
+fn a_throttled_peer_is_refused_even_with_the_correct_token_and_recovers_after_the_window() {
+    let (addr, sink) = start_audited_server(auth_config().with_rate_limit(RateLimit {
+        failures: 3,
+        window: std::time::Duration::from_millis(200),
+    }));
+
+    let mut c1 = connect(addr);
+    for _ in 0..2 {
+        assert_unauthenticated(roundtrip(
+            &mut c1,
+            Request::Authenticate {
+                token: "wrong".into(),
+            },
+        ));
+    }
+    let mut c2 = connect(addr);
+    assert_unauthenticated(roundtrip(
+        &mut c2,
+        Request::Authenticate {
+            token: "wrong".into(),
+        },
+    ));
+
+    let mut c3 = connect(addr);
+    assert_unauthenticated(roundtrip(
+        &mut c3,
+        Request::Authenticate {
+            token: "write-token".into(),
+        },
+    ));
+    sink.wait_until("a Throttled event", |events| {
+        events
+            .iter()
+            .any(|e| matches!(e.kind, AuditKind::Throttled { .. }))
+    });
+
+    std::thread::sleep(std::time::Duration::from_millis(250));
+    let mut c4 = connect(addr);
+    assert_eq!(
+        roundtrip(
+            &mut c4,
+            Request::Authenticate {
+                token: "write-token".into()
+            }
+        ),
+        Response::Ok
+    );
 }

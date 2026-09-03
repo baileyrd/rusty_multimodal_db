@@ -162,3 +162,13 @@ Proposed: option 1. Concretely, at implementation:
 - 2026-09-03: accepted as proposed (option (a); (b) and (c) declined).
   Implementation follows as `SERVER-001`'s next minor / FR, per
   `docs/design/SERVER-AUTH-RATE-LIMIT-DESIGN.md`. (PR #166.)
+- 2026-09-03: implemented as `SERVER-001` v0.22.0 (FR-032) in this PR —
+  `MAX_AUTH_FAILURES = 5` per-connection lockout on by default;
+  `AuthConfig::with_rate_limit(RateLimit { failures, window })`, a
+  `FailureTable` bounded at `MAX_TRACKED_PEERS = 4096`
+  (expired-then-oldest eviction, monotonic `Instant`s, fail-open on a
+  poisoned mutex); `AuditKind::{LockedOut, Throttled}`, `AuditKind`/
+  `RequestKind` marked `#[non_exhaustive]`; `SERVER_AUTH_RATE_LIMIT` in
+  `dog_server`. Five unit tests, one binary test, three integration
+  tests. Every acceptance criterion 1–8 holds; no deviation. Full sweep
+  green (364 lib tests; auth suite 13/13).
