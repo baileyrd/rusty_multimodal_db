@@ -536,4 +536,4 @@ already have `self.store.get::<T>()` for their reads.
   throwaway probe (never committed) recorded above. (PR #145.)
 - 2026-09-03: Accepted as proposed ("a, a, a, a" across `ADR-0026`–
   `ADR-0029`). No content change. Implementation next, as `SERVER-001`'s
-  next minor / FR. (This PR.)
+  next minor / FR. (PR #153.)

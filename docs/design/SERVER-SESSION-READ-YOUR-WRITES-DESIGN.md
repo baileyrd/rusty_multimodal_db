@@ -391,4 +391,4 @@ schema; if not, a private kind comparison in `mod.rs` is enough.
   change), written up as a design round instead, so the versioning and
   the opt-in are decided rather than assumed. (PR #147.)
 - 2026-09-03: Accepted as proposed. No content change. Implementation
-  after `ADR-0026`'s unit, as `SERVER-001`'s next minor / FR. (This PR.)
+  after `ADR-0026`'s unit, as `SERVER-001`'s next minor / FR. (PR #153.)

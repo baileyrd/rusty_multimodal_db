@@ -178,5 +178,4 @@ Proposed: option 1. Concretely, at implementation:
   code here changes. This session cannot open that PR (the repository
   attach was refused by the session's permission policy); the crate-side
   unit is queued behind `ADR-0026`, `ADR-0027`, and `ADR-0029` and
-  starts when the owner lands or authorizes the upstream change. (This
-  PR.)
+  starts when the owner lands or authorizes the upstream change. (PR #153.)

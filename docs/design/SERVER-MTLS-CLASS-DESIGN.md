@@ -395,4 +395,4 @@ justification comment gains one sentence naming the accessor.
 - 2026-09-03: Accepted as proposed. No content change. Implementation is
   gated on the upstream `rusty_tls` accessor (`CLS-FR-001`), which this
   session cannot land; the crate-side unit is queued behind `ADR-0026`,
-  `ADR-0027`, and `ADR-0029`. (This PR.)
+  `ADR-0027`, and `ADR-0029`. (PR #153.)

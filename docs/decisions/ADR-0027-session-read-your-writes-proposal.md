@@ -174,4 +174,4 @@ Proposed: option 1. Concretely, at implementation:
 - 2026-09-03: accepted as proposed (option (a); (b) and (c) declined).
   Implemented after `ADR-0026`'s unit, as `SERVER-001`'s next minor /
   FR, per `docs/design/SERVER-SESSION-READ-YOUR-WRITES-DESIGN.md`.
-  (This PR.)
+  (PR #153.)
