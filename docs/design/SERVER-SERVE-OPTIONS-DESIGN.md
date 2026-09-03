@@ -1,6 +1,11 @@
-# Server `ServeOptions` Consolidation Design (Proposed)
+# Server `ServeOptions` Consolidation Design (Accepted)
 
-- Status: **Proposed**
+- Status: **Accepted** (promoted from Proposed on 2026-09-03 — the owner
+  approved the design as proposed, `ADR-0032` option (a); folding
+  `TlsConfig`'s consolidation out and closing as not warranted both
+  declined; no changes requested). Acceptance authorizes the design;
+  implementation follows as its own unit — see `ADR-0032`'s
+  "Acceptance and implementation" section.
 - Date: 2026-09-03
 - Related: `ADR-0025` (the precedent against a fifth `serve` parameter,
   first stated), `ADR-0029` (*a second cross-cutting `serve` option
@@ -419,4 +424,6 @@ observable behavior regardless of which reads better.)
   `ServeOptions` consolidation round over a smaller bounded completion
   (`Admitted.classed_by_certificate`, taken first as `SERVER-001`
   v0.24.0 / FR-034), directly pulling the trigger `ADR-0029` first
-  named and `ADR-0030`/`ADR-0031` each restated and deferred.
+  named and `ADR-0030`/`ADR-0031` each restated and deferred. (PR #169.)
+- 2026-09-03: Accepted as proposed. No content change. Implementation
+  follows as `SERVER-001`'s next minor / FR.
