@@ -150,4 +150,4 @@ Proposed: option 1. Concretely, at implementation:
   answered `Unauthenticated`, both audited; **(b)** accept with both
   opt-in and a typed `ErrorCode::RateLimited` at protocol 6 for
   throttled attempts; **(c)** close as not warranted — the gap stays
-  named, the audit log alone stands. Proposed in this PR.
+  named, the audit log alone stands. Proposed in PR #161.

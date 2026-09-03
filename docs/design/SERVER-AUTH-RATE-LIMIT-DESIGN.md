@@ -373,4 +373,4 @@ still locked out per connection.
 - 2026-09-03: Initial proposal, in response to the owner selecting the
   rate-limiting / lockout design round as the second of four next
   directions ("1, 2, 3, 4"), after the audit log landed as `SERVER-001`
-  v0.19.0.
+  v0.19.0. (PR #161.)
