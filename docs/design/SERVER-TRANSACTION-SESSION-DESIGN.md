@@ -534,7 +534,7 @@ addition, gated like any appended code. `dog_server` gains an optional
 - The lock discipline is unchanged: append, apply, and checkpoint all
   happen inside the one `with_exclusive` closure the batch already
   held. *Amended by `ADR-0026` / `SERVER-JOURNAL-GROUP-COMMIT-DESIGN.md`
-  (Proposed): the append and `fsync` leave the exclusive section and
+  (Accepted): the append and `fsync` leave the exclusive section and
   become a leader/follower group commit; the apply stays inside it, in
   journal order. Every other invariant in this list is preserved there.*
 
@@ -626,7 +626,7 @@ addition, gated like any appended code. `dog_server` gains an optional
 - Read-your-writes inside a session: out of scope here; if ever wanted,
   a per-connection overlay on `GetById`/`ScanField` is the shape, at a
   real cost on every read path. *Taken up as `ADR-0027` /
-  `SERVER-SESSION-READ-YOUR-WRITES-DESIGN.md` (Proposed): `GetById`
+  `SERVER-SESSION-READ-YOUR-WRITES-DESIGN.md` (Accepted): `GetById`
   only — `ScanField` answers by position with no ids, so it cannot be
   overlaid — opt-in per session, at a cost only on the reads that asked.*
 - Whether Part B's journal should one day absorb single writes
@@ -659,9 +659,9 @@ addition, gated like any appended code. `dog_server` gains an optional
   is its first real use. `ADR-0025`'s acceptance log carries the same
   note.
 - 2026-09-03: Part B's lock-discipline invariant amended by pointer to
-  `ADR-0026` / `SERVER-JOURNAL-GROUP-COMMIT-DESIGN.md` (Proposed) — the
+  `ADR-0026` / `SERVER-JOURNAL-GROUP-COMMIT-DESIGN.md` (Accepted) — the
   group-commit design `ADR-0025`'s third revisit trigger asked for,
   after `RESULTS.md`'s FR-025 rows fired it. No other content change.
 - 2026-09-03: The read-your-writes open question pointed at `ADR-0027` /
-  `SERVER-SESSION-READ-YOUR-WRITES-DESIGN.md` (Proposed). No other
+  `SERVER-SESSION-READ-YOUR-WRITES-DESIGN.md` (Accepted). No other
   content change.

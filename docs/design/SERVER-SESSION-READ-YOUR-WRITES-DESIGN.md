@@ -1,11 +1,10 @@
-# Server Session Read-Your-Writes Design (Proposed)
+# Server Session Read-Your-Writes Design (Accepted)
 
-- Status: **Proposed** (not yet accepted; no implementation authorized).
-  One decision, `ADR-0027`: an *opt-in* session mode in which the
-  connection's own point reads (`GetById`) see its staged writes,
-  requested by an appended `Request::BeginWith { flags }` at protocol
-  version 5. Acceptance authorizes the design; implementation follows
-  as its own unit — see `ADR-0027`'s "Acceptance and implementation"
+- Status: **Accepted** (promoted from Proposed on 2026-09-03 — the owner
+  approved the design as proposed, `ADR-0027` option (a); `FilterEq`
+  adjustment and closing declined; no changes requested). Acceptance
+  authorizes the design; implementation follows as its own unit, after
+  `ADR-0026`'s — see `ADR-0027`'s "Acceptance and implementation"
   section.
 - Date: 2026-09-03
 - Related: `docs/design/SERVER-TRANSACTION-SESSION-DESIGN.md` Part A /
@@ -391,3 +390,5 @@ schema; if not, a private kind comparison in `mod.rs` is enough.
   read") and `SESS-FR-007` (a numbered requirement whose meaning would
   change), written up as a design round instead, so the versioning and
   the opt-in are decided rather than assumed. (PR #147.)
+- 2026-09-03: Accepted as proposed. No content change. Implementation
+  after `ADR-0026`'s unit, as `SERVER-001`'s next minor / FR. (This PR.)

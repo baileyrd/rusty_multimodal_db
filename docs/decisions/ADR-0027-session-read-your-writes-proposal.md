@@ -1,6 +1,13 @@
 # ADR-0027: Read-your-writes in a transaction session — opt-in at `Begin`, `GetById` only, protocol version 5
 
-- Status: **Proposed** (not yet accepted; authorizes no implementation)
+- Status: **Accepted** (promoted from Proposed on 2026-09-03 — the owner
+  approved the design as proposed, option (a): opt-in via
+  `BeginWith { flags }` at protocol 5, `GetById` overlaid, set reads and
+  plain sessions unchanged, `Session::get` on every session; (b)
+  `FilterEq` adjusted too and (c) close as not warranted declined; no
+  changes requested). Acceptance authorizes the design; implementation
+  follows as its own unit, after `ADR-0026`'s — see "Acceptance and
+  implementation" below.
 - Date: 2026-09-03
 - Deciders: baileyrd
 - Related: `docs/design/SERVER-SESSION-READ-YOUR-WRITES-DESIGN.md` (the
@@ -164,3 +171,7 @@ Proposed: option 1. Concretely, at implementation:
   staged op on that field; **(c)** close as not warranted — reads stay
   committed-state, `ADR-0013`'s two-step stands, `ADR-0024`'s trigger
   stays armed. Proposed in PR #147.
+- 2026-09-03: accepted as proposed (option (a); (b) and (c) declined).
+  Implemented after `ADR-0026`'s unit, as `SERVER-001`'s next minor /
+  FR, per `docs/design/SERVER-SESSION-READ-YOUR-WRITES-DESIGN.md`.
+  (This PR.)

@@ -1,11 +1,10 @@
-# Server Journal Group Commit Design (Proposed)
+# Server Journal Group Commit Design (Accepted)
 
-- Status: **Proposed** (not yet accepted; no implementation authorized).
-  One decision, `ADR-0026`: take the batch journal's `fsync` out of the
-  store's exclusive section and share it across concurrent batches as a
-  leader/follower group commit, with applies kept in journal order.
-  Acceptance authorizes the design; implementation follows as its own
-  unit — see `ADR-0026`'s "Acceptance and implementation" section.
+- Status: **Accepted** (promoted from Proposed on 2026-09-03 — the owner
+  approved the design as proposed, `ADR-0026` option (a); a fixed
+  commit delay and closing declined; no changes requested). Acceptance
+  authorizes the design; implementation follows as its own unit — see
+  `ADR-0026`'s "Acceptance and implementation" section.
 - Date: 2026-09-03
 - Related: `docs/design/SERVER-TRANSACTION-SESSION-DESIGN.md` Part B /
   `ADR-0025` (the redo journal this design re-schedules — `SERVER-001`
@@ -535,3 +534,6 @@ already have `self.store.get::<T>()` for their reads.
   group-commit design round as the first of four next directions
   ("1, 2, 3, 4") after `SERVER-001` v0.16.0. Evidence from a
   throwaway probe (never committed) recorded above. (PR #145.)
+- 2026-09-03: Accepted as proposed ("a, a, a, a" across `ADR-0026`–
+  `ADR-0029`). No content change. Implementation next, as `SERVER-001`'s
+  next minor / FR. (This PR.)

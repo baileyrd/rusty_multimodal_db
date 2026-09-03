@@ -1,12 +1,10 @@
-# Server Authentication Audit Log Design (Proposed)
+# Server Authentication Audit Log Design (Accepted)
 
-- Status: **Proposed** (not yet accepted; no implementation authorized).
-  One decision, `ADR-0029`: an audit record for every admission,
-  authentication, and authorization decision the server makes,
-  delivered to an operator-chosen sink hung on `AuthConfig`, off by
-  default, never able to take the server down. Acceptance authorizes
-  the design; implementation follows as its own unit — see
-  `ADR-0029`'s "Acceptance and implementation" section.
+- Status: **Accepted** (promoted from Proposed on 2026-09-03 — the owner
+  approved the design as proposed, `ADR-0029` option (a); fail-closed
+  and closing declined; no changes requested). Acceptance authorizes
+  the design; implementation follows as its own unit, after `ADR-0027`'s
+  — see `ADR-0029`'s "Acceptance and implementation" section.
 - Date: 2026-09-03
 - Related: `docs/design/SERVER-AUTH-DESIGN.md` / `ADR-0012` (the token
   scheme; its "Out of scope, named rather than silently assumed
@@ -374,3 +372,5 @@ the same discipline `dispatch` uses.
 - 2026-09-03: Initial proposal, in response to the owner selecting the
   authentication audit-log design round as the fourth of four next
   directions ("1, 2, 3, 4"). (PR #151.)
+- 2026-09-03: Accepted as proposed. No content change. Implementation
+  after `ADR-0027`'s unit, as `SERVER-001`'s next minor / FR. (This PR.)

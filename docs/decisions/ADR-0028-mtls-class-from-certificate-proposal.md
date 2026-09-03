@@ -1,6 +1,13 @@
 # ADR-0028: Class from certificate — exact-DER pinning on `AuthConfig`, an eager handshake, and the upstream `rusty_tls` accessor first
 
-- Status: **Proposed** (not yet accepted; authorizes no implementation)
+- Status: **Accepted** (promoted from Proposed on 2026-09-03 — the owner
+  approved the design as proposed, option (a): exact-DER pinning on
+  `AuthConfig`, eager handshake, certificate class as the starting
+  state with a valid token replacing it, the upstream accessor first;
+  (b) SPKI pinning and (c) close as not warranted declined; no changes
+  requested). Acceptance authorizes the design; implementation begins
+  with the upstream `rusty_tls` PR and proceeds in this crate only once
+  that lands — see "Acceptance and implementation" below.
 - Date: 2026-09-03
 - Deciders: baileyrd
 - Related: `docs/design/SERVER-MTLS-CLASS-DESIGN.md` (the full design
@@ -164,3 +171,12 @@ Proposed: option 1. Concretely, at implementation:
   upstream `rusty_tls` PR is the first step and needs either the
   repository attached to a session or the owner applying the design's
   patch. Proposed in PR #149.
+- 2026-09-03: accepted as proposed (option (a); (b) and (c) declined).
+  Implementation is gated on `CLS-FR-001`: the upstream
+  `TlsServerStream::peer_certificate_der` accessor (the design's patch,
+  verbatim) must land in `rusty_tls` and the pin move to it before any
+  code here changes. This session cannot open that PR (the repository
+  attach was refused by the session's permission policy); the crate-side
+  unit is queued behind `ADR-0026`, `ADR-0027`, and `ADR-0029` and
+  starts when the owner lands or authorizes the upstream change. (This
+  PR.)
