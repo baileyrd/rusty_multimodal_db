@@ -151,4 +151,4 @@ Proposed: option 1. Concretely, at implementation:
   non-goal stays a non-goal. Proposed in PR #165.
 - 2026-09-03: accepted as proposed (option (a); (b) and (c) declined).
   Implementation follows as `SERVER-001`'s next minor / FR, per
-  `docs/design/SERVER-ACCESS-LOG-DESIGN.md`. (This PR.)
+  `docs/design/SERVER-ACCESS-LOG-DESIGN.md`. (PR #166.)

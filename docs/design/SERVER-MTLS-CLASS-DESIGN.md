@@ -399,4 +399,4 @@ justification comment gains one sentence naming the accessor.
 - 2026-09-03: `CLS-FR-001` landed as `Rusty-Mill/rusty_mill` PR #148
   (opened by a separately-spawned session, merged by the owner).
   Implemented exactly as designed, no deviation, as `SERVER-001` v0.21.0
-  / FR-031. (This PR.)
+  / FR-031. (PR #166.)

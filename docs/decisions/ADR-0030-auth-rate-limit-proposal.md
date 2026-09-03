@@ -161,4 +161,4 @@ Proposed: option 1. Concretely, at implementation:
   named, the audit log alone stands. Proposed in PR #161.
 - 2026-09-03: accepted as proposed (option (a); (b) and (c) declined).
   Implementation follows as `SERVER-001`'s next minor / FR, per
-  `docs/design/SERVER-AUTH-RATE-LIMIT-DESIGN.md`. (This PR.)
+  `docs/design/SERVER-AUTH-RATE-LIMIT-DESIGN.md`. (PR #166.)
