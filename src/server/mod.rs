@@ -140,6 +140,7 @@ pub mod protocol;
 use protocol::{
     DomainSchema, ErrorCode, FieldRef, ParentLookup, RecordId, Request, Response, ScanValue,
     TransactionOp, MAX_STAGED_OPS, PROTOCOL_VERSION, SESSION_READ_YOUR_WRITES,
+    SESSION_VALIDATE_ON_STAGE,
 };
 use std::cell::RefCell;
 use std::io::{self, BufReader, BufWriter, Read, Write};
@@ -208,6 +209,15 @@ pub trait ConnectionStore: Send + Sync {
     /// knows its own field/relation shape unconditionally, no store access
     /// needed.
     fn describe(&self) -> DomainSchema;
+
+    /// `STV-FR-002` (`ADR-0024`'s second trigger): the precondition check
+    /// [`ConnectionStore::apply_transaction`] would run for `op` alone —
+    /// id exists, field known and updatable, value type matches — with no
+    /// write, so a stage-time validating session can refuse the write
+    /// now with the code `Commit` would have reported. Existence may
+    /// change before `Commit` only in the direction this crate never
+    /// takes (no runtime deletion), so `Ok` here is `Ok` at `Commit`.
+    fn validate_op(&self, op: &TransactionOp) -> Result<(), ErrorCode>;
 
     /// Apply every operation in `updates` atomically: every precondition
     /// (id exists, field known and updatable, value type matches) is
@@ -847,6 +857,16 @@ fn send_response(writer: &mut BufWriter<WriteHalf>, resp: &Response) -> bool {
 /// successful request is recorded; no token, certificate, id, or value
 /// ever is. With the default [`audit::NoAudit`] every call is a no-op.
 ///
+/// # Stage-time validation (`STV-FR-001`–`003`), `ADR-0024`'s second trigger
+///
+/// Protocol 6 adds a second `BeginWith` bit, `SESSION_VALIDATE_ON_STAGE`:
+/// each `UpdateField` is passed to `ConnectionStore::validate_op` as it
+/// is staged and refused — nothing staged — with the code `Commit`
+/// would have reported, so a client learns about a bad write at the
+/// round trip that sent it rather than by index at `Commit`. Commit
+/// still validates the whole batch (the store's rule, not this one's).
+/// Below version 6 the bit is unknown and `BeginWith` is `Malformed`.
+///
 /// # Read-your-writes sessions (`RYW-FR-001`–`005`), ADR-0027
 ///
 /// Protocol 5 adds `BeginWith { flags }`: with `SESSION_READ_YOUR_WRITES`
@@ -962,6 +982,9 @@ fn handle_connection<S: ConnectionStore + ?Sized>(
     // `RYW-FR-001`: `Some(updatable tags)` while a read-your-writes
     // session is open; cleared with the session.
     let mut read_your_writes: Option<Vec<FieldRef>> = None;
+    // `STV-FR-001`: whether the open session validates each write as it
+    // is staged; cleared with the session.
+    let mut validate_on_stage = false;
 
     loop {
         let req: Request = match framing::read_message(&mut reader) {
@@ -1069,12 +1092,21 @@ fn handle_connection<S: ConnectionStore + ?Sized>(
                 } else {
                     session = Some(Vec::new());
                     read_your_writes = None;
+                    validate_on_stage = false;
                     Response::Ok
                 }
             }
             Request::BeginWith { .. } if negotiated < 5 => err_response(ErrorCode::Malformed),
             Request::BeginWith { flags } => {
-                if flags & !SESSION_READ_YOUR_WRITES != 0 {
+                // A flag bit is introduced at a version like a variant
+                // (`STV-FR-003`): below 6 the validate bit is unknown.
+                let known = SESSION_READ_YOUR_WRITES
+                    | if negotiated >= 6 {
+                        SESSION_VALIDATE_ON_STAGE
+                    } else {
+                        0
+                    };
+                if flags & !known != 0 {
                     err_response(ErrorCode::Malformed)
                 } else if session.is_some() {
                     err_response(ErrorCode::SessionOpen)
@@ -1089,11 +1121,13 @@ fn handle_connection<S: ConnectionStore + ?Sized>(
                             .map(|f| f.tag)
                             .collect()
                     });
+                    validate_on_stage = flags & SESSION_VALIDATE_ON_STAGE != 0;
                     Response::Ok
                 }
             }
             Request::Rollback => {
                 read_your_writes = None;
+                validate_on_stage = false;
                 if session.take().is_some() {
                     Response::Ok
                 } else {
@@ -1115,6 +1149,7 @@ fn handle_connection<S: ConnectionStore + ?Sized>(
             }
             Request::Commit => {
                 read_your_writes = None;
+                validate_on_stage = false;
                 match session.take() {
                     None => err_response(ErrorCode::NoSession),
                     Some(batch) => match store.apply_transaction(&batch) {
@@ -1128,9 +1163,19 @@ fn handle_connection<S: ConnectionStore + ?Sized>(
                 }
             }
             Request::UpdateField { id, field, value } if session.is_some() => {
-                match session.as_mut() {
-                    Some(staged) if staged.len() < MAX_STAGED_OPS => {
-                        staged.push(TransactionOp { id, field, value });
+                let op = TransactionOp { id, field, value };
+                // `STV-FR-001`: a validating session refuses a bad write
+                // now, with the code `Commit` would have given; nothing
+                // is staged.
+                let refused = if validate_on_stage {
+                    store.validate_op(&op).err()
+                } else {
+                    None
+                };
+                match (refused, session.as_mut()) {
+                    (Some(code), _) => err_response(code),
+                    (None, Some(staged)) if staged.len() < MAX_STAGED_OPS => {
+                        staged.push(op);
                         Response::Staged {
                             index: (staged.len() - 1) as u32,
                         }
@@ -1284,6 +1329,9 @@ mod tests {
         }
         fn neighbors(&self, _id: RecordId) -> Result<Vec<RecordId>, ErrorCode> {
             Err(ErrorCode::Unsupported)
+        }
+        fn validate_op(&self, _op: &TransactionOp) -> Result<(), ErrorCode> {
+            Ok(())
         }
         fn describe(&self) -> DomainSchema {
             use protocol::{FieldCapabilities, FieldDescriptor, RelationCapabilities, ValueKind};

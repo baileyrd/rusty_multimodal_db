@@ -225,6 +225,15 @@ impl ConnectionStore for OrderConnectionStore {
         Err(ErrorCode::Unsupported)
     }
 
+    /// `STV-FR-002`: `validate_batch` on this one operation, with the
+    /// same per-call existence read the journaled path uses.
+    fn validate_op(&self, op: &TransactionOp) -> Result<(), ErrorCode> {
+        Self::validate_batch(std::slice::from_ref(op), |id| {
+            self.store.get::<Order>(id).is_some()
+        })
+        .map_err(|(_, code)| code)
+    }
+
     fn describe(&self) -> DomainSchema {
         let read_only = |value_kind: ValueKind, name: &str, tag: FieldRef| FieldDescriptor {
             tag,

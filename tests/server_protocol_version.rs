@@ -19,7 +19,9 @@ use rusty_multimodal_db::generic_spike::employee_impl::{
     create_employee_production_stack, Department, Employee,
 };
 use rusty_multimodal_db::record::DogRecord;
-use rusty_multimodal_db::server::client::{ClientError, ConnectOptions, SchemaDrivenClient};
+use rusty_multimodal_db::server::client::{
+    ClientError, ConnectOptions, SchemaDrivenClient, SessionOptions,
+};
 use rusty_multimodal_db::server::dog::DogConnectionStore;
 use rusty_multimodal_db::server::employee::EmployeeConnectionStore;
 use rusty_multimodal_db::server::framing::{read_message, write_message};
@@ -255,7 +257,7 @@ fn hello_zero_and_a_late_hello_are_malformed_and_a_silent_client_is_served() {
 fn schema_driven_client_negotiates_the_current_version_on_every_domain() {
     let mut dog = SchemaDrivenClient::connect(start_dog_server(AuthConfig::default())).unwrap();
     assert_eq!(dog.server_protocol_version(), PROTOCOL_VERSION);
-    assert_eq!(dog.server_protocol_version(), 5);
+    assert_eq!(dog.server_protocol_version(), 6);
     let fields = dog.get(Uuid::from_u128(1)).unwrap().unwrap();
     assert!(fields
         .iter()
@@ -450,6 +452,12 @@ fn a_pre_hello_server_is_reconnected_to_without_a_hello_unless_hello_is_required
     assert!(matches!(
         client.begin_read_your_writes().map(|_| ()),
         Err(ClientError::Unsupported("read-your-writes session"))
+    ));
+    assert!(matches!(
+        client
+            .begin_with(SessionOptions::new().validate_on_stage())
+            .map(|_| ()),
+        Err(ClientError::Unsupported(_))
     ));
 
     match SchemaDrivenClient::connect_with(addr, ConnectOptions::new().require_hello()).map(|_| ())

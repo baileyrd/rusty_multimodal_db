@@ -207,6 +207,15 @@ where
         Ok(DogStore::neighbors(&self.store, id))
     }
 
+    /// `STV-FR-002`: `validate_batch` on this one operation, with the
+    /// same per-call existence read the journaled path uses.
+    fn validate_op(&self, op: &TransactionOp) -> Result<(), ErrorCode> {
+        Self::validate_batch(std::slice::from_ref(op), |id| {
+            DogStore::get(&self.store, id).is_some()
+        })
+        .map_err(|(_, code)| code)
+    }
+
     fn describe(&self) -> DomainSchema {
         DomainSchema {
             fields: vec![
@@ -473,6 +482,43 @@ mod tests {
                 code: ErrorCode::RecordNotFound
             })
         ));
+    }
+
+    /// `STV-FR-002`: `validate_op` is `validate_batch` on one operation —
+    /// the same codes `apply_transaction` reports by index, with no write.
+    #[test]
+    fn validate_op_reports_exactly_what_commit_would() {
+        let adapter = sample_adapter();
+        assert_eq!(adapter.validate_op(&op(1, 30)), Ok(()));
+        assert_eq!(
+            adapter.validate_op(&op(99, 1)),
+            Err(ErrorCode::RecordNotFound)
+        );
+        assert_eq!(
+            adapter.validate_op(&TransactionOp {
+                id: Uuid::from_u128(1),
+                field: FIELD_BREED,
+                value: ScanValue::Str("poodle".into()),
+            }),
+            Err(ErrorCode::Unsupported)
+        );
+        assert_eq!(
+            adapter.validate_op(&TransactionOp {
+                id: Uuid::from_u128(1),
+                field: FIELD_AGE,
+                value: ScanValue::Str("old".into()),
+            }),
+            Err(ErrorCode::Malformed)
+        );
+        assert_eq!(
+            adapter.validate_op(&TransactionOp {
+                id: Uuid::from_u128(1),
+                field: 9,
+                value: ScanValue::U32(1),
+            }),
+            Err(ErrorCode::UnknownField)
+        );
+        assert_eq!(age_of(&adapter, 1), 3, "validation never writes");
     }
 
     /// `GRP-FR-001` (ADR-0026, design criterion 1): the journal's `fsync`

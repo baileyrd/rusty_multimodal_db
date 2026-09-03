@@ -109,6 +109,13 @@
 //! `Session` borrows the client mutably and no other read is reachable
 //! while one is open; on a plain session it reads committed state.
 //!
+//! [`SchemaDrivenClient::begin_with`] takes [`SessionOptions`] — the
+//! same read-your-writes, and (`SERVER-001-FR-030`, protocol version 6)
+//! `validate_on_stage`: each [`Session::update`] is validated by the
+//! server as it is staged and refused with the code `commit` would have
+//! reported, nothing staged, so a bad write is learned at its own round
+//! trip rather than by index at `commit`.
+//!
 //! # Transport encryption (`TlsConfig`), `SERVER-001-FR-022`
 //!
 //! A `TlsConfig`-configured server completes a TLS handshake before it
@@ -143,7 +150,7 @@
 use super::framing::{self, FrameError};
 use super::protocol::{
     DomainSchema, ErrorCode, FieldDescriptor, ParentLookup, RecordId, Request, Response, ScanValue,
-    PROTOCOL_VERSION, SESSION_READ_YOUR_WRITES,
+    PROTOCOL_VERSION, SESSION_READ_YOUR_WRITES, SESSION_VALIDATE_ON_STAGE,
 };
 use super::{pem, TlsConfigError};
 use std::fmt;
@@ -413,6 +420,59 @@ pub struct Session<'a> {
     client: &'a mut SchemaDrivenClient,
     open: bool,
     read_your_writes: bool,
+    validate_on_stage: bool,
+}
+
+/// How to open a session with [`SchemaDrivenClient::begin_with`]: each
+/// option is a `Request::BeginWith` flag bit and is gated on the protocol
+/// version that introduced it (compatibility rule 4) — `read_your_writes`
+/// on 5 (`FR-028`), `validate_on_stage` on 6 (`FR-030`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SessionOptions {
+    read_your_writes: bool,
+    validate_on_stage: bool,
+}
+
+impl SessionOptions {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The session's own point reads see its staged writes (`RYW-FR-002`).
+    pub fn read_your_writes(mut self) -> Self {
+        self.read_your_writes = true;
+        self
+    }
+
+    /// Each write is validated as it is staged and refused with the code
+    /// `commit` would have reported, nothing staged (`STV-FR-001`).
+    pub fn validate_on_stage(mut self) -> Self {
+        self.validate_on_stage = true;
+        self
+    }
+
+    fn flags(self) -> u32 {
+        (if self.read_your_writes {
+            SESSION_READ_YOUR_WRITES
+        } else {
+            0
+        }) | (if self.validate_on_stage {
+            SESSION_VALIDATE_ON_STAGE
+        } else {
+            0
+        })
+    }
+
+    /// The protocol version the chosen options need.
+    fn required_version(self) -> u32 {
+        if self.validate_on_stage {
+            6
+        } else if self.read_your_writes {
+            5
+        } else {
+            3
+        }
+    }
 }
 
 impl Session<'_> {
@@ -478,6 +538,13 @@ impl Session<'_> {
     /// Whether this session was opened with read-your-writes.
     pub fn read_your_writes(&self) -> bool {
         self.read_your_writes
+    }
+
+    /// Whether this session validates each write as it is staged — on
+    /// such a session [`Session::update`] returns [`ClientError::Server`]
+    /// with the code `commit` would have reported, and stages nothing.
+    pub fn validate_on_stage(&self) -> bool {
+        self.validate_on_stage
     }
 
     /// Discard every staged write and close the session.
@@ -702,6 +769,32 @@ impl SchemaDrivenClient {
             client: self,
             open: true,
             read_your_writes: false,
+            validate_on_stage: false,
+        })
+    }
+
+    /// Open a transaction session with [`SessionOptions`] (`FR-028`,
+    /// `FR-030`) — `Request::BeginWith { flags }`. Each option is gated on
+    /// the protocol version that introduced it:
+    /// `ClientError::Unsupported("session options")` with no frame sent
+    /// when the server negotiated below it (compatibility rule 4). With no
+    /// options this is [`SchemaDrivenClient::begin`].
+    pub fn begin_with(&mut self, options: SessionOptions) -> Result<Session<'_>, ClientError> {
+        if self.server_protocol_version < options.required_version() {
+            return Err(ClientError::Unsupported("session options"));
+        }
+        let flags = options.flags();
+        let resp = if flags == 0 {
+            self.roundtrip(Request::Begin)?
+        } else {
+            self.roundtrip(Request::BeginWith { flags })?
+        };
+        Self::expect_ok(resp)?;
+        Ok(Session {
+            client: self,
+            open: true,
+            read_your_writes: options.read_your_writes,
+            validate_on_stage: options.validate_on_stage,
         })
     }
 
@@ -724,6 +817,7 @@ impl SchemaDrivenClient {
             client: self,
             open: true,
             read_your_writes: true,
+            validate_on_stage: false,
         })
     }
 

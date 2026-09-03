@@ -190,6 +190,11 @@ Proposed: option 2. Concretely, at implementation:
   FR-028 in PR #157. No change to this decision.*
 - Revisit if: stage-time validation becomes wanted — a `ConnectionStore`
   validation hook, additive.
+  *Taken: `SERVER-001` v0.20.0 / FR-030 in this PR —
+  `ConnectionStore::validate_op` and a second `BeginWith` bit
+  (`SESSION_VALIDATE_ON_STAGE`, protocol version 6), a bounded additive
+  completion as this trigger described, no new decision. No change to
+  this decision.*
 - Revisit if: a second mutating operation kind appears — `TransactionOp`
   grows, and so does what a session can stage (`ADR-0013`'s third
   trigger, unchanged).

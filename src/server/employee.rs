@@ -200,6 +200,15 @@ impl ConnectionStore for EmployeeConnectionStore {
         Ok(self.store.neighbors::<Employee, CollaboratesWith>(id))
     }
 
+    /// `STV-FR-002`: `validate_batch` on this one operation, with the
+    /// same per-call existence read the journaled path uses.
+    fn validate_op(&self, op: &TransactionOp) -> Result<(), ErrorCode> {
+        Self::validate_batch(std::slice::from_ref(op), |id| {
+            self.store.get::<Employee>(id).is_some()
+        })
+        .map_err(|(_, code)| code)
+    }
+
     fn describe(&self) -> DomainSchema {
         DomainSchema {
             fields: vec![
