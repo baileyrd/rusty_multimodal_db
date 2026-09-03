@@ -9,14 +9,17 @@
 //! call.
 
 use rusty_multimodal_db::record::DogRecord;
+use rusty_multimodal_db::server::audit::{
+    AuditEvent, AuditKind, AuditSink, FileAudit, RequestKind, Transport,
+};
 use rusty_multimodal_db::server::client::{ClientError, SchemaDrivenClient};
 use rusty_multimodal_db::server::dog::{DogConnectionStore, FIELD_AGE};
 use rusty_multimodal_db::server::framing::{read_message, write_message};
 use rusty_multimodal_db::server::protocol::{ErrorCode, Request, Response, ScanValue};
-use rusty_multimodal_db::server::{serve, AuthConfig};
+use rusty_multimodal_db::server::{serve, AuthConfig, TokenClass};
 use rusty_multimodal_db::ProductionStore;
 use std::net::{TcpListener, TcpStream};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use uuid::Uuid;
 
@@ -338,4 +341,242 @@ fn schema_driven_client_authentication_is_a_no_op_without_configured_tokens() {
     assert!(client
         .update(Uuid::from_u128(1), "age", ScanValue::U32(8))
         .unwrap());
+}
+
+// ---------------------------------------------------------------------------
+// Audit log (`SERVER-001-FR-029`, ADR-0029,
+// `docs/design/SERVER-AUTH-AUDIT-DESIGN.md`)
+// ---------------------------------------------------------------------------
+
+/// A test's own sink: every event, in order.
+#[derive(Default)]
+struct Collecting(Mutex<Vec<AuditEvent>>);
+
+impl AuditSink for Collecting {
+    fn record(&self, event: &AuditEvent) {
+        self.0.lock().unwrap().push(event.clone());
+    }
+}
+
+impl Collecting {
+    fn kinds(&self) -> Vec<AuditKind> {
+        self.0
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|e| e.kind.clone())
+            .collect()
+    }
+
+    /// Wait (bounded) until `cond` holds over the events so far.
+    fn wait_until(&self, what: &str, cond: impl Fn(&[AuditEvent]) -> bool) -> Vec<AuditEvent> {
+        for _ in 0..5_000 {
+            let events = self.0.lock().unwrap().clone();
+            if cond(&events) {
+                return events;
+            }
+            thread::sleep(std::time::Duration::from_millis(1));
+        }
+        panic!("timed out waiting for {what}: {:?}", self.kinds());
+    }
+}
+
+fn start_audited_server(auth: AuthConfig) -> (std::net::SocketAddr, Arc<Collecting>) {
+    let sink = Arc::new(Collecting::default());
+    let addr = start_server(auth.with_audit(sink.clone()));
+    (addr, sink)
+}
+
+/// `AUD-FR-001`/`AUD-FR-004` (design criterion 2): one connection that
+/// authenticates with a wrong token, then the right one, then is refused
+/// a write as `ReadOnly`, then disconnects — recorded in that order, each
+/// with the client's own address.
+#[test]
+fn every_gate_decision_is_recorded_in_order_with_the_peer() {
+    let (addr, sink) = start_audited_server(AuthConfig::new(
+        Some("ro-secret".into()),
+        Some("rw-secret".into()),
+    ));
+    let mut c = connect(addr);
+    let me = c.local_addr().unwrap();
+    assert!(matches!(
+        roundtrip(
+            &mut c,
+            Request::Authenticate {
+                token: "wrong".into()
+            }
+        ),
+        Response::Err {
+            code: ErrorCode::Unauthenticated,
+            ..
+        }
+    ));
+    assert_eq!(
+        roundtrip(
+            &mut c,
+            Request::Authenticate {
+                token: "ro-secret".into()
+            }
+        ),
+        Response::Ok
+    );
+    assert!(matches!(
+        roundtrip(
+            &mut c,
+            Request::UpdateField {
+                id: Uuid::from_u128(1),
+                field: FIELD_AGE,
+                value: ScanValue::U32(9),
+            }
+        ),
+        Response::Err {
+            code: ErrorCode::Unauthorized,
+            ..
+        }
+    ));
+    drop(c);
+    let events = sink.wait_until("the disconnect", |e| {
+        e.iter().any(|e| e.kind == AuditKind::Disconnected)
+    });
+    assert!(events.iter().all(|e| e.peer == Some(me)), "{events:?}");
+    assert!(events.iter().all(|e| e.at > 1_600_000_000), "{events:?}");
+    let kinds: Vec<AuditKind> = events.into_iter().map(|e| e.kind).collect();
+    assert_eq!(
+        kinds,
+        vec![
+            AuditKind::Admitted {
+                transport: Transport::Plain,
+                initial_class: None,
+            },
+            AuditKind::AuthenticationFailed,
+            AuditKind::Authenticated {
+                class: TokenClass::ReadOnly,
+            },
+            AuditKind::Refused {
+                class: Some(TokenClass::ReadOnly),
+                request: RequestKind::UpdateField,
+                code: ErrorCode::Unauthorized,
+            },
+            AuditKind::Disconnected,
+        ]
+    );
+    let text = format!("{kinds:?}");
+    assert!(
+        !text.contains("secret") && !text.contains("wrong"),
+        "{text}"
+    );
+}
+
+/// `AUD-FR-001` (design criterion 3): an unauthenticated request is a
+/// `Refused { None, .., Unauthenticated }`; a server with no tokens admits
+/// every connection at `ReadWrite` and records a successful request not
+/// at all.
+#[test]
+fn unauthenticated_refusals_and_open_servers_are_recorded_as_designed() {
+    let (addr, sink) = start_audited_server(AuthConfig::new(None, Some("rw-secret".into())));
+    let mut c = connect(addr);
+    assert!(matches!(
+        roundtrip(
+            &mut c,
+            Request::GetById {
+                id: Uuid::from_u128(1)
+            }
+        ),
+        Response::Err {
+            code: ErrorCode::Unauthenticated,
+            ..
+        }
+    ));
+    drop(c);
+    let events = sink.wait_until("the disconnect", |e| {
+        e.iter().any(|e| e.kind == AuditKind::Disconnected)
+    });
+    assert_eq!(
+        events[1].kind,
+        AuditKind::Refused {
+            class: None,
+            request: RequestKind::GetById,
+            code: ErrorCode::Unauthenticated,
+        }
+    );
+
+    let (addr, sink) = start_audited_server(AuthConfig::default());
+    let mut c = connect(addr);
+    assert!(matches!(
+        roundtrip(
+            &mut c,
+            Request::GetById {
+                id: Uuid::from_u128(1)
+            }
+        ),
+        Response::Record { .. }
+    ));
+    drop(c);
+    let events = sink.wait_until("the disconnect", |e| {
+        e.iter().any(|e| e.kind == AuditKind::Disconnected)
+    });
+    assert_eq!(
+        events.iter().map(|e| e.kind.clone()).collect::<Vec<_>>(),
+        vec![
+            AuditKind::Admitted {
+                transport: Transport::Plain,
+                initial_class: Some(TokenClass::ReadWrite),
+            },
+            AuditKind::Disconnected,
+        ]
+    );
+}
+
+/// `AUD-FR-002`/`AUD-FR-008` (design criterion 5): `FileAudit` through a
+/// real server appends one documented line per event across connections.
+#[test]
+fn a_file_sink_appends_one_line_per_event_through_the_server() {
+    let dir = unique_dir("server_auth_integration_audit");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("audit.log");
+    let sink = Arc::new(FileAudit::open(&path).unwrap());
+    let addr = start_server(AuthConfig::default().with_audit(sink.clone()));
+    for _ in 0..2 {
+        let mut c = connect(addr);
+        assert!(matches!(
+            roundtrip(
+                &mut c,
+                Request::GetById {
+                    id: Uuid::from_u128(1)
+                }
+            ),
+            Response::Record { .. }
+        ));
+    }
+    let mut lines = Vec::new();
+    for _ in 0..5_000 {
+        lines = std::fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect();
+        if lines.len() >= 4 {
+            break;
+        }
+        thread::sleep(std::time::Duration::from_millis(1));
+    }
+    assert_eq!(lines.len(), 4, "{lines:?}");
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|l| l.contains(" event=Admitted transport=Plain initial_class=ReadWrite"))
+            .count(),
+        2
+    );
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|l| l.ends_with(" event=Disconnected"))
+            .count(),
+        2
+    );
+    assert!(lines
+        .iter()
+        .all(|l| l.starts_with("audit at=") && l.contains(" peer=127.0.0.1:")));
+    assert_eq!(sink.dropped(), 0);
 }
