@@ -206,8 +206,8 @@ Accepted: option 3. Concretely, at implementation:
   hello-sending client — a reconnect-without-hello fallback in the
   client library becomes worth its heuristic. *Taken ahead of the
   trigger, at the owner's explicit call and against this ADR's own
-  "not while none is deployed": `SERVER-001` v0.16.0 / FR-026 in the PR
-  after #142 — default-on, bounded to one silent reconnect on an
+  "not while none is deployed": `SERVER-001` v0.16.0 / FR-026 in PR
+  #143 — default-on, bounded to one silent reconnect on an
   EOF-class error under the `Hello`, with `ConnectOptions::require_hello()`
   as the opt-out. No change to this decision's wire shape.*
 - Revisit if: `SchemaDrivenClient` is used against an auth-configured
