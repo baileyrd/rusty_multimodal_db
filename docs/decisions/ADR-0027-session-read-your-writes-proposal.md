@@ -163,4 +163,4 @@ Proposed: option 1. Concretely, at implementation:
   the buffer's last staged value per id, with an existence probe per
   staged op on that field; **(c)** close as not warranted — reads stay
   committed-state, `ADR-0013`'s two-step stands, `ADR-0024`'s trigger
-  stays armed. Proposed in this PR.
+  stays armed. Proposed in PR #147.

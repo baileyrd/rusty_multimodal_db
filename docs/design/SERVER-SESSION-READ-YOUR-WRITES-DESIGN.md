@@ -390,4 +390,4 @@ schema; if not, a private kind comparison in `mod.rs` is enough.
   listed; on reading `ADR-0024` ("a real design with a cost on every
   read") and `SESS-FR-007` (a numbered requirement whose meaning would
   change), written up as a design round instead, so the versioning and
-  the opt-in are decided rather than assumed.
+  the opt-in are decided rather than assumed. (PR #147.)

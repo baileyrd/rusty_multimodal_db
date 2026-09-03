@@ -182,7 +182,7 @@ Proposed: option 2. Concretely, at implementation:
   per-connection overlay on the read paths, a real design with a cost
   on every read.
   *Taken up as `ADR-0027` / `docs/design/SERVER-SESSION-READ-YOUR-WRITES-DESIGN.md`,
-  proposed in this PR: opt-in at `Begin` time via an appended
+  proposed in PR #147: opt-in at `Begin` time via an appended
   `BeginWith { flags }` at protocol 5, `GetById` overlaid, set reads and
   plain sessions unchanged — so `SESS-FR-007` and this decision's "no
   read-your-writes" consequence stand for every session that did not
