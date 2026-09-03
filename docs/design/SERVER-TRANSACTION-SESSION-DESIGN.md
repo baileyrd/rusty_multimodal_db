@@ -534,7 +534,8 @@ addition, gated like any appended code. `dog_server` gains an optional
 - The lock discipline is unchanged: append, apply, and checkpoint all
   happen inside the one `with_exclusive` closure the batch already
   held. *Amended by `ADR-0026` / `SERVER-JOURNAL-GROUP-COMMIT-DESIGN.md`
-  (Accepted): the append and `fsync` leave the exclusive section and
+  (Accepted; implemented as `SERVER-001` v0.17.0 / FR-027): the append
+  and `fsync` leave the exclusive section and
   become a leader/follower group commit; the apply stays inside it, in
   journal order. Every other invariant in this list is preserved there.*
 

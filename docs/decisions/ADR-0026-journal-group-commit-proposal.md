@@ -201,3 +201,18 @@ Proposed: option 1. Concretely, at implementation:
   "a, a, a, a" across `ADR-0026`–`ADR-0029`). Implemented next, as
   `SERVER-001`'s next minor / FR, per
   `docs/design/SERVER-JOURNAL-GROUP-COMMIT-DESIGN.md`. (PR #153.)
+- 2026-09-03: implemented as `SERVER-001` v0.17.0 (FR-027) in this PR
+  — `CommitGroup` in `src/server/journal.rs` (append under the journal's
+  mutex, leader/follower `fsync` outside the exclusive section, a turn
+  gate for ordered apply, a quiescent checkpoint re-checked under the
+  lock, v0.15.0's failure semantics per group, a turn guard on unwind,
+  a `#[cfg(test)]` pre-sync hook), the three adapters' journaled path
+  restructured around it, the unjournaled path untouched. Five unit
+  tests and one integration test; every acceptance criterion 1–8 holds;
+  no deviation. One implementation note: the hook runs after a leader
+  takes the lead and *before* it reads how far to sync — the slot option
+  (b)'s delay would occupy — so batches appended while a leader is held
+  are covered by its one sync, as criterion 2 states. Measured:
+  `dog-jrnl-txn` 304.3 µs and 3,169 / 5,906 / 14,276 / 15,322 batches/s at
+  1 / 4 / 32 / 64 connections (v0.15.0: 320.7 µs; 3,182 / 3,843 / 3,395
+  / 3,337). Full sweep green (352 lib tests, 347 + 5).

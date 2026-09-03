@@ -70,7 +70,9 @@
 //! per connection and commits them as one batch, holding no lock across
 //! round trips; and an opt-in redo journal (`SERVER-001` FR-025,
 //! ADR-0025, [`journal`]) that an adapter built with `with_journal`
-//! appends and `fsync`s before a batch's first write and replays on the
+//! appends and `fsync`s before a batch's first write — since `SERVER-001`
+//! FR-027 (ADR-0026) as a leader/follower group commit that runs outside
+//! the store's exclusive section and applies in journal order — and replays on the
 //! next open, so a batch answered `Ok` survives a crash whole.
 //!
 //! # A real, schema-driven client

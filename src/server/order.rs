@@ -29,7 +29,7 @@
 //! relation (`docs/design/GENERIC-SCHEMA-DESIGN.md` §4.3), not a
 //! convenience this adapter invents.
 
-use super::journal::{BatchJournal, CheckpointFlush, JournalError};
+use super::journal::{CheckpointFlush, CommitError, CommitGroup, JournalError};
 use super::protocol::{
     DomainSchema, ErrorCode, FieldCapabilities, FieldDescriptor, FieldRef, ParentLookup, RecordId,
     RelationCapabilities, ScanValue, TransactionOp, ValueKind,
@@ -41,7 +41,6 @@ use crate::generic::order_customer::{
 use crate::generic::production::GenericProductionStore;
 use crate::generic::query::{GetById, UpdateField};
 use std::path::Path;
-use std::sync::Mutex;
 
 pub const FIELD_AMOUNT: FieldRef = 0;
 pub const FIELD_STATUS: FieldRef = 1;
@@ -76,7 +75,7 @@ fn status_from_u32(value: u32) -> Option<OrderStatus> {
 pub struct OrderConnectionStore {
     store: GenericProductionStore<OrderProductionStack>,
     /// `JRN-FR-001` (ADR-0025) — see `DogConnectionStore::with_journal`.
-    journal: Option<Mutex<BatchJournal>>,
+    journal: Option<CommitGroup>,
 }
 
 impl OrderConnectionStore {
@@ -93,7 +92,7 @@ impl OrderConnectionStore {
         store: GenericProductionStore<OrderProductionStack>,
         journal_path: &Path,
     ) -> Result<Self, JournalError> {
-        let (mut journal, batches) = BatchJournal::open(journal_path)?;
+        let (journal, batches) = CommitGroup::open(journal_path)?;
         store.with_exclusive(|inner| -> Result<(), JournalError> {
             for (batch_index, batch) in batches.iter().enumerate() {
                 Self::apply_batch(inner, batch).map_err(|(index, code)| JournalError::Replay {
@@ -107,7 +106,7 @@ impl OrderConnectionStore {
         })?;
         Ok(Self {
             store,
-            journal: Some(Mutex::new(journal)),
+            journal: Some(journal),
         })
     }
 
@@ -117,13 +116,13 @@ impl OrderConnectionStore {
     /// `docs/design/SERVER-TRANSACTION-DESIGN.md`'s own "no runtime
     /// deletion" invariant.
     fn validate_batch(
-        inner: &OrderProductionStack,
         updates: &[TransactionOp],
+        exists: impl Fn(RecordId) -> bool,
     ) -> Result<(), (usize, ErrorCode)> {
         for (i, op) in updates.iter().enumerate() {
             match (op.field, &op.value) {
                 (FIELD_AMOUNT, ScanValue::I64(_)) => {
-                    if GetById::<Order>::get(inner, op.id).is_none() {
+                    if !exists(op.id) {
                         return Err((i, ErrorCode::RecordNotFound));
                     }
                 }
@@ -270,25 +269,28 @@ impl ConnectionStore for OrderConnectionStore {
     }
 
     fn apply_transaction(&self, updates: &[TransactionOp]) -> Result<(), (usize, ErrorCode)> {
-        self.store.with_exclusive(|inner| {
-            Self::validate_batch(inner, updates)?;
-            // See `DogConnectionStore::apply_transaction` for the journal
-            // discipline (`JRN-FR-002`/`JRN-FR-004`); identical here.
-            match &self.journal {
-                None => Self::apply_batch(inner, updates),
-                Some(journal) => {
-                    let mut journal = journal.lock().map_err(|_| (0, ErrorCode::Journal))?;
-                    journal
-                        .append(updates)
-                        .map_err(|_| (0, ErrorCode::Journal))?;
-                    Self::apply_batch(inner, updates)?;
-                    if journal.needs_checkpoint() && inner.checkpoint_flush().is_ok() {
-                        let _ = journal.truncate();
-                    }
-                    Ok(())
-                }
+        // See `DogConnectionStore::apply_transaction` for the two paths
+        // (`GRP-FR-001`–`005`); identical here.
+        match &self.journal {
+            None => self.store.with_exclusive(|inner| {
+                Self::validate_batch(updates, |id| GetById::<Order>::get(inner, id).is_some())?;
+                Self::apply_batch(inner, updates)
+            }),
+            Some(journal) => {
+                Self::validate_batch(updates, |id| self.store.get::<Order>(id).is_some())?;
+                journal
+                    .commit(updates, |turn| {
+                        self.store.with_exclusive(|inner| {
+                            Self::apply_batch(inner, updates)?;
+                            Ok(turn.checkpoint_due && inner.checkpoint_flush().is_ok())
+                        })
+                    })
+                    .map_err(|e| match e {
+                        CommitError::Journal(_) => (0, ErrorCode::Journal),
+                        CommitError::Apply(e) => e,
+                    })
             }
-        })
+        }
     }
 }
 

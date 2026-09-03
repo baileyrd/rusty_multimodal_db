@@ -195,8 +195,10 @@ Proposed: option 1. Concretely, at implementation:
   batches/s from 1 to 64 connections) and taken up as `ADR-0026` /
   `docs/design/SERVER-JOURNAL-GROUP-COMMIT-DESIGN.md`, proposed in
   PR #145: the `fsync` leaves the exclusive section, one leader syncs
-  for everyone, applies stay in journal order. No change to this
-  decision; the journal's format and guarantees are unchanged there.*
+  for everyone, applies stay in journal order; accepted in PR #153 and
+  implemented as `SERVER-001` v0.17.0 / FR-027 in this PR. No change to
+  this decision; the journal's format and guarantees are unchanged
+  there.*
 - Revisit if: always-on is judged the right default after the bench
   row lands — a one-line constructor change, but a decision.
 
