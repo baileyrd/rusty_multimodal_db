@@ -190,4 +190,4 @@ Proposed: option 1. Concretely, at implementation:
   class from it, a later valid `Authenticate` still replacing it;
   `SERVER_AUTH_READ_ONLY_CLIENT_CERTS`/`SERVER_AUTH_READ_WRITE_CLIENT_CERTS`
   in `dog_server`, refused without `SERVER_TLS_CLIENT_CA_PATH`. Every
-  acceptance criterion 1–7 holds; no deviation. (This PR.)
+  acceptance criterion 1–7 holds; no deviation. (PR #166.)

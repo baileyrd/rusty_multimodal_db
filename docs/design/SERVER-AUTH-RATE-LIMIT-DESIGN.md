@@ -371,3 +371,7 @@ still locked out per connection.
   rate-limiting / lockout design round as the second of four next
   directions ("1, 2, 3, 4"), after the audit log landed as `SERVER-001`
   v0.19.0. (PR #161.)
+- 2026-09-03: Accepted as proposed (`ADR-0030` option (a); (b) and (c)
+  declined). (PR #166.)
+- 2026-09-03: Implemented exactly as designed, no deviation, as
+  `SERVER-001` v0.22.0 / FR-032. (This PR.)

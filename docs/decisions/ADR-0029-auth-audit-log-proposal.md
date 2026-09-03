@@ -144,13 +144,21 @@ Proposed: option 1. Concretely, at implementation:
   opt-in per-peer budget, both recorded here as `LockedOut`/`Throttled`;
   it also proposes marking `AuditKind` and `RequestKind`
   `#[non_exhaustive]`, which this decision intended by designing them
-  to grow with the gates. No change to this decision.*
+  to grow with the gates. No change to this decision. Implemented as
+  `SERVER-001` v0.22.0 / FR-032 (This PR.): `AuditKind` gained
+  `LockedOut`/`Throttled` and both enums are now `#[non_exhaustive]`,
+  exactly as proposed.*
 - Revisit if: access logging is wanted — a volume and privacy
   decision, a second sink or a second event family.
   *Taken up as `ADR-0031` / `docs/design/SERVER-ACCESS-LOG-DESIGN.md`,
   proposed in PR #165: a second, independent sink family
   (`AccessSink`/`AccessEvent`), kind and outcome shape only, so the two
-  switches never couple. No change to this decision.*
+  switches never couple. No change to this decision. Implemented as
+  `SERVER-001` v0.23.0 / FR-033 (this PR): `src/server/access.rs`
+  gained `AccessEvent`/`Outcome`/`AccessSink`/`NoAccessLog`/
+  `StderrAccessLog`/`FileAccessLog`, exactly as proposed; the two
+  streams are disjoint by construction and proved so by one
+  integration test running both collecting sinks on the same server.*
 - Revisit if: a second cross-cutting `serve` option appears —
   `ServeOptions` (option 3) becomes worth its breaking change.
 - Revisit if: `ADR-0028` lands — `Admitted` may gain an explicit

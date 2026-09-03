@@ -180,7 +180,7 @@ Proposed: option 1. Concretely, at implementation:
   proposed in PR #149: the accessor spelled out and verified by a local
   patch probe; the X.509 decision answered by exact-DER pinning on
   `AuthConfig` — no parser. Admission stays as this decision made it.
-  Implemented as `SERVER-001` v0.21.0 / FR-031 (This PR.), once the
+  Implemented as `SERVER-001` v0.21.0 / FR-031 (PR #166.), once the
   upstream accessor landed as `Rusty-Mill/rusty_mill` PR #148.*
 - Revisit if: revocation without a restart becomes a real operational
   need — an upstream `rusty_tls` change to expose a CRL on the server's

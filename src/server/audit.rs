@@ -45,7 +45,10 @@ pub enum Transport {
 
 /// The variant of a refused request — the name only, never a payload.
 /// Exhaustive over `Request`, so a new variant cannot skip the decision.
+/// `#[non_exhaustive]` since `RL-FR-004` (ADR-0030): designed to grow with
+/// the gates, and no downstream crate matches it exhaustively.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum RequestKind {
     GetById,
     FilterEq,
@@ -86,8 +89,11 @@ impl RequestKind {
     }
 }
 
-/// What happened (`AUD-FR-001`).
+/// What happened (`AUD-FR-001`). `#[non_exhaustive]` since `RL-FR-004`
+/// (ADR-0030): designed to grow with the gates — `LockedOut`/`Throttled`
+/// are its first growth — and no downstream crate matches it exhaustively.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum AuditKind {
     /// A connection past the handshake, and the class it starts at
     /// (`None`: it must authenticate).
@@ -110,6 +116,12 @@ pub enum AuditKind {
     },
     /// The connection ended.
     Disconnected,
+    /// `RL-FR-001` (ADR-0030): the per-connection lockout closed the
+    /// connection after this many failed `Authenticate`s.
+    LockedOut { failures: u32 },
+    /// `RL-FR-002` (ADR-0030): `Authenticate` was refused before any
+    /// comparison because the peer is over its configured budget.
+    Throttled { failures: u32 },
 }
 
 /// One audit record.
@@ -171,6 +183,12 @@ impl AuditEvent {
                 ));
             }
             AuditKind::Disconnected => line.push_str("Disconnected"),
+            AuditKind::LockedOut { failures } => {
+                line.push_str(&format!("LockedOut failures={failures}"));
+            }
+            AuditKind::Throttled { failures } => {
+                line.push_str(&format!("Throttled failures={failures}"));
+            }
         }
         line
     }
@@ -322,6 +340,8 @@ mod tests {
                 code: ErrorCode::Unauthorized,
             },
             AuditKind::Disconnected,
+            AuditKind::LockedOut { failures: 5 },
+            AuditKind::Throttled { failures: 3 },
         ]
     }
 
@@ -364,6 +384,14 @@ mod tests {
         assert_eq!(
             lines[5],
             "audit at=7 peer=127.0.0.1:4242 event=Disconnected"
+        );
+        assert_eq!(
+            lines[6],
+            "audit at=7 peer=127.0.0.1:4242 event=LockedOut failures=5"
+        );
+        assert_eq!(
+            lines[7],
+            "audit at=7 peer=127.0.0.1:4242 event=Throttled failures=3"
         );
         for line in &lines {
             let mut parts = line.split(' ');

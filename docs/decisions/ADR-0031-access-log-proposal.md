@@ -151,4 +151,21 @@ Proposed: option 1. Concretely, at implementation:
   non-goal stays a non-goal. Proposed in PR #165.
 - 2026-09-03: accepted as proposed (option (a); (b) and (c) declined).
   Implementation follows as `SERVER-001`'s next minor / FR, per
-  `docs/design/SERVER-ACCESS-LOG-DESIGN.md`. (This PR.)
+  `docs/design/SERVER-ACCESS-LOG-DESIGN.md`. (PR #166.)
+- 2026-09-03: implemented as `SERVER-001` v0.23.0 / FR-033 (this PR),
+  the owner's "Start Unit 28" immediately after Unit 27
+  (`ADR-0030`) landed on the same still-open PR. `src/server/access.rs`
+  (new, public): `AccessEvent`/`Outcome`/`AccessSink`/`NoAccessLog`/
+  `StderrAccessLog`/`FileAccessLog`, exactly as proposed, deliberately
+  not sharing a type with `audit.rs`. `AuthConfig::with_access_log`/
+  `access_log()`; `handle_connection` records one event per dispatched
+  request, after the response is decided, outside every lock; `Hello`,
+  `Authenticate`, and every gate-refused request stay the audit log's
+  territory. `dog_server` reads `SERVER_ACCESS_LOG`, independent of
+  `SERVER_AUDIT_LOG`. Three unit tests, one binary test, one
+  integration test (`access_log_and_audit_log_streams_stay_disjoint`,
+  a collecting sink of each kind on one server, proving the two
+  streams disjoint by kind); every acceptance criterion 1–5 holds; no
+  deviation. No `Cargo.toml`, wire, `PROTOCOL_VERSION`, store, or
+  `serve`-signature change. With this, both `ADR-0030` and `ADR-0031`
+  — the owner's entire second four-item round — are implemented.
