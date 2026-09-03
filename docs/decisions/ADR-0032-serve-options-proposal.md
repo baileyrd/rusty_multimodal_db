@@ -1,6 +1,12 @@
 # ADR-0032: Consolidate `AuthConfig` and `TlsConfig` into one `ServeOptions`
 
-- Status: **Proposed**
+- Status: **Accepted** (promoted from Proposed on 2026-09-03 — the owner
+  approved the design as proposed, option (a): consolidate into
+  `ServeOptions`, `TlsConfig` folded in, `serve` drops to three
+  parameters; (b) consolidate but leave `TlsConfig` separate and
+  (c) close as not warranted declined; no changes requested).
+  Acceptance authorizes the design; implementation follows as its own
+  unit — see "Acceptance and implementation" below.
 - Date: 2026-09-03
 - Deciders: baileyrd
 - Related: `docs/design/SERVER-SERVE-OPTIONS-DESIGN.md` (the full
@@ -167,4 +173,7 @@ Proposed: option 1. Concretely, at implementation:
   `AuthConfig` concerns under a new name but leave `TlsConfig` as
   `serve`'s own separate parameter; **(c)** close as not warranted —
   `AuthConfig` and `TlsConfig` stand as they are, the trigger restated
-  again for whenever a sixth concern arrives. Proposed in this PR.
+  again for whenever a sixth concern arrives. Proposed in PR #169.
+- 2026-09-03: accepted as proposed (option (a); (b) and (c) declined).
+  Implementation follows as `SERVER-001`'s next minor / FR, per
+  `docs/design/SERVER-SERVE-OPTIONS-DESIGN.md`.
