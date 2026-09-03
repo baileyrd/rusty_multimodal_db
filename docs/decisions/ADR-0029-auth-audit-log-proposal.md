@@ -159,7 +159,7 @@ Proposed: option 1. Concretely, at implementation:
   Implemented after `ADR-0027`'s unit and before `ADR-0028`'s
   crate-side unit (which waits upstream), as `SERVER-001`'s next minor
   / FR, per `docs/design/SERVER-AUTH-AUDIT-DESIGN.md`. (PR #153.)
-- 2026-09-03: implemented as `SERVER-001` v0.19.0 (FR-029) in this PR
+- 2026-09-03: implemented as `SERVER-001` v0.19.0 (FR-029) in PR #159
   — `src/server/audit.rs` (the event types, `AuditSink`, `NoAudit`,
   `StderrAudit`, `FileAudit`, the documented line), `AuthConfig::with_audit`
   / `audit()`, the eager TLS handshake, the records at the existing
