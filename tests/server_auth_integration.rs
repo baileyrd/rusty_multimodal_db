@@ -1,9 +1,9 @@
-//! Real end-to-end coverage of `AuthConfig`'s connection gating
+//! Real end-to-end coverage of `ServeOptions`'s connection gating
 //! (`docs/design/SERVER-AUTH-DESIGN.md`, ADR-0012, Accepted) against the
 //! `Dog` domain — a real `TcpListener`, a real client `TcpStream`, real
 //! `bincode` encoding over the wire, exercising every functional
 //! acceptance criterion the design document names. `src/server/mod.rs`'s
-//! own unit tests cover `AuthConfig::check` and `dispatch`'s in-process
+//! own unit tests cover `ServeOptions::check` and `dispatch`'s in-process
 //! logic; this file covers the same ground `tests/server_dog_integration.rs`
 //! does for the rest of the protocol — a real socket, not just a function
 //! call.
@@ -17,7 +17,7 @@ use rusty_multimodal_db::server::client::{ClientError, SchemaDrivenClient};
 use rusty_multimodal_db::server::dog::{DogConnectionStore, FIELD_AGE};
 use rusty_multimodal_db::server::framing::{read_message, write_message};
 use rusty_multimodal_db::server::protocol::{ErrorCode, Request, Response, ScanValue};
-use rusty_multimodal_db::server::{serve, AuthConfig, RateLimit, TokenClass};
+use rusty_multimodal_db::server::{serve, RateLimit, ServeOptions, TokenClass};
 use rusty_multimodal_db::ProductionStore;
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
@@ -33,7 +33,7 @@ fn unique_dir(label: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!("{label}_{}_{n}", std::process::id()))
 }
 
-fn start_server(auth: AuthConfig) -> std::net::SocketAddr {
+fn start_server(auth: ServeOptions) -> std::net::SocketAddr {
     let dir = unique_dir("server_auth_integration");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("dogs.mmap");
@@ -44,7 +44,7 @@ fn start_server(auth: AuthConfig) -> std::net::SocketAddr {
 
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
-    thread::spawn(move || serve(listener, connection_store, auth, None));
+    thread::spawn(move || serve(listener, connection_store, auth));
     addr
 }
 
@@ -79,8 +79,8 @@ fn assert_unauthorized(resp: Response) {
     }
 }
 
-fn auth_config() -> AuthConfig {
-    AuthConfig::new(Some("read-token".into()), Some("write-token".into()))
+fn auth_config() -> ServeOptions {
+    ServeOptions::new(Some("read-token".into()), Some("write-token".into()))
 }
 
 /// `AUTH-FR-002`: a connection that never authenticates is rejected for
@@ -241,7 +241,7 @@ fn a_read_write_token_can_read_and_write() {
 /// succeeds without ever sending it.
 #[test]
 fn no_configured_tokens_reproduces_the_original_unauthenticated_behavior() {
-    let addr = start_server(AuthConfig::default());
+    let addr = start_server(ServeOptions::default());
     let mut client = connect(addr);
 
     assert!(matches!(
@@ -333,7 +333,7 @@ fn schema_driven_client_authenticates_at_connect_and_can_change_class_later() {
 /// succeed with any token, and the connection is `ReadWrite` throughout.
 #[test]
 fn schema_driven_client_authentication_is_a_no_op_without_configured_tokens() {
-    let addr = start_server(AuthConfig::default());
+    let addr = start_server(ServeOptions::default());
     let mut client = SchemaDrivenClient::connect_authenticated(addr, "anything-at-all").unwrap();
     assert!(client
         .update(Uuid::from_u128(1), "age", ScanValue::U32(7))
@@ -382,7 +382,7 @@ impl Collecting {
     }
 }
 
-fn start_audited_server(auth: AuthConfig) -> (std::net::SocketAddr, Arc<Collecting>) {
+fn start_audited_server(auth: ServeOptions) -> (std::net::SocketAddr, Arc<Collecting>) {
     let sink = Arc::new(Collecting::default());
     let addr = start_server(auth.with_audit(sink.clone()));
     (addr, sink)
@@ -394,7 +394,7 @@ fn start_audited_server(auth: AuthConfig) -> (std::net::SocketAddr, Arc<Collecti
 /// with the client's own address.
 #[test]
 fn every_gate_decision_is_recorded_in_order_with_the_peer() {
-    let (addr, sink) = start_audited_server(AuthConfig::new(
+    let (addr, sink) = start_audited_server(ServeOptions::new(
         Some("ro-secret".into()),
         Some("rw-secret".into()),
     ));
@@ -475,7 +475,7 @@ fn every_gate_decision_is_recorded_in_order_with_the_peer() {
 /// at all.
 #[test]
 fn unauthenticated_refusals_and_open_servers_are_recorded_as_designed() {
-    let (addr, sink) = start_audited_server(AuthConfig::new(None, Some("rw-secret".into())));
+    let (addr, sink) = start_audited_server(ServeOptions::new(None, Some("rw-secret".into())));
     let mut c = connect(addr);
     assert!(matches!(
         roundtrip(
@@ -502,7 +502,7 @@ fn unauthenticated_refusals_and_open_servers_are_recorded_as_designed() {
         }
     );
 
-    let (addr, sink) = start_audited_server(AuthConfig::default());
+    let (addr, sink) = start_audited_server(ServeOptions::default());
     let mut c = connect(addr);
     assert!(matches!(
         roundtrip(
@@ -538,7 +538,7 @@ fn a_file_sink_appends_one_line_per_event_through_the_server() {
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("audit.log");
     let sink = Arc::new(FileAudit::open(&path).unwrap());
-    let addr = start_server(AuthConfig::default().with_audit(sink.clone()));
+    let addr = start_server(ServeOptions::default().with_audit(sink.clone()));
     for _ in 0..2 {
         let mut c = connect(addr);
         assert!(matches!(

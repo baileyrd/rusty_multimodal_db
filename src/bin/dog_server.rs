@@ -6,7 +6,7 @@
 //!
 //! # This is a local development tool, not a deployable service
 //!
-//! Authentication/authorization (`AuthConfig::from_env`, ADR-0012) and
+//! Authentication/authorization (`ServeOptions::from_env`, ADR-0012) and
 //! native transport encryption (`TlsConfig::from_env`, ADR-0014) are both
 //! real and opt-in via the process environment
 //! (`SERVER_AUTH_READ_ONLY_TOKEN`/`SERVER_AUTH_READ_WRITE_TOKEN`,
@@ -36,7 +36,7 @@ use rusty_multimodal_db::record::DogRecord;
 use rusty_multimodal_db::server::access::{AccessSink, FileAccessLog, StderrAccessLog};
 use rusty_multimodal_db::server::audit::{AuditSink, FileAudit, StderrAudit};
 use rusty_multimodal_db::server::dog::DogConnectionStore;
-use rusty_multimodal_db::server::{serve, AuthConfig, RateLimit, TlsConfig, TokenClass};
+use rusty_multimodal_db::server::{serve, RateLimit, ServeOptions, TlsConfig, TokenClass};
 use rusty_multimodal_db::ProductionStore;
 use std::net::TcpListener;
 use std::path::Path;
@@ -82,8 +82,8 @@ fn main() {
     // `SERVER_AUDIT_LOG` (ADR-0029): `stderr`, or a file path appended to;
     // unset → no audit. An unopenable path is a startup error.
     let auth = match audit_sink_from(std::env::var("SERVER_AUDIT_LOG").ok().as_deref()) {
-        Ok(Some(sink)) => AuthConfig::from_env().with_audit(sink),
-        Ok(None) => AuthConfig::from_env(),
+        Ok(Some(sink)) => ServeOptions::from_env().with_audit(sink),
+        Ok(None) => ServeOptions::from_env(),
         Err(e) => panic!("SERVER_AUDIT_LOG configured but invalid: {e}"),
     };
     // `SERVER_AUTH_READ_ONLY_CLIENT_CERTS`/`SERVER_AUTH_READ_WRITE_CLIENT_CERTS`
@@ -125,10 +125,16 @@ fn main() {
             "SERVER_TLS_CERT_CHAIN_PATH/SERVER_TLS_PRIVATE_KEY_PATH/SERVER_TLS_CLIENT_CA_PATH configured but invalid: {e}"
         ),
     };
+    // `SRV-FR-003` (ADR-0032): `TlsConfig` stays its own separately-fallible
+    // construction step, folded in only after its `Result` is handled above.
+    let options = match tls {
+        Some(tls) => auth.with_tls(tls),
+        None => auth,
+    };
     eprintln!(
         "dog_server listening on {addr} (auth: {}, TLS: {}, transaction journal: {}, audit log: {}, auth rate limit: {}, access log: {} — see ADR-0012/ADR-0014/ADR-0023/ADR-0025/ADR-0029/ADR-0030/ADR-0031; do not expose beyond a trusted network unless auth and TLS are both configured)",
-        if auth.is_configured() { "configured" } else { "NOT configured" },
-        match &tls {
+        if options.is_configured() { "configured" } else { "NOT configured" },
+        match options.tls() {
             None => "NOT configured",
             Some(tls) if tls.requires_client_certificate() => "configured, client certificate required",
             Some(_) => "configured",
@@ -139,7 +145,7 @@ fn main() {
         if access_logged { "configured" } else { "NOT configured" },
     );
 
-    serve(listener, connection_store, auth, tls);
+    serve(listener, connection_store, options);
 }
 
 /// `SERVER_AUDIT_LOG`'s decision table (`AUD-FR-008`), factored so a test
@@ -170,17 +176,17 @@ fn access_sink_from(value: Option<&str>) -> std::io::Result<Option<Arc<dyn Acces
 /// decision table (`CLS-FR-005`, ADR-0028), factored so a test can drive
 /// it without touching the process environment: either variable, each a
 /// `:`-separated list of PEM files, is applied to `auth` via
-/// `AuthConfig::with_certificate_class_pem_file`; an unreadable or
+/// `ServeOptions::with_certificate_class_pem_file`; an unreadable or
 /// non-PEM file names the variable in its error. Either variable set
 /// while `client_ca_path` is not is refused outright — a class map on a
 /// server that never asks for a certificate is inert, and inert security
 /// configuration is a mistake to refuse, not honor.
 fn certificate_classes_from_env_values(
-    mut auth: AuthConfig,
+    mut auth: ServeOptions,
     read_only_certs: Option<&str>,
     read_write_certs: Option<&str>,
     client_ca_path: Option<&str>,
-) -> Result<AuthConfig, String> {
+) -> Result<ServeOptions, String> {
     if (read_only_certs.is_some() || read_write_certs.is_some()) && client_ca_path.is_none() {
         return Err(
             "SERVER_AUTH_READ_ONLY_CLIENT_CERTS/SERVER_AUTH_READ_WRITE_CLIENT_CERTS is set but \
@@ -215,9 +221,12 @@ fn certificate_classes_from_env_values(
 /// `SERVER_AUTH_RATE_LIMIT`'s decision table (`RL-FR-006`), factored so a
 /// test can drive it without touching the process environment: unset →
 /// `auth` unchanged; set → `RateLimit::parse`d and applied via
-/// `AuthConfig::with_rate_limit`; a malformed value names the variable in
+/// `ServeOptions::with_rate_limit`; a malformed value names the variable in
 /// its error.
-fn rate_limit_from_env_value(auth: AuthConfig, value: Option<&str>) -> Result<AuthConfig, String> {
+fn rate_limit_from_env_value(
+    auth: ServeOptions,
+    value: Option<&str>,
+) -> Result<ServeOptions, String> {
     match value {
         None => Ok(auth),
         Some(value) => RateLimit::parse(value)
@@ -233,10 +242,10 @@ mod tests {
     /// `RL-FR-006`: the startup decision table for `SERVER_AUTH_RATE_LIMIT`.
     #[test]
     fn rate_limit_from_env_value_follows_the_documented_table() {
-        let auth = rate_limit_from_env_value(AuthConfig::default(), None).unwrap();
+        let auth = rate_limit_from_env_value(ServeOptions::default(), None).unwrap();
         assert!(auth.rate_limit().is_none());
 
-        let auth = rate_limit_from_env_value(AuthConfig::default(), Some("10/60")).unwrap();
+        let auth = rate_limit_from_env_value(ServeOptions::default(), Some("10/60")).unwrap();
         assert_eq!(
             auth.rate_limit(),
             Some(RateLimit {
@@ -246,7 +255,7 @@ mod tests {
         );
 
         let err =
-            rate_limit_from_env_value(AuthConfig::default(), Some("not-a-limit")).unwrap_err();
+            rate_limit_from_env_value(ServeOptions::default(), Some("not-a-limit")).unwrap_err();
         assert!(err.contains("SERVER_AUTH_RATE_LIMIT"));
     }
 
@@ -257,19 +266,19 @@ mod tests {
     fn certificate_classes_from_env_values_follows_the_documented_table() {
         // Nothing set: a no-op, `auth` stays whatever it was.
         let auth =
-            certificate_classes_from_env_values(AuthConfig::default(), None, None, None).unwrap();
+            certificate_classes_from_env_values(ServeOptions::default(), None, None, None).unwrap();
         assert!(!auth.is_configured());
 
         // Either variable set without the client CA path is refused.
         assert!(certificate_classes_from_env_values(
-            AuthConfig::default(),
+            ServeOptions::default(),
             Some("some/path.pem"),
             None,
             None
         )
         .is_err());
         assert!(certificate_classes_from_env_values(
-            AuthConfig::default(),
+            ServeOptions::default(),
             None,
             Some("some/path.pem"),
             None
@@ -287,7 +296,7 @@ mod tests {
         let path = dir.join("leaf.pem");
         std::fs::write(&path, cert.pem()).unwrap();
         let auth = certificate_classes_from_env_values(
-            AuthConfig::default(),
+            ServeOptions::default(),
             Some(path.to_str().unwrap()),
             None,
             Some("dummy-ca-path"),
@@ -298,7 +307,7 @@ mod tests {
         // An unreadable file names the variable in its error.
         let missing = dir.join("missing.pem");
         let err = certificate_classes_from_env_values(
-            AuthConfig::default(),
+            ServeOptions::default(),
             Some(missing.to_str().unwrap()),
             None,
             Some("dummy-ca-path"),

@@ -29,7 +29,7 @@ use rusty_multimodal_db::server::order::OrderConnectionStore;
 use rusty_multimodal_db::server::protocol::{
     ErrorCode, Request, Response, ScanValue, PROTOCOL_VERSION,
 };
-use rusty_multimodal_db::server::{dispatch, serve, AuthConfig};
+use rusty_multimodal_db::server::{dispatch, serve, ServeOptions};
 use rusty_multimodal_db::ProductionStore;
 use std::io::{BufReader, BufWriter, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -46,7 +46,7 @@ fn unique_dir(label: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!("{label}_{}_{n}", std::process::id()))
 }
 
-fn start_dog_server(auth: AuthConfig) -> SocketAddr {
+fn start_dog_server(auth: ServeOptions) -> SocketAddr {
     let dir = unique_dir("proto_version_dog");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("dogs.mmap");
@@ -58,7 +58,7 @@ fn start_dog_server(auth: AuthConfig) -> SocketAddr {
     let connection_store = Arc::new(DogConnectionStore::new(store));
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
-    thread::spawn(move || serve(listener, connection_store, auth, None));
+    thread::spawn(move || serve(listener, connection_store, auth));
     addr
 }
 
@@ -80,7 +80,7 @@ fn start_order_server() -> SocketAddr {
     )));
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
-    thread::spawn(move || serve(listener, connection_store, AuthConfig::default(), None));
+    thread::spawn(move || serve(listener, connection_store, ServeOptions::default()));
     addr
 }
 
@@ -102,7 +102,7 @@ fn start_employee_server() -> SocketAddr {
     )));
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
-    thread::spawn(move || serve(listener, connection_store, AuthConfig::default(), None));
+    thread::spawn(move || serve(listener, connection_store, ServeOptions::default()));
     addr
 }
 
@@ -128,7 +128,7 @@ fn roundtrip(
 /// auth gate behind it is intact.
 #[test]
 fn hello_is_answered_before_authentication_with_the_min_version() {
-    let addr = start_dog_server(AuthConfig::new(Some("ro".into()), Some("rw".into())));
+    let addr = start_dog_server(ServeOptions::new(Some("ro".into()), Some("rw".into())));
 
     // A newer client gets this build's version.
     let (mut reader, mut writer) = connect(addr);
@@ -187,7 +187,7 @@ fn hello_is_answered_before_authentication_with_the_min_version() {
 /// `Hello` is served exactly as before (`PROTO-FR-002`).
 #[test]
 fn hello_zero_and_a_late_hello_are_malformed_and_a_silent_client_is_served() {
-    let addr = start_dog_server(AuthConfig::default());
+    let addr = start_dog_server(ServeOptions::default());
 
     let (mut reader, mut writer) = connect(addr);
     assert!(matches!(
@@ -255,7 +255,7 @@ fn hello_zero_and_a_late_hello_are_malformed_and_a_silent_client_is_served() {
 /// domain and reports this build's version, then works as before.
 #[test]
 fn schema_driven_client_negotiates_the_current_version_on_every_domain() {
-    let mut dog = SchemaDrivenClient::connect(start_dog_server(AuthConfig::default())).unwrap();
+    let mut dog = SchemaDrivenClient::connect(start_dog_server(ServeOptions::default())).unwrap();
     assert_eq!(dog.server_protocol_version(), PROTOCOL_VERSION);
     assert_eq!(dog.server_protocol_version(), 6);
     let fields = dog.get(Uuid::from_u128(1)).unwrap().unwrap();
@@ -280,7 +280,7 @@ fn schema_driven_client_negotiates_the_current_version_on_every_domain() {
 /// the next version that appends a variant moves it again.
 #[test]
 fn an_unknown_request_index_closes_the_connection_without_a_reply() {
-    let addr = start_dog_server(AuthConfig::default());
+    let addr = start_dog_server(ServeOptions::default());
     let (mut reader, mut writer) = connect(addr);
 
     // Frame: u32 LE length 4, then a `Request` whose declaration index is
@@ -303,7 +303,7 @@ fn an_unknown_request_index_closes_the_connection_without_a_reply() {
 /// is answered `Ok`.
 #[test]
 fn session_requests_are_malformed_below_protocol_version_3() {
-    let addr = start_dog_server(AuthConfig::default());
+    let addr = start_dog_server(ServeOptions::default());
 
     // Silent client: version 1.
     let (mut reader, mut writer) = connect(addr);

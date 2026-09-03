@@ -176,4 +176,16 @@ Proposed: option 1. Concretely, at implementation:
   again for whenever a sixth concern arrives. Proposed in PR #169.
 - 2026-09-03: accepted as proposed (option (a); (b) and (c) declined).
   Implementation follows as `SERVER-001`'s next minor / FR, per
-  `docs/design/SERVER-SERVE-OPTIONS-DESIGN.md`.
+  `docs/design/SERVER-SERVE-OPTIONS-DESIGN.md`. (PR #170.)
+- 2026-09-03: implemented as `SERVER-001` v0.25.0 / FR-035 (this PR),
+  the owner's "Start Unit 31: implement ADR-0032". `AuthConfig` renamed
+  `ServeOptions` exactly as proposed, gaining `tls: Option<TlsConfig>`,
+  `with_tls`, and `tls()`; `serve` drops to three parameters;
+  `handle_connection` takes one `options: &ServeOptions`. A straight
+  rename, no deprecation shim; `ServeOptions` drops its `Clone` derive
+  (unused — no call site anywhere cloned a value of this type, and
+  `TlsConfig` did not implement `Clone` either). Every internal caller
+  updated across all sixteen touched files with zero assertion changes
+  (`SRV-FR-006`); every acceptance criterion 1–5 holds; no deviation.
+  With this, the trigger `ADR-0029` first named and `ADR-0030`/`ADR-0031`
+  each restated and deferred is closed.

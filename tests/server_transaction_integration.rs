@@ -19,7 +19,7 @@ use rusty_multimodal_db::server::protocol::{
     ErrorCode, Request, Response, ScanValue, TransactionOp, MAX_STAGED_OPS, PROTOCOL_VERSION,
     SESSION_READ_YOUR_WRITES, SESSION_VALIDATE_ON_STAGE,
 };
-use rusty_multimodal_db::server::{serve, AuthConfig, ConnectionStore};
+use rusty_multimodal_db::server::{serve, ConnectionStore, ServeOptions};
 use rusty_multimodal_db::ProductionStore;
 use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
@@ -35,7 +35,7 @@ fn unique_dir(label: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!("{label}_{}_{n}", std::process::id()))
 }
 
-fn start_server(records: Vec<DogRecord>, auth: AuthConfig) -> std::net::SocketAddr {
+fn start_server(records: Vec<DogRecord>, auth: ServeOptions) -> std::net::SocketAddr {
     let dir = unique_dir("server_transaction_integration");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("dogs.mmap");
@@ -45,7 +45,7 @@ fn start_server(records: Vec<DogRecord>, auth: AuthConfig) -> std::net::SocketAd
 
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
-    thread::spawn(move || serve(listener, connection_store, auth, None));
+    thread::spawn(move || serve(listener, connection_store, auth));
     addr
 }
 
@@ -83,7 +83,7 @@ fn age_of(stream: &mut TcpStream, id: Uuid) -> u32 {
 
 #[test]
 fn a_fully_valid_batch_applies_every_write() {
-    let addr = start_server(sample_records(), AuthConfig::default());
+    let addr = start_server(sample_records(), ServeOptions::default());
     let mut client = connect(addr);
 
     assert_eq!(
@@ -115,7 +115,7 @@ fn a_fully_valid_batch_applies_every_write() {
 /// own.
 #[test]
 fn a_batch_failing_on_its_first_operation_applies_nothing() {
-    let addr = start_server(sample_records(), AuthConfig::default());
+    let addr = start_server(sample_records(), ServeOptions::default());
     let mut client = connect(addr);
 
     assert_eq!(
@@ -150,7 +150,7 @@ fn a_batch_failing_on_its_first_operation_applies_nothing() {
 /// is the case a naive "apply in a loop" implementation would get wrong.
 #[test]
 fn a_batch_failing_on_its_last_operation_applies_nothing() {
-    let addr = start_server(sample_records(), AuthConfig::default());
+    let addr = start_server(sample_records(), ServeOptions::default());
     let mut client = connect(addr);
 
     assert_eq!(
@@ -191,7 +191,7 @@ fn a_batch_failing_on_its_last_operation_applies_nothing() {
 /// operation, just reported through `TransactionFailed`.
 #[test]
 fn a_malformed_value_is_rejected_with_the_right_index() {
-    let addr = start_server(sample_records(), AuthConfig::default());
+    let addr = start_server(sample_records(), ServeOptions::default());
     let mut client = connect(addr);
 
     assert_eq!(
@@ -222,7 +222,7 @@ fn a_malformed_value_is_rejected_with_the_right_index() {
 fn a_read_only_connection_is_rejected_before_any_operation_is_evaluated() {
     let addr = start_server(
         sample_records(),
-        AuthConfig::new(Some("read-token".into()), Some("write-token".into())),
+        ServeOptions::new(Some("read-token".into()), Some("write-token".into())),
     );
     let mut client = connect(addr);
     assert_eq!(
@@ -296,7 +296,7 @@ fn concurrent_transactions_and_updates_match_a_sequential_replay() {
         .iter()
         .map(|&id| DogRecord::new(id, "labrador", 0))
         .collect();
-    let addr = start_server(records.clone(), AuthConfig::default());
+    let addr = start_server(records.clone(), ServeOptions::default());
 
     const THREADS: usize = 8;
     const ITERATIONS: usize = 200;
@@ -448,7 +448,7 @@ fn assert_err(resp: Response, code: ErrorCode) {
 /// throughout, so no lock was held between round trips.
 #[test]
 fn a_session_stages_writes_and_commits_them_as_one_batch() {
-    let addr = start_server(sample_records(), AuthConfig::default());
+    let addr = start_server(sample_records(), ServeOptions::default());
     let mut session = connect_v3(addr);
     let mut observer = connect(addr);
 
@@ -480,7 +480,7 @@ fn a_session_stages_writes_and_commits_them_as_one_batch() {
 /// staged index, applies nothing, and closes the session.
 #[test]
 fn a_commit_failure_names_the_staged_index_and_applies_nothing() {
-    let addr = start_server(sample_records(), AuthConfig::default());
+    let addr = start_server(sample_records(), ServeOptions::default());
     let mut session = connect_v3(addr);
 
     assert_eq!(roundtrip(&mut session, Request::Begin), Response::Ok);
@@ -519,7 +519,7 @@ fn a_commit_failure_names_the_staged_index_and_applies_nothing() {
 /// `MAX_STAGED_OPS`, and hitting it leaves the session open.
 #[test]
 fn session_state_errors_leave_the_connection_open() {
-    let addr = start_server(sample_records(), AuthConfig::default());
+    let addr = start_server(sample_records(), ServeOptions::default());
     let mut c = connect_v3(addr);
 
     assert_err(roundtrip(&mut c, Request::Commit), ErrorCode::NoSession);
@@ -576,7 +576,7 @@ fn session_state_errors_leave_the_connection_open() {
 /// `ReadWrite`, `Rollback` needs only authentication.
 #[test]
 fn a_read_only_connection_can_open_a_session_but_not_stage_or_commit() {
-    let auth = AuthConfig::new(Some("read-token".into()), Some("write-token".into()));
+    let auth = ServeOptions::new(Some("read-token".into()), Some("write-token".into()));
     let addr = start_server(sample_records(), auth);
     let mut c = connect_v3(addr);
 
@@ -634,7 +634,7 @@ fn start_journaled_server(records: Vec<DogRecord>) -> (std::net::SocketAddr, std
     let connection_store = Arc::new(DogConnectionStore::with_journal(store, &journal).unwrap());
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
-    thread::spawn(move || serve(listener, connection_store, AuthConfig::default(), None));
+    thread::spawn(move || serve(listener, connection_store, ServeOptions::default()));
     (addr, journal)
 }
 
@@ -835,7 +835,7 @@ fn breed_of(stream: &mut TcpStream, id: Uuid) -> String {
 /// connections see the batch.
 #[test]
 fn a_read_your_writes_session_sees_its_own_staged_writes_and_nobody_else_does() {
-    let addr = start_server(sample_records(), AuthConfig::default());
+    let addr = start_server(sample_records(), ServeOptions::default());
     let mut c = connect_v3(addr);
     let mut other = connect(addr);
     let id = Uuid::from_u128(1);
@@ -875,7 +875,7 @@ fn a_read_your_writes_session_sees_its_own_staged_writes_and_nobody_else_does() 
 /// at `Commit` by its index.
 #[test]
 fn read_your_writes_never_shows_a_write_that_commit_would_refuse() {
-    let addr = start_server(sample_records(), AuthConfig::default());
+    let addr = start_server(sample_records(), ServeOptions::default());
     let mut c = connect_v3(addr);
     let id = Uuid::from_u128(1);
     assert_eq!(begin_read_your_writes(&mut c), Response::Ok);
@@ -951,7 +951,7 @@ fn read_your_writes_never_shows_a_write_that_commit_would_refuse() {
 /// exactly `Begin` (no overlay), and a second open is `SessionOpen`.
 #[test]
 fn begin_with_is_gated_by_version_and_refuses_unknown_flags() {
-    let addr = start_server(sample_records(), AuthConfig::default());
+    let addr = start_server(sample_records(), ServeOptions::default());
     let id = Uuid::from_u128(1);
 
     let mut silent = connect(addr);
@@ -1000,7 +1000,7 @@ fn begin_with_is_gated_by_version_and_refuses_unknown_flags() {
 /// read-your-writes both bits work together.
 #[test]
 fn a_validating_session_refuses_bad_writes_when_staged() {
-    let addr = start_server(sample_records(), AuthConfig::default());
+    let addr = start_server(sample_records(), ServeOptions::default());
     let mut c = connect_v3(addr);
     let id = Uuid::from_u128(1);
     assert_eq!(
@@ -1085,7 +1085,7 @@ fn a_validating_session_refuses_bad_writes_when_staged() {
 /// there.
 #[test]
 fn the_validate_bit_is_unknown_below_protocol_6() {
-    let addr = start_server(sample_records(), AuthConfig::default());
+    let addr = start_server(sample_records(), ServeOptions::default());
     let mut v5 = connect(addr);
     assert_eq!(
         roundtrip(
