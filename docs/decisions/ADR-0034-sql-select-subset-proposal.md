@@ -1,6 +1,12 @@
 # ADR-0034: A read-only `SELECT` subset — client-side SQL over a new full-scan primitive
 
-- Status: **Proposed**
+- Status: **Accepted** (promoted from Proposed on 2026-09-03 — the owner
+  approved the design as proposed, option (a): a real client-side SQL
+  `SELECT` subset over a new `scan_all` full-scan primitive, protocol
+  version 8; (b) skipping the parser for a structured compound filter
+  and (c) closing as not warranted declined; no changes requested).
+  Acceptance authorizes the design; implementation follows as its own
+  unit — see "Acceptance and implementation" below.
 - Date: 2026-09-03
 - Deciders: baileyrd
 - Related: `docs/design/SERVER-SQL-SELECT-DESIGN.md` (the full design this
@@ -210,4 +216,7 @@ Proposed: option 1. Concretely, at implementation:
   the parser, ship only a structured compound-filter request
   (`AND`-of-`FilterEq`-shaped predicates), smaller but not literally
   SQL; **(c)** close as not warranted — restate "the query language
-  itself" as still open, build nothing. Proposed in this PR.
+  itself" as still open, build nothing. Proposed in PR #176.
+- 2026-09-03: accepted as proposed (option (a); (b) and (c) declined).
+  Implementation follows as `SERVER-001`'s next minor / FR, per
+  `docs/design/SERVER-SQL-SELECT-DESIGN.md`. (PR #176.)

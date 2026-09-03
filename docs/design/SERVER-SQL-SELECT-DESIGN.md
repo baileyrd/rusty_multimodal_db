@@ -1,6 +1,11 @@
-# Server SQL SELECT Subset Design (Proposed)
+# Server SQL SELECT Subset Design (Accepted)
 
-- Status: **Proposed**
+- Status: **Accepted** (promoted from Proposed on 2026-09-03 — the owner
+  approved the design as proposed, `ADR-0034` option (a); skipping the
+  parser for a structured compound filter and closing as not warranted
+  both declined; no changes requested). Acceptance authorizes the
+  design; implementation follows as its own unit — see `ADR-0034`'s
+  "Acceptance and implementation" section.
 - Date: 2026-09-03
 - Related: `ADR-0010`/`docs/design/SERVER-QUERY-LAYER-DESIGN.md` (named "a
   query language" as explicitly out of scope for v1 — fixed, server-
@@ -509,3 +514,6 @@ impl SchemaDrivenClient {
   "parser, planner, cost-based optimizer, execution engine" framing to
   a bounded, read-only `SELECT` subset compiled to a new full-scan
   primitive — no query planner, no joins, no aggregation, no writes.
+  (PR #176.)
+- 2026-09-03: Accepted as proposed. No content change. Implementation
+  follows as `SERVER-001`'s next minor / FR.
