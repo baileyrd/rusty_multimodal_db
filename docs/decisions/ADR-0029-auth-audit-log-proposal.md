@@ -147,4 +147,4 @@ Proposed: option 1. Concretely, at implementation:
   the eager handshake; **(b)** accept fail-closed — the same, but a
   sink write failure ends the connection rather than dropping the
   event; **(c)** close as not warranted — the gap stays named as it
-  has been since `ADR-0012`. Proposed in this PR.
+  has been since `ADR-0012`. Proposed in PR #151.

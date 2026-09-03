@@ -373,4 +373,4 @@ the same discipline `dispatch` uses.
 
 - 2026-09-03: Initial proposal, in response to the owner selecting the
   authentication audit-log design round as the fourth of four next
-  directions ("1, 2, 3, 4").
+  directions ("1, 2, 3, 4"). (PR #151.)
