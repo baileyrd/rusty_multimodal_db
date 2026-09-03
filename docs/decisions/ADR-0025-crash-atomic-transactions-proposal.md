@@ -196,7 +196,7 @@ Proposed: option 1. Concretely, at implementation:
   `docs/design/SERVER-JOURNAL-GROUP-COMMIT-DESIGN.md`, proposed in
   PR #145: the `fsync` leaves the exclusive section, one leader syncs
   for everyone, applies stay in journal order; accepted in PR #153 and
-  implemented as `SERVER-001` v0.17.0 / FR-027 in this PR. No change to
+  implemented as `SERVER-001` v0.17.0 / FR-027 in PR #155. No change to
   this decision; the journal's format and guarantees are unchanged
   there.*
 - Revisit if: always-on is judged the right default after the bench

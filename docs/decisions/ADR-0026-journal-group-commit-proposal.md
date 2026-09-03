@@ -201,7 +201,7 @@ Proposed: option 1. Concretely, at implementation:
   "a, a, a, a" across `ADR-0026`–`ADR-0029`). Implemented next, as
   `SERVER-001`'s next minor / FR, per
   `docs/design/SERVER-JOURNAL-GROUP-COMMIT-DESIGN.md`. (PR #153.)
-- 2026-09-03: implemented as `SERVER-001` v0.17.0 (FR-027) in this PR
+- 2026-09-03: implemented as `SERVER-001` v0.17.0 (FR-027) in PR #155
   — `CommitGroup` in `src/server/journal.rs` (append under the journal's
   mutex, leader/follower `fsync` outside the exclusive section, a turn
   gate for ordered apply, a quiescent checkpoint re-checked under the
