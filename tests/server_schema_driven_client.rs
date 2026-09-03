@@ -320,7 +320,7 @@ fn value_of(client: &mut SchemaDrivenClient, id: Uuid, field: &str) -> ScanValue
 #[test]
 fn sessions_stage_commit_and_roll_back_on_every_domain() {
     let mut dog = SchemaDrivenClient::connect(start_dog_server()).unwrap();
-    assert_eq!(dog.server_protocol_version(), 4);
+    assert_eq!(dog.server_protocol_version(), 5);
 
     let mut s = dog.begin().unwrap();
     assert_eq!(
@@ -419,4 +419,37 @@ fn sessions_stage_commit_and_roll_back_on_every_domain() {
         value_of(&mut employee, Uuid::from_u128(1), "salary_cents"),
         ScanValue::I64(1_500_000)
     );
+}
+
+/// `RYW-FR-007` (design criterion 6): `begin_read_your_writes` opens a
+/// session whose `get` shows its staged writes; a plain `begin` session's
+/// `get` shows committed state; both commit as before.
+#[test]
+fn read_your_writes_sessions_see_their_own_staged_writes_through_the_client() {
+    let mut dog = SchemaDrivenClient::connect(start_dog_server()).unwrap();
+    let id = Uuid::from_u128(1);
+    let before = value_of(&mut dog, id, "age");
+
+    let mut s = dog.begin().unwrap();
+    assert!(!s.read_your_writes());
+    s.update(id, "age", ScanValue::U32(21)).unwrap();
+    let plain = s.get(id).unwrap().unwrap();
+    assert!(
+        plain.contains(&("age".to_string(), before.clone())),
+        "plain session reads committed: {plain:?}"
+    );
+    s.rollback().unwrap();
+
+    let mut s = dog.begin_read_your_writes().unwrap();
+    assert!(s.read_your_writes());
+    s.update(id, "age", ScanValue::U32(22)).unwrap();
+    let seen = s.get(id).unwrap().unwrap();
+    assert!(
+        seen.contains(&("age".to_string(), ScanValue::U32(22))),
+        "own write visible: {seen:?}"
+    );
+    assert!(seen.iter().any(|(name, _)| name == "breed"));
+    assert!(s.get(Uuid::from_u128(99)).unwrap().is_none());
+    s.commit().unwrap();
+    assert_eq!(value_of(&mut dog, id, "age"), ScanValue::U32(22));
 }

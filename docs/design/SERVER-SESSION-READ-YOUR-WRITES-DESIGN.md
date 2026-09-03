@@ -392,3 +392,10 @@ schema; if not, a private kind comparison in `mod.rs` is enough.
   the opt-in are decided rather than assumed. (PR #147.)
 - 2026-09-03: Accepted as proposed. No content change. Implementation
   after `ADR-0026`'s unit, as `SERVER-001`'s next minor / FR. (PR #153.)
+- 2026-09-03: Implemented as `SERVER-001` v0.18.0 / FR-028 (this PR),
+  per the verification plan: acceptance criteria 1–7 hold as written.
+  One clarification: `RYW-FR-002`'s overlay also requires the field to
+  be schema-updatable (read once at `BeginWith`) — a read-only field of
+  the right kind, `Dog::breed`, would otherwise have been shown and then
+  refused at `Commit`, which the requirement's own last sentence
+  forbids. `ADR-0027`'s acceptance log carries the same note.

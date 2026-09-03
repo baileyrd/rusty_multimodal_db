@@ -138,7 +138,7 @@ pub mod protocol;
 
 use protocol::{
     DomainSchema, ErrorCode, FieldRef, ParentLookup, RecordId, Request, Response, ScanValue,
-    TransactionOp, MAX_STAGED_OPS, PROTOCOL_VERSION,
+    TransactionOp, MAX_STAGED_OPS, PROTOCOL_VERSION, SESSION_READ_YOUR_WRITES,
 };
 use std::cell::RefCell;
 use std::io::{self, BufReader, BufWriter, Read, Write};
@@ -237,6 +237,42 @@ fn error_message(code: ErrorCode) -> &'static str {
             "the batch could not be journaled before applying it; nothing was applied"
         }
     }
+}
+
+/// `RYW-FR-002` (ADR-0027): lay a read-your-writes session's staged
+/// writes over a committed `Record`'s fields. For each field the record
+/// carries, the *last* staged operation with this `id` and `field`
+/// replaces the value — provided the staged value's kind equals the
+/// committed one's and the field is one of `updatable` (the schema's
+/// `update`-capable tags, read once at `BeginWith`). Everything else is
+/// untouched: a missing id never gains a record (the caller only reaches
+/// here with a `Record`), an absent field, a kind mismatch, or a
+/// read-only field is ignored — each would fail at `Commit`, and the read
+/// must not pretend otherwise. A pure function; linear in the buffer.
+pub(crate) fn overlay_staged(
+    id: RecordId,
+    fields: &mut [(FieldRef, ScanValue)],
+    staged: &[TransactionOp],
+    updatable: &[FieldRef],
+) {
+    for (field, value) in fields.iter_mut() {
+        if !updatable.contains(field) {
+            continue;
+        }
+        if let Some(op) = staged
+            .iter()
+            .rev()
+            .find(|op| op.id == id && op.field == *field)
+        {
+            if same_kind(&op.value, value) {
+                *value = op.value.clone();
+            }
+        }
+    }
+}
+
+fn same_kind(a: &ScanValue, b: &ScanValue) -> bool {
+    std::mem::discriminant(a) == std::mem::discriminant(b)
 }
 
 /// Compatibility rule 3's "nearest older shape" (`protocol.rs`): a
@@ -665,7 +701,7 @@ pub fn dispatch<S: ConnectionStore + ?Sized>(store: &S, req: Request) -> Respons
         Request::Hello { .. } => err_response(ErrorCode::Unsupported),
         // Protocol 3, `SESS-FR-006`: a session is per-connection state
         // `handle_connection` owns; a store has nothing to say about it.
-        Request::Begin | Request::Commit | Request::Rollback => {
+        Request::Begin | Request::BeginWith { .. } | Request::Commit | Request::Rollback => {
             err_response(ErrorCode::Unsupported)
         }
         Request::Transaction { updates } => match store.apply_transaction(&updates) {
@@ -756,6 +792,17 @@ fn send_response(writer: &mut BufWriter<WriteHalf>, resp: &Response) -> bool {
 /// version-3 response shape is ever sent on an older connection
 /// (compatibility rule 3). Misuse (`NoSession`, `SessionOpen`,
 /// `SessionFull`) is a typed error with the connection open.
+///
+/// # Read-your-writes sessions (`RYW-FR-001`–`005`), ADR-0027
+///
+/// Protocol 5 adds `BeginWith { flags }`: with `SESSION_READ_YOUR_WRITES`
+/// the session also remembers the schema's updatable field tags, and this
+/// connection's own `GetById` — and only that read — is served as usual
+/// and then passed through [`overlay_staged`] before it is sent. Set
+/// reads, plain `Begin` sessions, and every other connection see
+/// committed state exactly as before; a connection with no session takes
+/// no new branch. Unknown flag bits are `Malformed`; below version 5 the
+/// request is `Malformed` (rule 3), like `Begin` below 3.
 fn handle_connection<S: ConnectionStore + ?Sized>(
     stream: TcpStream,
     store: &S,
@@ -811,6 +858,9 @@ fn handle_connection<S: ConnectionStore + ?Sized>(
     let mut negotiated: u32 = 1;
     // `SESS-FR-002`: the staged writes of an open session, if any.
     let mut session: Option<Vec<TransactionOp>> = None;
+    // `RYW-FR-001`: `Some(updatable tags)` while a read-your-writes
+    // session is open; cleared with the session.
+    let mut read_your_writes: Option<Vec<FieldRef>> = None;
 
     loop {
         let req: Request = match framing::read_message(&mut reader) {
@@ -885,27 +935,65 @@ fn handle_connection<S: ConnectionStore + ?Sized>(
                     err_response(ErrorCode::SessionOpen)
                 } else {
                     session = Some(Vec::new());
+                    read_your_writes = None;
+                    Response::Ok
+                }
+            }
+            Request::BeginWith { .. } if negotiated < 5 => err_response(ErrorCode::Malformed),
+            Request::BeginWith { flags } => {
+                if flags & !SESSION_READ_YOUR_WRITES != 0 {
+                    err_response(ErrorCode::Malformed)
+                } else if session.is_some() {
+                    err_response(ErrorCode::SessionOpen)
+                } else {
+                    session = Some(Vec::new());
+                    read_your_writes = (flags & SESSION_READ_YOUR_WRITES != 0).then(|| {
+                        store
+                            .describe()
+                            .fields
+                            .iter()
+                            .filter(|f| f.capabilities.update)
+                            .map(|f| f.tag)
+                            .collect()
+                    });
                     Response::Ok
                 }
             }
             Request::Rollback => {
+                read_your_writes = None;
                 if session.take().is_some() {
                     Response::Ok
                 } else {
                     err_response(ErrorCode::NoSession)
                 }
             }
-            Request::Commit => match session.take() {
-                None => err_response(ErrorCode::NoSession),
-                Some(batch) => match store.apply_transaction(&batch) {
-                    Ok(()) => Response::Ok,
-                    Err((index, code)) => Response::TransactionFailed {
-                        index,
-                        code,
-                        message: error_message(code).to_string(),
+            Request::GetById { id } if read_your_writes.is_some() && session.is_some() => {
+                match dispatch(store, Request::GetById { id }) {
+                    Response::Record { id, mut fields } => {
+                        if let (Some(staged), Some(updatable)) =
+                            (session.as_ref(), read_your_writes.as_ref())
+                        {
+                            overlay_staged(id, &mut fields, staged, updatable);
+                        }
+                        Response::Record { id, fields }
+                    }
+                    other => other,
+                }
+            }
+            Request::Commit => {
+                read_your_writes = None;
+                match session.take() {
+                    None => err_response(ErrorCode::NoSession),
+                    Some(batch) => match store.apply_transaction(&batch) {
+                        Ok(()) => Response::Ok,
+                        Err((index, code)) => Response::TransactionFailed {
+                            index,
+                            code,
+                            message: error_message(code).to_string(),
+                        },
                     },
-                },
-            },
+                }
+            }
             Request::UpdateField { id, field, value } if session.is_some() => {
                 match session.as_mut() {
                     Some(staged) if staged.len() < MAX_STAGED_OPS => {
@@ -1347,9 +1435,72 @@ mod tests {
     #[test]
     fn dispatch_never_routes_session_requests_to_a_store() {
         let store = FixtureStore;
-        for req in [Request::Begin, Request::Commit, Request::Rollback] {
+        for req in [
+            Request::Begin,
+            Request::Commit,
+            Request::Rollback,
+            Request::BeginWith { flags: 1 },
+        ] {
             assert_eq!(dispatch(&store, req), err_response(ErrorCode::Unsupported));
         }
+    }
+
+    /// `RYW-FR-002`: the overlay is exact where it applies and inert
+    /// everywhere else — last staged write per field wins; another id,
+    /// an absent field, a kind mismatch, and a read-only field are each
+    /// ignored.
+    #[test]
+    fn overlay_staged_replaces_only_matching_updatable_fields() {
+        let id = RecordId::from_u128(1);
+        let other = RecordId::from_u128(2);
+        let staged = vec![
+            TransactionOp {
+                id,
+                field: 1,
+                value: ScanValue::U32(10),
+            },
+            TransactionOp {
+                id: other,
+                field: 1,
+                value: ScanValue::U32(99),
+            },
+            TransactionOp {
+                id,
+                field: 1,
+                value: ScanValue::U32(11),
+            },
+            TransactionOp {
+                id,
+                field: 2,
+                value: ScanValue::U32(5),
+            },
+            TransactionOp {
+                id,
+                field: 0,
+                value: ScanValue::Str("poodle".into()),
+            },
+            TransactionOp {
+                id,
+                field: 3,
+                value: ScanValue::I64(7),
+            },
+        ];
+        let mut fields = vec![
+            (0, ScanValue::Str("labrador".into())),
+            (1, ScanValue::U32(3)),
+            (2, ScanValue::I64(4)),
+        ];
+        overlay_staged(id, &mut fields, &staged, &[1, 2]);
+        assert_eq!(
+            fields,
+            vec![
+                (0, ScanValue::Str("labrador".into())), // read-only: untouched
+                (1, ScanValue::U32(11)),                // last staged write wins
+                (2, ScanValue::I64(4)),                 // kind mismatch: untouched
+            ]
+        );
+        overlay_staged(other, &mut fields, &staged, &[1, 2]);
+        assert_eq!(fields[1], (1, ScanValue::U32(99)));
     }
 
     /// Spin up `serve` over `FixtureStore` on a loopback port with
