@@ -174,7 +174,10 @@ interfaces" section for the full reasoning. Summarized:
 - Two static token classes is coarse — no per-user identity, no
   per-field/per-record authorization, no audit log of who did what. A
   real, accepted scope limit, not an oversight — see `SERVER-AUTH-DESIGN.md`'s
-  own Non-goals.
+  own Non-goals. *The audit log: `ADR-0029` / `SERVER-AUTH-AUDIT-DESIGN.md`
+  (Proposed) records every admission, authentication, and authorization
+  decision by peer address — "who was let in and what was refused,"
+  not "who did what"; per-request access logging stays out of scope.*
 - Token rotation/revocation has no story in this design — a token is
   valid until the server process restarts with a different one
   configured; no expiry, no revocation list.
