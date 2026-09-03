@@ -19,7 +19,7 @@ use rusty_multimodal_db::generic_spike::employee_impl::{
     create_employee_production_stack, Department, Employee,
 };
 use rusty_multimodal_db::record::DogRecord;
-use rusty_multimodal_db::server::client::SchemaDrivenClient;
+use rusty_multimodal_db::server::client::{ClientError, ConnectOptions, SchemaDrivenClient};
 use rusty_multimodal_db::server::dog::DogConnectionStore;
 use rusty_multimodal_db::server::employee::EmployeeConnectionStore;
 use rusty_multimodal_db::server::framing::{read_message, write_message};
@@ -27,7 +27,7 @@ use rusty_multimodal_db::server::order::OrderConnectionStore;
 use rusty_multimodal_db::server::protocol::{
     ErrorCode, Request, Response, ScanValue, PROTOCOL_VERSION,
 };
-use rusty_multimodal_db::server::{serve, AuthConfig};
+use rusty_multimodal_db::server::{dispatch, serve, AuthConfig};
 use rusty_multimodal_db::ProductionStore;
 use std::io::{BufReader, BufWriter, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -375,4 +375,89 @@ fn session_requests_are_malformed_below_protocol_version_3() {
         roundtrip(&mut reader, &mut writer, &Request::Rollback),
         Response::Ok
     );
+}
+
+/// A *pre-hello* server (the `SERVER-001` v0.9.1 shape, protocol version
+/// 1 without the `Hello` variant), emulated rather than checked out: it
+/// reads a connection's first frame, and if that frame is a `Hello` —
+/// which a real v0.9.1 build could not even decode — it closes the
+/// connection with no reply, exactly the documented failure mode. Every
+/// other request is answered by the real `dispatch` over a real
+/// `DogConnectionStore`, so a client that speaks version 1 gets real
+/// answers. `drop_every_first_frame` makes it a server that dies under
+/// *any* first frame — the case the fallback must not paper over.
+fn start_pre_hello_dog_server(drop_every_first_frame: bool) -> SocketAddr {
+    let dir = unique_dir("proto_version_pre_hello");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("dogs.mmap");
+    let records = vec![
+        DogRecord::new(Uuid::from_u128(1), "labrador", 3),
+        DogRecord::new(Uuid::from_u128(2), "labrador", 5),
+    ];
+    let store = Arc::new(DogConnectionStore::new(
+        ProductionStore::create(records, Vec::new(), &path).unwrap(),
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            let store = Arc::clone(&store);
+            thread::spawn(move || {
+                let mut first = true;
+                loop {
+                    let req: Request = match read_message(&mut stream) {
+                        Ok(req) => req,
+                        Err(_) => return,
+                    };
+                    if first && (drop_every_first_frame || matches!(req, Request::Hello { .. })) {
+                        return; // close with no reply
+                    }
+                    first = false;
+                    let resp = dispatch(store.as_ref(), req);
+                    if write_message(&mut stream, &resp).is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+    addr
+}
+
+/// `SERVER-001` FR-026 (the reconnect-without-hello fallback, default-on):
+/// against a pre-hello server `connect` succeeds on a silent second
+/// connection, reports version 1, serves reads, and refuses the
+/// version-gated session API; `require_hello()` restores the pre-v0.16.0
+/// error; a server that dies under *any* first frame is still an error —
+/// the fallback fires once and returns the second attempt's failure, it
+/// does not retry forever or invent a server.
+#[test]
+fn a_pre_hello_server_is_reconnected_to_without_a_hello_unless_hello_is_required() {
+    let addr = start_pre_hello_dog_server(false);
+
+    let mut client = SchemaDrivenClient::connect(addr).unwrap();
+    assert_eq!(client.server_protocol_version(), 1);
+    let fields = client.get(Uuid::from_u128(1)).unwrap().unwrap();
+    assert!(fields
+        .iter()
+        .any(|(name, value)| name == "age" && *value == ScanValue::U32(3)));
+    assert!(matches!(
+        client.begin().map(|_| ()),
+        Err(ClientError::Unsupported(_))
+    ));
+
+    match SchemaDrivenClient::connect_with(addr, ConnectOptions::new().require_hello()).map(|_| ())
+    {
+        Err(ClientError::Frame(_)) => {}
+        other => panic!("expected the pre-hello EOF with require_hello, got {other:?}"),
+    }
+
+    let dying = start_pre_hello_dog_server(true);
+    match SchemaDrivenClient::connect(dying).map(|_| ()) {
+        Err(ClientError::Frame(_)) => {}
+        other => panic!(
+            "expected a server that dies under any first frame to be an error, got {other:?}"
+        ),
+    }
 }

@@ -39,15 +39,24 @@
 //! [`SchemaDrivenClient::connect`] says `Request::Hello` with this build's
 //! [`PROTOCOL_VERSION`] before its `DescribeSchema` (`PROTO-FR-007`) and
 //! keeps the negotiated version — `min(client, server)` — behind
-//! [`SchemaDrivenClient::server_protocol_version`]. This client sends no
-//! request introduced after version 1, so at version 2 it has nothing to
-//! gate on that value; it is exposed so a caller can (compatibility rule
-//! 4 in [`super::protocol`]'s docs). A server that predates the hello
+//! [`SchemaDrivenClient::server_protocol_version`], and gates its own
+//! version-3 API ([`SchemaDrivenClient::begin`]) on it (compatibility
+//! rule 4 in [`super::protocol`]'s docs). A server that predates the hello
 //! (any `SERVER-001` v0.9.1 or earlier build) does not answer it: it
-//! closes the connection, which this client sees as
-//! `ClientError::Frame(FrameError::Io(..))` at end of stream — named, not
-//! mitigated (no such server is deployed; a reconnect-without-hello
-//! fallback is ADR-0022's revisit trigger for it).
+//! closes the connection with no reply. Since `SERVER-001` FR-026 (the
+//! reconnect-without-hello fallback ADR-0022 named as a revisit trigger,
+//! taken at the owner's call as default-on) [`SchemaDrivenClient::connect_with`]
+//! treats exactly that — the peer closing the connection under the
+//! `Hello` frame, before any reply — as a pre-hello server: it opens a
+//! second connection, sends no `Hello`, reports the version as 1, and
+//! every version-gated API refuses from there. The heuristic fires once
+//! per `connect_with`, only on an end-of-stream/reset/abort-class I/O
+//! error under the `Hello`, never on a reply (a server that answers
+//! anything is a versioned server, and `Malformed` still means what it
+//! did). The cost is one extra connect when a server genuinely dies
+//! under the first frame — the second attempt then fails the same way
+//! and that error is the one returned. [`ConnectOptions::require_hello`]
+//! turns the fallback off for a caller that would rather see the EOF.
 //!
 //! # Authentication (`AuthConfig`), `SERVER-001-FR-021`
 //!
@@ -312,6 +321,9 @@ impl ClientTlsConfig {
 pub struct ConnectOptions {
     token: Option<String>,
     tls: Option<ClientTlsConfig>,
+    /// `FR-026`: when set, a pre-hello server is an error, not a silent
+    /// reconnect. Default off — the fallback is on.
+    require_hello: bool,
 }
 
 impl ConnectOptions {
@@ -329,6 +341,16 @@ impl ConnectOptions {
     /// Complete a TLS handshake (as `tls` describes) before the `Hello`.
     pub fn tls(mut self, tls: ClientTlsConfig) -> Self {
         self.tls = Some(tls);
+        self
+    }
+
+    /// Disable the pre-hello fallback (`FR-026`; see this module's own
+    /// "Protocol version" section): a server that closes the connection
+    /// under the `Hello` is then reported as
+    /// `ClientError::Frame(FrameError::Io(..))`, as it was before v0.16.0,
+    /// instead of being reconnected to without a `Hello`.
+    pub fn require_hello(mut self) -> Self {
+        self.require_hello = true;
         self
     }
 }
@@ -503,35 +525,27 @@ impl SchemaDrivenClient {
         addr: A,
         options: ConnectOptions,
     ) -> Result<Self, ClientError> {
-        let tcp = TcpStream::connect(addr).map_err(FrameError::from)?;
-        tcp.set_nodelay(true).map_err(FrameError::from)?;
-        let transport = match &options.tls {
-            None => Transport::Plain(tcp),
-            Some(tls) => {
-                let stream = match &tls.identity {
-                    None => rusty_tls::TlsStream::new(tcp, &tls.server_name, &tls.trust),
-                    Some((chain, key)) => rusty_tls::TlsStream::new_with_client_identity(
-                        tcp,
-                        &tls.server_name,
-                        &tls.trust,
-                        chain.clone(),
-                        key.clone(),
-                    ),
-                }
-                .map_err(ClientError::Tls)?;
-                Transport::Tls(Box::new(stream))
-            }
-        };
-        let mut stream = BufReader::new(transport);
+        let mut stream = Self::open_transport(&addr, &options)?;
 
         let server_protocol_version = match Self::exchange(
             &mut stream,
             &Request::Hello {
                 protocol_version: PROTOCOL_VERSION,
             },
-        )? {
-            Response::Hello { protocol_version } => protocol_version,
-            _ => return Err(ClientError::UnexpectedResponse("Hello")),
+        ) {
+            Ok(Response::Hello { protocol_version }) => protocol_version,
+            Ok(_) => return Err(ClientError::UnexpectedResponse("Hello")),
+            // `FR-026`: the peer closed the connection under the `Hello`
+            // with no reply — what a pre-hello server does. Reconnect
+            // once, say nothing, and speak version 1 (see this module's
+            // own "Protocol version" section for the heuristic's bounds).
+            Err(ClientError::Frame(FrameError::Io(e)))
+                if !options.require_hello && Self::peer_closed(&e) =>
+            {
+                stream = Self::open_transport(&addr, &options)?;
+                1
+            }
+            Err(e) => return Err(e),
         };
 
         if let Some(token) = options.token {
@@ -552,6 +566,48 @@ impl SchemaDrivenClient {
             schema,
             server_protocol_version,
         })
+    }
+
+    /// The TCP connection, `TCP_NODELAY`, and the TLS wrap `options`
+    /// asks for — everything before the first frame. Called once, or
+    /// twice when the `FR-026` fallback reconnects.
+    fn open_transport<A: ToSocketAddrs>(
+        addr: &A,
+        options: &ConnectOptions,
+    ) -> Result<BufReader<Transport>, ClientError> {
+        let tcp = TcpStream::connect(addr).map_err(FrameError::from)?;
+        tcp.set_nodelay(true).map_err(FrameError::from)?;
+        let transport = match &options.tls {
+            None => Transport::Plain(tcp),
+            Some(tls) => {
+                let stream = match &tls.identity {
+                    None => rusty_tls::TlsStream::new(tcp, &tls.server_name, &tls.trust),
+                    Some((chain, key)) => rusty_tls::TlsStream::new_with_client_identity(
+                        tcp,
+                        &tls.server_name,
+                        &tls.trust,
+                        chain.clone(),
+                        key.clone(),
+                    ),
+                }
+                .map_err(ClientError::Tls)?;
+                Transport::Tls(Box::new(stream))
+            }
+        };
+        Ok(BufReader::new(transport))
+    }
+
+    /// The I/O errors that mean "the peer closed on us" rather than
+    /// "the network failed" — the only shape the `FR-026` fallback
+    /// answers. Anything else under the `Hello` is returned as is.
+    fn peer_closed(e: &io::Error) -> bool {
+        matches!(
+            e.kind(),
+            io::ErrorKind::UnexpectedEof
+                | io::ErrorKind::ConnectionReset
+                | io::ErrorKind::ConnectionAborted
+                | io::ErrorKind::BrokenPipe
+        )
     }
 
     /// One request, one response: the frame is assembled in memory and
