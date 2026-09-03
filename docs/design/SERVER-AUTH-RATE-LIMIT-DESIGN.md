@@ -1,13 +1,10 @@
-# Server Authentication Rate Limit and Lockout Design (Proposed)
+# Server Authentication Rate Limit and Lockout Design (Accepted)
 
-- Status: **Proposed** (not yet accepted; no implementation authorized).
-  One decision, `ADR-0030`: bound failed authentication — a
-  per-connection lockout after a fixed number of failed `Authenticate`s
-  (on by default, a constant), and an opt-in per-peer failure budget
-  over a window (`AuthConfig::with_rate_limit`) — both recorded on the
-  audit log, neither changing the wire. Acceptance authorizes the
-  design; implementation follows as its own unit — see `ADR-0030`'s
-  "Acceptance and implementation" section.
+- Status: **Accepted** (promoted from Proposed on 2026-09-03 — the owner
+  approved the design as proposed, `ADR-0030` option (a); both opt-in
+  with a typed error and closing declined; no changes requested).
+  Acceptance authorizes the design; implementation follows as its own
+  unit — see `ADR-0030`'s "Acceptance and implementation" section.
 - Date: 2026-09-03
 - Related: `docs/design/SERVER-AUTH-DESIGN.md` / `ADR-0012` (the token
   scheme; its named gap — *rate-limiting failed authentication

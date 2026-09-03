@@ -1,12 +1,10 @@
-# Server Access Log Design (Proposed)
+# Server Access Log Design (Accepted)
 
-- Status: **Proposed** (not yet accepted; no implementation authorized).
-  One decision, `ADR-0031`: an opt-in, per-request access log — a
-  second sink family, separate from the audit log — recording who was
-  answered what kind of request, never what the request carried or
-  returned. Acceptance authorizes the design; implementation follows
-  as its own unit — see `ADR-0031`'s "Acceptance and implementation"
-  section.
+- Status: **Accepted** (promoted from Proposed on 2026-09-03 — the owner
+  approved the design as proposed, `ADR-0031` option (a); folding into
+  `AuditKind` and closing declined; no changes requested). Acceptance
+  authorizes the design; implementation follows as its own unit — see
+  `ADR-0031`'s "Acceptance and implementation" section.
 - Date: 2026-09-03
 - Related: `docs/design/SERVER-AUTH-AUDIT-DESIGN.md` / `ADR-0029` (the
   audit log, `SERVER-001` v0.19.0 / FR-029; its second revisit trigger
