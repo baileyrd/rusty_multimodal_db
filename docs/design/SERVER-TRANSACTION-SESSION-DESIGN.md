@@ -625,7 +625,10 @@ addition, gated like any appended code. `dog_server` gains an optional
   the store is untouched.
 - Read-your-writes inside a session: out of scope here; if ever wanted,
   a per-connection overlay on `GetById`/`ScanField` is the shape, at a
-  real cost on every read path.
+  real cost on every read path. *Taken up as `ADR-0027` /
+  `SERVER-SESSION-READ-YOUR-WRITES-DESIGN.md` (Proposed): `GetById`
+  only — `ScanField` answers by position with no ids, so it cannot be
+  overlaid — opt-in per session, at a cost only on the reads that asked.*
 - Whether Part B's journal should one day absorb single writes
   (`hybrid.rs` variant 1's guarantee) — named, not proposed.
 
@@ -659,3 +662,6 @@ addition, gated like any appended code. `dog_server` gains an optional
   `ADR-0026` / `SERVER-JOURNAL-GROUP-COMMIT-DESIGN.md` (Proposed) — the
   group-commit design `ADR-0025`'s third revisit trigger asked for,
   after `RESULTS.md`'s FR-025 rows fired it. No other content change.
+- 2026-09-03: The read-your-writes open question pointed at `ADR-0027` /
+  `SERVER-SESSION-READ-YOUR-WRITES-DESIGN.md` (Proposed). No other
+  content change.

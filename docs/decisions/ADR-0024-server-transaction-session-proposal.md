@@ -181,6 +181,12 @@ Proposed: option 2. Concretely, at implementation:
 - Revisit if: read-your-writes inside a session becomes wanted — a
   per-connection overlay on the read paths, a real design with a cost
   on every read.
+  *Taken up as `ADR-0027` / `docs/design/SERVER-SESSION-READ-YOUR-WRITES-DESIGN.md`,
+  proposed in this PR: opt-in at `Begin` time via an appended
+  `BeginWith { flags }` at protocol 5, `GetById` overlaid, set reads and
+  plain sessions unchanged — so `SESS-FR-007` and this decision's "no
+  read-your-writes" consequence stand for every session that did not
+  ask. No change to this decision.*
 - Revisit if: stage-time validation becomes wanted — a `ConnectionStore`
   validation hook, additive.
 - Revisit if: a second mutating operation kind appears — `TransactionOp`
