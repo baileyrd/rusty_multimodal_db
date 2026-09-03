@@ -175,7 +175,7 @@ Proposed: option 1. Concretely, at implementation:
   Implemented after `ADR-0026`'s unit, as `SERVER-001`'s next minor /
   FR, per `docs/design/SERVER-SESSION-READ-YOUR-WRITES-DESIGN.md`.
   (PR #153.)
-- 2026-09-03: implemented as `SERVER-001` v0.18.0 (FR-028) in this PR
+- 2026-09-03: implemented as `SERVER-001` v0.18.0 (FR-028) in PR #157
   — `Request::BeginWith { flags }` at index 14 and protocol version 5,
   `SESSION_READ_YOUR_WRITES`, the `GetById` overlay (`overlay_staged`, a
   pure function), `begin_read_your_writes` / `Session::get` /
