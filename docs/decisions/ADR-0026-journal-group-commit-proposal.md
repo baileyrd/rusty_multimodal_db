@@ -190,4 +190,4 @@ Proposed: option 1. Concretely, at implementation:
   larger groups at the lone connection's expense; **(c)** close as not
   warranted — the `fsync` stays inside the exclusive section,
   `ADR-0025`'s trigger stays armed for a real workload. Proposed in
-  this PR.
+  PR #145.
