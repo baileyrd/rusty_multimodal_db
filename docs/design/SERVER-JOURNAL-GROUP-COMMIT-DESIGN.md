@@ -537,7 +537,7 @@ already have `self.store.get::<T>()` for their reads.
 - 2026-09-03: Accepted as proposed ("a, a, a, a" across `ADR-0026`–
   `ADR-0029`). No content change. Implementation next, as `SERVER-001`'s
   next minor / FR. (PR #153.)
-- 2026-09-03: Implemented as `SERVER-001` v0.17.0 / FR-027 (this PR),
+- 2026-09-03: Implemented as `SERVER-001` v0.17.0 / FR-027 (PR #155),
   per the verification plan: acceptance criteria 1–8 hold as written,
   no deviation. The test hook sits after a leader takes the lead and
   before it reads how far to sync, so criterion 2's "three batches, one
