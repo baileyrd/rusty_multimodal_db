@@ -12,7 +12,11 @@
 //! (`SERVER_AUTH_READ_ONLY_TOKEN`/`SERVER_AUTH_READ_WRITE_TOKEN`,
 //! `SERVER_TLS_CERT_CHAIN_PATH`/`SERVER_TLS_PRIVATE_KEY_PATH`, and —
 //! for mutual TLS, ADR-0023 — an optional `SERVER_TLS_CLIENT_CA_PATH`
-//! naming the CA roots every client certificate must chain to; and
+//! naming the CA roots every client certificate must chain to; and, since
+//! ADR-0028, `SERVER_AUTH_READ_ONLY_CLIENT_CERTS`/
+//! `SERVER_AUTH_READ_WRITE_CLIENT_CERTS` (`:`-separated PEM files)
+//! classing a presented certificate by exact match — refused at startup
+//! without `SERVER_TLS_CLIENT_CA_PATH` (`CLS-FR-005`); and
 //! `SERVER_TXN_JOURNAL_PATH`, ADR-0025, making every transaction batch
 //! crash-atomic at one `fsync` per batch, shared across concurrent batches
 //! by ADR-0026's group commit) — with none of them set, this
@@ -25,7 +29,7 @@
 use rusty_multimodal_db::record::DogRecord;
 use rusty_multimodal_db::server::audit::{AuditSink, FileAudit, StderrAudit};
 use rusty_multimodal_db::server::dog::DogConnectionStore;
-use rusty_multimodal_db::server::{serve, AuthConfig, TlsConfig};
+use rusty_multimodal_db::server::{serve, AuthConfig, TlsConfig, TokenClass};
 use rusty_multimodal_db::ProductionStore;
 use std::net::TcpListener;
 use std::path::Path;
@@ -75,6 +79,19 @@ fn main() {
         Ok(None) => AuthConfig::from_env(),
         Err(e) => panic!("SERVER_AUDIT_LOG configured but invalid: {e}"),
     };
+    // `SERVER_AUTH_READ_ONLY_CLIENT_CERTS`/`SERVER_AUTH_READ_WRITE_CLIENT_CERTS`
+    // (ADR-0028, `CLS-FR-005`): certificate-classed connections.
+    let auth = certificate_classes_from_env_values(
+        auth,
+        std::env::var("SERVER_AUTH_READ_ONLY_CLIENT_CERTS")
+            .ok()
+            .as_deref(),
+        std::env::var("SERVER_AUTH_READ_WRITE_CLIENT_CERTS")
+            .ok()
+            .as_deref(),
+        std::env::var("SERVER_TLS_CLIENT_CA_PATH").ok().as_deref(),
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
     let audited = std::env::var_os("SERVER_AUDIT_LOG").is_some();
     let tls = match TlsConfig::from_env() {
         None => None,
@@ -110,9 +127,112 @@ fn audit_sink_from(value: Option<&str>) -> std::io::Result<Option<Arc<dyn AuditS
     }
 }
 
+/// `SERVER_AUTH_READ_ONLY_CLIENT_CERTS`/`SERVER_AUTH_READ_WRITE_CLIENT_CERTS`'s
+/// decision table (`CLS-FR-005`, ADR-0028), factored so a test can drive
+/// it without touching the process environment: either variable, each a
+/// `:`-separated list of PEM files, is applied to `auth` via
+/// `AuthConfig::with_certificate_class_pem_file`; an unreadable or
+/// non-PEM file names the variable in its error. Either variable set
+/// while `client_ca_path` is not is refused outright — a class map on a
+/// server that never asks for a certificate is inert, and inert security
+/// configuration is a mistake to refuse, not honor.
+fn certificate_classes_from_env_values(
+    mut auth: AuthConfig,
+    read_only_certs: Option<&str>,
+    read_write_certs: Option<&str>,
+    client_ca_path: Option<&str>,
+) -> Result<AuthConfig, String> {
+    if (read_only_certs.is_some() || read_write_certs.is_some()) && client_ca_path.is_none() {
+        return Err(
+            "SERVER_AUTH_READ_ONLY_CLIENT_CERTS/SERVER_AUTH_READ_WRITE_CLIENT_CERTS is set but \
+             SERVER_TLS_CLIENT_CA_PATH is not — a certificate class map is inert without a \
+             client-certificate-requiring TLS config"
+                .to_string(),
+        );
+    }
+    for (variable, paths, class) in [
+        (
+            "SERVER_AUTH_READ_ONLY_CLIENT_CERTS",
+            read_only_certs,
+            TokenClass::ReadOnly,
+        ),
+        (
+            "SERVER_AUTH_READ_WRITE_CLIENT_CERTS",
+            read_write_certs,
+            TokenClass::ReadWrite,
+        ),
+    ] {
+        if let Some(paths) = paths {
+            for path in paths.split(':') {
+                auth = auth
+                    .with_certificate_class_pem_file(path, class)
+                    .map_err(|e| format!("{variable} configured but invalid: {e}"))?;
+            }
+        }
+    }
+    Ok(auth)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `CLS-FR-005`: the startup decision table for the certificate-class
+    /// environment variables, driven directly rather than through the
+    /// process environment.
+    #[test]
+    fn certificate_classes_from_env_values_follows_the_documented_table() {
+        // Nothing set: a no-op, `auth` stays whatever it was.
+        let auth =
+            certificate_classes_from_env_values(AuthConfig::default(), None, None, None).unwrap();
+        assert!(!auth.is_configured());
+
+        // Either variable set without the client CA path is refused.
+        assert!(certificate_classes_from_env_values(
+            AuthConfig::default(),
+            Some("some/path.pem"),
+            None,
+            None
+        )
+        .is_err());
+        assert!(certificate_classes_from_env_values(
+            AuthConfig::default(),
+            None,
+            Some("some/path.pem"),
+            None
+        )
+        .is_err());
+
+        // A valid PEM file classes its certificate and configures `auth`.
+        let rcgen::CertifiedKey { cert, .. } =
+            rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
+        let dir = std::env::temp_dir().join(format!(
+            "dog_server_certificate_classes_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("leaf.pem");
+        std::fs::write(&path, cert.pem()).unwrap();
+        let auth = certificate_classes_from_env_values(
+            AuthConfig::default(),
+            Some(path.to_str().unwrap()),
+            None,
+            Some("dummy-ca-path"),
+        )
+        .unwrap();
+        assert!(auth.is_configured());
+
+        // An unreadable file names the variable in its error.
+        let missing = dir.join("missing.pem");
+        let err = certificate_classes_from_env_values(
+            AuthConfig::default(),
+            Some(missing.to_str().unwrap()),
+            None,
+            Some("dummy-ca-path"),
+        )
+        .unwrap_err();
+        assert!(err.contains("SERVER_AUTH_READ_ONLY_CLIENT_CERTS"));
+    }
 
     #[test]
     fn audit_sink_from_follows_the_documented_table() {

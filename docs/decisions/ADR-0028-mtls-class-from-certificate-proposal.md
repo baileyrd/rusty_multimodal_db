@@ -179,3 +179,15 @@ Proposed: option 1. Concretely, at implementation:
   attach was refused by the session's permission policy); the crate-side
   unit is queued behind `ADR-0026`, `ADR-0027`, and `ADR-0029` and
   starts when the owner lands or authorizes the upstream change. (PR #153.)
+- 2026-09-03: `CLS-FR-001` satisfied — a separately-spawned session opened
+  `Rusty-Mill/rusty_mill` PR #148 with the accessor exactly as designed;
+  the owner merged it directly. Implemented in this crate as
+  `SERVER-001` v0.21.0 (FR-031) per `docs/design/SERVER-MTLS-CLASS-DESIGN.md`:
+  `Cargo.toml`'s `rusty_tls` rev moved to the merge commit (no new
+  dependency); `AuthConfig`'s exact-DER certificate-class map;
+  `handle_connection`'s already-eager handshake (from `ADR-0029`) now
+  reads `peer_certificate_der()` and seeds the connection's starting
+  class from it, a later valid `Authenticate` still replacing it;
+  `SERVER_AUTH_READ_ONLY_CLIENT_CERTS`/`SERVER_AUTH_READ_WRITE_CLIENT_CERTS`
+  in `dog_server`, refused without `SERVER_TLS_CLIENT_CA_PATH`. Every
+  acceptance criterion 1–7 holds; no deviation. (This PR.)

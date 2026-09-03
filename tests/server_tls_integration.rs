@@ -31,7 +31,7 @@ use rusty_multimodal_db::server::framing::{read_message, write_message};
 use rusty_multimodal_db::server::protocol::{
     ErrorCode, Request, Response, ScanValue, PROTOCOL_VERSION,
 };
-use rusty_multimodal_db::server::{serve, AuthConfig, TlsConfig};
+use rusty_multimodal_db::server::{serve, AuthConfig, TlsConfig, TokenClass};
 use rusty_multimodal_db::ProductionStore;
 use rusty_tls::{TlsStream, TrustPolicy};
 use std::io::{Read, Write};
@@ -682,4 +682,180 @@ fn handshake_outcomes_are_audited_with_a_reason() {
         "no mutual-TLS admission recorded: {:?}",
         sink.0.lock().unwrap()
     );
+}
+
+// ---------------------------------------------------------------------------
+// Class from certificate (`SERVER-001` next minor / `CLS-FR-003`–`008`,
+// ADR-0028, `docs/design/SERVER-MTLS-CLASS-DESIGN.md`)
+// ---------------------------------------------------------------------------
+
+/// Acceptance criterion 3: a leaf configured `ReadOnly` reads and is
+/// refused writes with `Unauthorized` without any `Authenticate`; one
+/// configured `ReadWrite` writes.
+#[test]
+fn a_classed_leaf_starts_at_its_class_with_no_authenticate() {
+    let (ca, ca_key) = throwaway_ca();
+    let (chain, key) = client_identity(&ca, &ca_key);
+    let leaf_der = chain[0].clone();
+
+    let read_only_auth =
+        AuthConfig::default().with_certificate_class(leaf_der.clone(), TokenClass::ReadOnly);
+    let addr = start_server(read_only_auth, Some(mtls_server_config(&ca)));
+    let mut client = SchemaDrivenClient::connect_with(
+        addr,
+        ConnectOptions::new().tls(identity_client(chain.clone(), key.clone())),
+    )
+    .unwrap();
+    assert_eq!(client.scan("age").unwrap(), vec![ScanValue::U32(3)]);
+    match client.update(Uuid::from_u128(1), "age", ScanValue::U32(9)) {
+        Err(ClientError::Server(ErrorCode::Unauthorized, _)) => {}
+        other => panic!("a ReadOnly-classed leaf must not write, got {other:?}"),
+    }
+
+    let read_write_auth =
+        AuthConfig::default().with_certificate_class(leaf_der, TokenClass::ReadWrite);
+    let addr = start_server(read_write_auth, Some(mtls_server_config(&ca)));
+    let mut client = SchemaDrivenClient::connect_with(
+        addr,
+        ConnectOptions::new().tls(identity_client(chain, key)),
+    )
+    .unwrap();
+    assert!(client
+        .update(Uuid::from_u128(1), "age", ScanValue::U32(9))
+        .unwrap());
+}
+
+/// Acceptance criterion 4: a `ReadOnly`-classed connection that
+/// `Authenticate`s with the `ReadWrite` token writes afterwards; with a
+/// wrong token it is `Unauthenticated` and still reads at its
+/// certificate class, unchanged.
+#[test]
+fn a_valid_token_replaces_the_certificate_class_an_invalid_one_does_not() {
+    let (ca, ca_key) = throwaway_ca();
+    let (chain, key) = client_identity(&ca, &ca_key);
+    let leaf_der = chain[0].clone();
+    let auth = AuthConfig::new(Some("read-token".into()), Some("write-token".into()))
+        .with_certificate_class(leaf_der, TokenClass::ReadOnly);
+    let addr = start_server(auth, Some(mtls_server_config(&ca)));
+    let identity = || identity_client(chain.clone(), key.clone());
+
+    let mut client =
+        SchemaDrivenClient::connect_with(addr, ConnectOptions::new().tls(identity())).unwrap();
+    assert_eq!(client.scan("age").unwrap(), vec![ScanValue::U32(3)]);
+    client.authenticate("write-token").unwrap();
+    assert!(client
+        .update(Uuid::from_u128(1), "age", ScanValue::U32(9))
+        .unwrap());
+
+    // A fresh server/store: the first scenario's write must not leak into
+    // this one's read assertion below.
+    let auth = AuthConfig::new(Some("read-token".into()), Some("write-token".into()))
+        .with_certificate_class(chain[0].clone(), TokenClass::ReadOnly);
+    let addr = start_server(auth, Some(mtls_server_config(&ca)));
+    let mut client =
+        SchemaDrivenClient::connect_with(addr, ConnectOptions::new().tls(identity())).unwrap();
+    match client.authenticate("wrong-token") {
+        Err(ClientError::Server(ErrorCode::Unauthenticated, _)) => {}
+        other => panic!("a wrong token must be Unauthenticated, got {other:?}"),
+    }
+    // Still classed ReadOnly — the failed Authenticate left it as it was.
+    assert_eq!(client.scan("age").unwrap(), vec![ScanValue::U32(3)]);
+    match client.update(Uuid::from_u128(1), "age", ScanValue::U32(9)) {
+        Err(ClientError::Server(ErrorCode::Unauthorized, _)) => {}
+        other => {
+            panic!("a failed Authenticate must not clear the certificate class, got {other:?}")
+        }
+    }
+}
+
+/// Acceptance criterion 5: a certificates-only server (classes, no
+/// tokens) serves a classed leaf at its class, and any admitted leaf not
+/// in the map — even from a certificate-holding, CA-trusted client — is
+/// `Unauthenticated` on every request, including the schema fetch
+/// `connect_with` makes.
+#[test]
+fn certificates_only_server_leaves_an_unclassed_admitted_leaf_unauthenticated() {
+    let (ca, ca_key) = throwaway_ca();
+    let (classed_chain, classed_key) = client_identity(&ca, &ca_key);
+    let (unclassed_chain, unclassed_key) = client_identity(&ca, &ca_key);
+    let auth = AuthConfig::default()
+        .with_certificate_class(classed_chain[0].clone(), TokenClass::ReadOnly);
+    let addr = start_server(auth, Some(mtls_server_config(&ca)));
+
+    let mut classed = SchemaDrivenClient::connect_with(
+        addr,
+        ConnectOptions::new().tls(identity_client(classed_chain, classed_key)),
+    )
+    .unwrap();
+    assert_eq!(classed.scan("age").unwrap(), vec![ScanValue::U32(3)]);
+
+    match SchemaDrivenClient::connect_with(
+        addr,
+        ConnectOptions::new().tls(identity_client(unclassed_chain, unclassed_key)),
+    )
+    .map(|_| ())
+    {
+        Err(ClientError::Server(ErrorCode::Unauthenticated, _)) => {}
+        other => panic!(
+            "an admitted leaf outside the map on a certificates-only server must be Unauthenticated, got {other:?}"
+        ),
+    }
+}
+
+/// Acceptance criterion 6, the PEM path: a two-block file classes both
+/// leaves identically; `Io`/`Pem` errors surface, naming the same
+/// `TlsConfigError` shapes `TlsConfig`'s own PEM constructors use.
+#[test]
+fn with_certificate_class_pem_file_classes_every_block_and_surfaces_errors() {
+    use rusty_multimodal_db::server::TlsConfigError;
+    let dir = unique_dir("server_tls_integration_class_pem");
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let (ca, ca_key) = throwaway_ca();
+    let signed_client_identity = |ca: &rcgen::Certificate, ca_key: &rcgen::KeyPair| {
+        let key = rcgen::KeyPair::generate().unwrap();
+        let mut params = rcgen::CertificateParams::new(vec!["client".to_string()]).unwrap();
+        params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ClientAuth];
+        let cert = params.signed_by(&key, ca, ca_key).unwrap();
+        let identity = (vec![cert.der().to_vec()], key.serialize_der());
+        (cert, identity)
+    };
+    let (cert_a, (chain_a, key_a)) = signed_client_identity(&ca, &ca_key);
+    let (cert_b, (chain_b, key_b)) = signed_client_identity(&ca, &ca_key);
+    let leaves_pem_path = dir.join("leaves.pem");
+    std::fs::write(
+        &leaves_pem_path,
+        format!("{}{}", cert_a.pem(), cert_b.pem()),
+    )
+    .unwrap();
+
+    let auth = AuthConfig::default()
+        .with_certificate_class_pem_file(&leaves_pem_path, TokenClass::ReadOnly)
+        .unwrap();
+    let addr = start_server(auth, Some(mtls_server_config(&ca)));
+    for (chain, key) in [(chain_a, key_a), (chain_b, key_b)] {
+        let mut client = SchemaDrivenClient::connect_with(
+            addr,
+            ConnectOptions::new().tls(identity_client(chain, key)),
+        )
+        .unwrap();
+        assert_eq!(client.scan("age").unwrap(), vec![ScanValue::U32(3)]);
+    }
+
+    match AuthConfig::default()
+        .with_certificate_class_pem_file(dir.join("missing.pem"), TokenClass::ReadOnly)
+        .map(|_| ())
+    {
+        Err(TlsConfigError::Io(_)) => {}
+        other => panic!("expected Io for a missing file, got {other:?}"),
+    }
+    let not_pem_path = dir.join("not-pem.txt");
+    std::fs::write(&not_pem_path, b"not a certificate").unwrap();
+    match AuthConfig::default()
+        .with_certificate_class_pem_file(&not_pem_path, TokenClass::ReadOnly)
+        .map(|_| ())
+    {
+        Err(TlsConfigError::Pem(_)) => {}
+        other => panic!("expected Pem for non-PEM content, got {other:?}"),
+    }
 }

@@ -440,7 +440,9 @@ error it already handles. Its module doc gains the third variable.
   (Accepted): the accessor is `TlsServerStream::peer_certificate_der`
   (patch verbatim there, verified locally), and this crate reads no
   subject or SAN at all — it pins the leaf's exact DER bytes to a class
-  on `AuthConfig`.*
+  on `AuthConfig`. Implemented as `SERVER-001` v0.21.0 / FR-031 (This
+  PR.), once the accessor landed upstream as `Rusty-Mill/rusty_mill`
+  PR #148.*
 - **Revocation** without a restart (a CRL on the server's client
   verifier). `rustls` supports it; `rusty_tls` exposes it only
   client-side today. An upstream question first.

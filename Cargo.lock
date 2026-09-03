@@ -1417,16 +1417,16 @@ checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
 
 [[package]]
 name = "platform"
-version = "0.22.1"
-source = "git+https://github.com/baileyrd/rustils?rev=93b00ce964284d93ea6cec2581b3543f08df8f2d#93b00ce964284d93ea6cec2581b3543f08df8f2d"
+version = "0.27.0"
+source = "git+https://github.com/Rusty-Mill/rusty_mill?rev=cf284712988f09ee444dddfa5086e7019f4f786c#cf284712988f09ee444dddfa5086e7019f4f786c"
 dependencies = [
  "thiserror",
 ]
 
 [[package]]
 name = "platform-bsd"
-version = "0.22.1"
-source = "git+https://github.com/baileyrd/rustils?rev=93b00ce964284d93ea6cec2581b3543f08df8f2d#93b00ce964284d93ea6cec2581b3543f08df8f2d"
+version = "0.27.0"
+source = "git+https://github.com/Rusty-Mill/rusty_mill?rev=cf284712988f09ee444dddfa5086e7019f4f786c#cf284712988f09ee444dddfa5086e7019f4f786c"
 dependencies = [
  "libc 0.2.189",
  "platform",
@@ -1434,8 +1434,8 @@ dependencies = [
 
 [[package]]
 name = "platform-linux"
-version = "0.22.1"
-source = "git+https://github.com/baileyrd/rustils?rev=93b00ce964284d93ea6cec2581b3543f08df8f2d#93b00ce964284d93ea6cec2581b3543f08df8f2d"
+version = "0.27.0"
+source = "git+https://github.com/Rusty-Mill/rusty_mill?rev=cf284712988f09ee444dddfa5086e7019f4f786c#cf284712988f09ee444dddfa5086e7019f4f786c"
 dependencies = [
  "libc 0.2.189",
  "platform",
@@ -1443,8 +1443,8 @@ dependencies = [
 
 [[package]]
 name = "platform-windows"
-version = "0.22.1"
-source = "git+https://github.com/baileyrd/rustils?rev=93b00ce964284d93ea6cec2581b3543f08df8f2d#93b00ce964284d93ea6cec2581b3543f08df8f2d"
+version = "0.27.0"
+source = "git+https://github.com/Rusty-Mill/rusty_mill?rev=cf284712988f09ee444dddfa5086e7019f4f786c#cf284712988f09ee444dddfa5086e7019f4f786c"
 dependencies = [
  "platform",
  "winargv",
@@ -1871,7 +1871,7 @@ dependencies = [
 [[package]]
 name = "rusty_tls"
 version = "0.10.1"
-source = "git+https://github.com/Rusty-Mill/rusty_mill?rev=9fd2e27c9cfd5d1b21a5e58b55e368258a0a2779#9fd2e27c9cfd5d1b21a5e58b55e368258a0a2779"
+source = "git+https://github.com/Rusty-Mill/rusty_mill?rev=cf284712988f09ee444dddfa5086e7019f4f786c#cf284712988f09ee444dddfa5086e7019f4f786c"
 dependencies = [
  "platform",
  "platform-bsd",
@@ -2477,7 +2477,7 @@ checksum = "712e227841d057c1ee1cd2fb22fa7e5a5461ae8e48fa2ca79ec42cfc1931183f"
 [[package]]
 name = "winargv"
 version = "0.1.0"
-source = "git+https://github.com/baileyrd/rustils?rev=93b00ce964284d93ea6cec2581b3543f08df8f2d#93b00ce964284d93ea6cec2581b3543f08df8f2d"
+source = "git+https://github.com/Rusty-Mill/rusty_mill?rev=cf284712988f09ee444dddfa5086e7019f4f786c#cf284712988f09ee444dddfa5086e7019f4f786c"
 dependencies = [
  "platform",
 ]

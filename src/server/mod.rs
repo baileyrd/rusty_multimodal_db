@@ -341,13 +341,27 @@ pub struct AuthConfig {
     /// `AUD-FR-003` (ADR-0029): where admission, authentication, and
     /// authorization decisions are recorded; `None` is [`audit::NoAudit`].
     audit: Option<Arc<dyn audit::AuditSink>>,
+    /// `CLS-FR-003` (ADR-0028): a presented leaf certificate's exact DER
+    /// bytes mapped to the class it grants. Matched by `==` on byte
+    /// slices — no parsing, no constant-time requirement (certificates
+    /// are public material).
+    certificate_classes: Vec<(Vec<u8>, TokenClass)>,
 }
 
 impl std::fmt::Debug for AuthConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let read_only_certs = self
+            .certificate_classes
+            .iter()
+            .filter(|(_, class)| *class == TokenClass::ReadOnly)
+            .count();
+        let read_write_certs = self.certificate_classes.len() - read_only_certs;
         f.debug_struct("AuthConfig")
             .field("read_only_token", &self.read_only_token)
             .field("read_write_token", &self.read_write_token)
+            // `CLS-FR-006`: counts only, never a configured leaf's bytes.
+            .field("read_only_certificates", &read_only_certs)
+            .field("read_write_certificates", &read_write_certs)
             .field(
                 "audit",
                 &if self.audit.is_some() {
@@ -372,7 +386,47 @@ impl AuthConfig {
             read_only_token,
             read_write_token,
             audit: None,
+            certificate_classes: Vec::new(),
         }
+    }
+
+    /// `CLS-FR-003` (ADR-0028): a client presenting a certificate whose
+    /// leaf's DER bytes exactly equal `leaf_der` starts the connection at
+    /// `class`, with no `Authenticate` needed (`CLS-FR-004`) — see
+    /// `handle_connection`'s TLS arm. Repeatable; builds the map one
+    /// certificate at a time. Only takes effect on a `TlsConfig` built
+    /// with client auth (`SERVER_TLS_CLIENT_CA_PATH`) — `AuthConfig`
+    /// cannot see `TlsConfig`, so it does not refuse this on its own; see
+    /// `dog_server`'s startup check (`CLS-FR-005`).
+    pub fn with_certificate_class(mut self, leaf_der: Vec<u8>, class: TokenClass) -> Self {
+        self.certificate_classes.push((leaf_der, class));
+        self
+    }
+
+    /// [`AuthConfig::with_certificate_class`] for every `CERTIFICATE`
+    /// block in a PEM file — a leaf per class-holding certificate,
+    /// classed identically (`CLS-FR-003`).
+    pub fn with_certificate_class_pem_file(
+        mut self,
+        path: impl AsRef<Path>,
+        class: TokenClass,
+    ) -> Result<Self, TlsConfigError> {
+        let pem_text = std::fs::read_to_string(path).map_err(TlsConfigError::Io)?;
+        let leaves = pem::decode_blocks(&pem_text).map_err(TlsConfigError::Pem)?;
+        for leaf_der in leaves {
+            self.certificate_classes.push((leaf_der, class));
+        }
+        Ok(self)
+    }
+
+    /// `CLS-FR-003`: the class a presented leaf's DER bytes match, by
+    /// exact byte equality against every configured certificate — `None`
+    /// if `leaf_der` matches none of them.
+    pub(crate) fn class_for_certificate(&self, leaf_der: &[u8]) -> Option<TokenClass> {
+        self.certificate_classes
+            .iter()
+            .find(|(configured, _)| configured.as_slice() == leaf_der)
+            .map(|(_, class)| *class)
     }
 
     /// `AUD-FR-003` (ADR-0029): record every admission, authentication,
@@ -404,14 +458,21 @@ impl AuthConfig {
             read_only_token: std::env::var("SERVER_AUTH_READ_ONLY_TOKEN").ok(),
             read_write_token: std::env::var("SERVER_AUTH_READ_WRITE_TOKEN").ok(),
             audit: None,
+            certificate_classes: Vec::new(),
         }
     }
 
-    /// No tokens configured at all — `AUTH-FR-007`: every connection
-    /// behaves exactly as it did before this feature existed, and
-    /// `Authenticate` becomes a no-op success.
+    /// No tokens *and* no certificate classes configured — `AUTH-FR-007`:
+    /// every connection behaves exactly as it did before this feature
+    /// existed, and `Authenticate` becomes a no-op success. Since
+    /// `CLS-FR-003` (ADR-0028) a certificates-only deployment (classes,
+    /// no tokens) is also "configured": an admitted certificate not in
+    /// the map starts unauthenticated rather than falling back to
+    /// `ReadWrite` — the safe direction, see `SERVER-MTLS-CLASS-DESIGN.md`.
     pub fn is_configured(&self) -> bool {
-        self.read_only_token.is_some() || self.read_write_token.is_some()
+        self.read_only_token.is_some()
+            || self.read_write_token.is_some()
+            || !self.certificate_classes.is_empty()
     }
 
     /// Check `token` against every configured token in constant time
@@ -918,6 +979,10 @@ fn handle_connection<S: ConnectionStore + ?Sized>(
         Some(tls) if tls.requires_client_certificate() => audit::Transport::MutualTls,
         Some(_) => audit::Transport::Tls,
     };
+    // `CLS-FR-004`: the class a presented, configured certificate grants,
+    // if the TLS arm below finds one — `None` on a plain connection or an
+    // admitted leaf that matches no configured class.
+    let mut certificate_class: Option<TokenClass> = None;
     let (mut reader, mut writer): (BufReader<ReadHalf>, BufWriter<WriteHalf>) = match tls {
         None => {
             let peer_stream = match stream.try_clone() {
@@ -947,6 +1012,12 @@ fn handle_connection<S: ConnectionStore + ?Sized>(
                 ));
                 return;
             }
+            // `CLS-FR-003`/`CLS-FR-004`: the class a presented leaf grants,
+            // if its exact DER bytes are configured — `None` on a plain
+            // acceptor (no client auth) or a leaf not in the map.
+            certificate_class = tls_stream
+                .peer_certificate_der()
+                .and_then(|der| auth.class_for_certificate(der));
             let shared = Rc::new(RefCell::new(tls_stream));
             (
                 BufReader::new(ReadHalf::Tls(Rc::clone(&shared))),
@@ -955,10 +1026,15 @@ fn handle_connection<S: ConnectionStore + ?Sized>(
         }
     };
 
-    let mut authenticated: Option<TokenClass> = if auth.is_configured() {
-        None
-    } else {
-        Some(TokenClass::ReadWrite)
+    // `CLS-FR-004`: a certificate-classed connection starts at that class
+    // with no `Authenticate` needed; a later `Authenticate` with a valid
+    // token still replaces it (unchanged below). Otherwise exactly
+    // today's rule: unauthenticated if anything is configured, `ReadWrite`
+    // if nothing is.
+    let mut authenticated: Option<TokenClass> = match (certificate_class, auth.is_configured()) {
+        (Some(class), _) => Some(class),
+        (None, false) => Some(TokenClass::ReadWrite),
+        (None, true) => None,
     };
     // `AUD-FR-004`: admitted — and exactly one `Disconnected` when this
     // function returns by any path.
@@ -1900,6 +1976,52 @@ mod tests {
             Some(TokenClass::ReadWrite)
         );
         assert_eq!(read_write_only.check("ro-secret"), None);
+    }
+
+    /// `CLS-FR-003`: exact byte equality, and only exact byte equality —
+    /// a prefix/superstring must not match, matching `check`'s own
+    /// substring-safety test above.
+    #[test]
+    fn class_for_certificate_matches_by_exact_der_bytes_only() {
+        let auth = AuthConfig::default()
+            .with_certificate_class(vec![1, 2, 3], TokenClass::ReadOnly)
+            .with_certificate_class(vec![4, 5, 6], TokenClass::ReadWrite);
+        assert_eq!(
+            auth.class_for_certificate(&[1, 2, 3]),
+            Some(TokenClass::ReadOnly)
+        );
+        assert_eq!(
+            auth.class_for_certificate(&[4, 5, 6]),
+            Some(TokenClass::ReadWrite)
+        );
+        assert_eq!(auth.class_for_certificate(&[1, 2, 3, 4]), None);
+        assert_eq!(auth.class_for_certificate(&[1, 2]), None);
+        assert_eq!(auth.class_for_certificate(&[9, 9, 9]), None);
+    }
+
+    /// `CLS-FR-003`: a certificates-only `AuthConfig` (no tokens) is
+    /// `is_configured()` — the safe direction `AUTH-FR-007` requires of a
+    /// configured server (`SERVER-MTLS-CLASS-DESIGN.md`'s "Security,
+    /// privacy, and compatibility").
+    #[test]
+    fn is_configured_is_true_with_only_a_certificate_class() {
+        let auth = AuthConfig::default().with_certificate_class(vec![1], TokenClass::ReadOnly);
+        assert!(auth.is_configured());
+    }
+
+    /// `CLS-FR-006`: `Debug` prints counts per class, never a configured
+    /// leaf's bytes.
+    #[test]
+    fn auth_config_debug_prints_certificate_counts_not_bytes() {
+        let auth = AuthConfig::default()
+            .with_certificate_class(vec![0xAB, 0xCD], TokenClass::ReadOnly)
+            .with_certificate_class(vec![0xEF], TokenClass::ReadWrite)
+            .with_certificate_class(vec![0x12], TokenClass::ReadWrite);
+        let printed = format!("{auth:?}");
+        assert!(printed.contains("read_only_certificates: 1"));
+        assert!(printed.contains("read_write_certificates: 2"));
+        assert!(!printed.contains("171")); // 0xAB as decimal — no raw byte ever printed
+        assert!(!printed.contains("[171, 205]"));
     }
 
     /// `AUTH-FR-006`'s empirical half: a wrong token that differs from the
