@@ -1,6 +1,11 @@
-# Server Entity Domain Design (Proposed)
+# Server Entity Domain Design (Accepted)
 
-- Status: **Proposed**
+- Status: **Accepted** (promoted from Proposed on 2026-09-04 — the
+  owner approved the design as proposed, `ADR-0037` option (a); (b)
+  also fixing `Symmetric`'s forwarding gap this round and (c) closing
+  as not warranted both declined; no changes requested). Acceptance
+  authorizes the design; implementation follows as its own unit — see
+  `ADR-0037`'s "Acceptance and implementation" section.
 - Date: 2026-09-04
 - Related: `ADR-0036`/`docs/design/SERVER-REMINDER-DOMAIN-DESIGN.md`
   (the `Reminder` domain — the immediately preceding round in this same

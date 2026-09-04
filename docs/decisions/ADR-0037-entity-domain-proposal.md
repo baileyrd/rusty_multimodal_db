@@ -1,6 +1,12 @@
 # ADR-0037: `Entity` domain and bounded client-side graph traversal
 
-- Status: **Proposed**
+- Status: **Accepted** (promoted from Proposed on 2026-09-04 — the
+  owner approved the design as proposed, option (a): `Entity` with one
+  self-referential `SymmetricRelation`, client-side `traverse`, the
+  `Symmetric`-forwarding gap named but not fixed; (b) also fixing the
+  gap this round and (c) closing as not warranted both declined; no
+  changes requested). Acceptance authorizes the design; implementation
+  follows as its own unit — see "Acceptance and implementation" below.
 - Date: 2026-09-04
 - Deciders: baileyrd
 - Related: `docs/design/SERVER-ENTITY-DOMAIN-DESIGN.md` (the full
@@ -108,3 +114,6 @@ slice; revisit only if a concrete need resurfaces.
   gap named but not fixed; (b) accept and also fix `Symmetric`'s
   forwarding gap this round, delivering multiple relation types now;
   (c) close as not warranted. Proposed in this PR.
+- 2026-09-04: accepted as proposed (option (a); (b) and (c) declined).
+  Implementation follows as `SERVER-001`'s next minor / FR, per
+  `docs/design/SERVER-ENTITY-DOMAIN-DESIGN.md`. (PR #183.)
