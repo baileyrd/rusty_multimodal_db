@@ -256,6 +256,18 @@ impl ConnectionStore for OrderConnectionStore {
         Err(ErrorCode::Unsupported)
     }
 
+    fn neighbors_by_relation(
+        &self,
+        _id: RecordId,
+        _relation: &str,
+    ) -> Result<Vec<RecordId>, ErrorCode> {
+        Err(ErrorCode::Unsupported)
+    }
+
+    fn list_relation_kinds(&self) -> Vec<String> {
+        Vec::new()
+    }
+
     /// `STV-FR-002`: `validate_batch` on this one operation, with the
     /// same per-call existence read the journaled path uses.
     fn validate_op(&self, op: &TransactionOp) -> Result<(), ErrorCode> {

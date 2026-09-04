@@ -610,6 +610,216 @@ where
     }
 }
 
+/// More than one named `SymmetricRelation` over the same record type `R`
+/// — `ENT2-FR-002`/`003` (ADR-0039). See [`super::query::MultiNeighbors`]'s
+/// own doc comment for why this is a genuinely new primitive, not a
+/// `Symmetric`-forwarding fix: the generic-forwarding-impl shape
+/// `Reversed`'s own `Neighbors` fix (`FR-012`) used was tried first and
+/// confirmed, directly with `rustc`, to conflict (`E0119`) with
+/// `Symmetric`'s own existing direct `Neighbors` impl — a conflict
+/// `Reversed` never has, since its own relation is `ChildOf`, a
+/// different trait. `MultiSymmetric` sidesteps this by keying relations
+/// at runtime (a `String` label) rather than at the type level (a
+/// `Marker`), matching `Request::NeighborsByRelation`'s own wire shape
+/// exactly. Each relation's edge list is independently durable
+/// (`STORAGE-016`'s own `EdgeBlob` mechanism, reused directly — one blob
+/// per label, at `<path>.<label>.edges`), the same real portability
+/// `Symmetric` already has, generalized to more than one label.
+pub struct MultiSymmetric<S, R: Record> {
+    inner: S,
+    adjacency: HashMap<String, HashMap<R::Id, Vec<R::Id>>>,
+}
+
+/// A named list of relations, each a label paired with its own edge
+/// list — the shape [`MultiSymmetric::new`]/[`MultiSymmetric::create`]/
+/// [`MultiSymmetric::open`] all take. Factored out purely to keep those
+/// signatures under clippy's `type_complexity` threshold; carries no
+/// behavior of its own.
+type LabeledRelations<R> = [(String, Vec<(<R as Record>::Id, <R as Record>::Id)>)];
+
+/// The suffix pattern `<path>.<label>.edges` uses — parallels
+/// [`super::edge_blob::edges_path`]'s own single-relation `<path>.edges`
+/// convention, generalized to more than one label sharing a base path.
+fn labeled_edges_path(base: &Path, label: &str) -> std::path::PathBuf {
+    let mut name = base.as_os_str().to_owned();
+    name.push(".");
+    name.push(label);
+    name.push(".edges");
+    std::path::PathBuf::from(name)
+}
+
+impl<S, R: Record> MultiSymmetric<S, R> {
+    /// Build the adjacency maps directly from `relations` — the
+    /// `Symmetric::new` analogue, generalized to a labeled list instead
+    /// of one slice. Writes nothing; see [`Self::create`]/[`Self::open`]
+    /// for the durable constructors.
+    pub fn new(inner: S, relations: &LabeledRelations<R>) -> Self {
+        let mut adjacency: HashMap<String, HashMap<R::Id, Vec<R::Id>>> = HashMap::new();
+        for (label, edges) in relations {
+            let mut map: HashMap<R::Id, Vec<R::Id>> = HashMap::new();
+            for &(a, b) in edges {
+                map.entry(a).or_default().push(b);
+                map.entry(b).or_default().push(a);
+            }
+            adjacency.insert(label.clone(), map);
+        }
+        Self { inner, adjacency }
+    }
+}
+
+impl<S, R> MultiSymmetric<S, R>
+where
+    R: Record + SchemaTag,
+    R::Id: Serialize + DeserializeOwned,
+{
+    /// Write every relation's edge blob to `<path>.<label>.edges`, then
+    /// [`Self::new`] — the `Symmetric::create` analogue. Always writes,
+    /// the constructor for a fresh stack.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DurabilityError::Serde`] if an edge list can't be
+    /// serialized, [`DurabilityError::Io`] if a blob can't be written.
+    pub fn create(
+        inner: S,
+        relations: &LabeledRelations<R>,
+        path: &Path,
+    ) -> Result<Self, DurabilityError> {
+        for (label, edges) in relations {
+            EdgeBlob::new(edges, R::SCHEMA_TAG)
+                .encode()?
+                .write(&labeled_edges_path(path, label))?;
+        }
+        Ok(Self::new(inner, relations))
+    }
+
+    /// [`Self::new`] over `relations`, rewriting only the labels whose
+    /// blob is stale — the `Symmetric::open` analogue, per label.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DurabilityError::Serde`] if a stale blob's edges can't
+    /// be serialized, [`DurabilityError::Io`] if it can't be rewritten.
+    pub fn open(
+        inner: S,
+        relations: &LabeledRelations<R>,
+        path: &Path,
+    ) -> Result<Self, DurabilityError> {
+        for (label, edges) in relations {
+            let blob = EdgeBlob::new(edges, R::SCHEMA_TAG);
+            let blob_path = labeled_edges_path(path, label);
+            if !blob.is_current_at(&blob_path) {
+                blob.encode()?.write(&blob_path)?;
+            }
+        }
+        Ok(Self::new(inner, relations))
+    }
+
+    /// Rebuild every named relation from its own blob alone —
+    /// [`Self::new`] over each `(label, Self::read_portable_edges(label))`
+    /// pair. Unlike `Symmetric::open_portable`, `labels` must still be
+    /// named by the caller: an open-ended, self-discovering label set
+    /// would need a manifest file this primitive does not have (a real,
+    /// named limitation, not an oversight — every real caller of this
+    /// method knows its own domain's fixed relation set at compile time,
+    /// e.g. `crate::generic::entity`'s own `RELATION_LABELS`). Never
+    /// writes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DurabilityError::RecordBlobUnreadable`], naming
+    /// whichever labeled blob is missing or invalid.
+    pub fn open_portable(inner: S, path: &Path, labels: &[&str]) -> Result<Self, DurabilityError> {
+        let mut relations = Vec::with_capacity(labels.len());
+        for &label in labels {
+            let edges = edge_blob::read::<R::Id>(&labeled_edges_path(path, label), R::SCHEMA_TAG)?;
+            relations.push((label.to_string(), edges));
+        }
+        Ok(Self::new(inner, &relations))
+    }
+}
+
+impl<S, R: Record> super::query::MultiNeighbors<R> for MultiSymmetric<S, R> {
+    fn neighbors_by_relation(&self, relation: &str, id: R::Id) -> Option<Vec<R::Id>> {
+        self.adjacency
+            .get(relation)
+            .map(|adj| adj.get(&id).cloned().unwrap_or_default())
+    }
+
+    fn all_neighbors(&self, id: R::Id) -> Vec<R::Id> {
+        self.adjacency
+            .values()
+            .flat_map(|adj| adj.get(&id).cloned().unwrap_or_default())
+            .collect()
+    }
+
+    fn relation_kinds(&self) -> Vec<String> {
+        self.adjacency.keys().cloned().collect()
+    }
+}
+
+// Forwarding impl: `MultiSymmetric<S, ..>` re-exposing `GetById`.
+impl<S, R: Record> GetById<R> for MultiSymmetric<S, R>
+where
+    S: GetById<R>,
+{
+    fn get(&self, id: R::Id) -> Option<R> {
+        self.inner.get(id)
+    }
+}
+
+// Forwarding impl: `MultiSymmetric<S, ..>` re-exposing `AllIds`.
+impl<S, R: Record> AllIds<R> for MultiSymmetric<S, R>
+where
+    S: AllIds<R>,
+{
+    fn all_ids(&self) -> Vec<R::Id> {
+        self.inner.all_ids()
+    }
+}
+
+impl<S, R: Record> Flush for MultiSymmetric<S, R>
+where
+    S: Flush,
+{
+    fn flush(&self) -> Result<(), DurabilityError> {
+        self.inner.flush()
+    }
+}
+
+// Forwarding impl: `MultiSymmetric<S, ..>` re-exposing `FilterEq`.
+impl<S, R, IndexMarker> FilterEq<R, IndexMarker> for MultiSymmetric<S, R>
+where
+    R: Record + IndexedField<IndexMarker>,
+    S: FilterEq<R, IndexMarker>,
+{
+    fn filter_eq(&self, value: &R::IndexValue) -> Vec<R::Id> {
+        self.inner.filter_eq(value)
+    }
+}
+
+// Forwarding impl: `MultiSymmetric<S, ..>` re-exposing `ScanField`.
+impl<S, R, ScanMarker> ScanField<R, ScanMarker> for MultiSymmetric<S, R>
+where
+    R: Record + ScannableField<ScanMarker>,
+    S: ScanField<R, ScanMarker>,
+{
+    fn scan(&self) -> Vec<R::ScanValue> {
+        self.inner.scan()
+    }
+}
+
+// Forwarding impl: `MultiSymmetric<S, ..>` re-exposing `UpdateField`.
+impl<S, R, ScanMarker> UpdateField<R, ScanMarker> for MultiSymmetric<S, R>
+where
+    R: Record + ScannableField<ScanMarker>,
+    S: UpdateField<R, ScanMarker>,
+{
+    fn update(&mut self, id: R::Id, value: R::ScanValue) -> Result<(), NotFound<R::Id>> {
+        self.inner.update(id, value)
+    }
+}
+
 /// `Parent` (the cheap direction of a directed relation) needs no new
 /// store state at all — a blanket impl over anything that already
 /// provides `GetById<C>`, per the design doc §2.

@@ -1,24 +1,24 @@
 //! [`ConnectionStore`] adapter wrapping
 //! [`crate::generic::production::GenericProductionStore<EntityProductionStack>`]
-//! for `Entity` — this crate's fifth domain, and its second
-//! `ConnectionStore` adapter gated by `server` alone (`ENT-FR-006`,
-//! ADR-0037), matching `Reminder`'s own front-door precedent.
+//! for `Entity` v2 — `ENT2-FR-006`/`007`, ADR-0039, `server`-gated
+//! alone, matching `Reminder`'s own front-door precedent.
 //!
-//! # One relation only: `neighbors`, not `parent`/`children`
+//! # Two relation labels, not one
 //!
-//! `Entity` has a `SymmetricRelation` (`relates_to`) but no `ChildOf`
-//! — the same shape `server::dog`'s own missing half already uses.
-//! `parent`/`children` report `ErrorCode::Unsupported` unconditionally.
+//! `neighbors` (unfiltered) answers the union of both `relates_to`/
+//! `mentioned_with`; `neighbors_by_relation`/`list_relation_kinds` are
+//! real for the first time in this crate — see
+//! [`crate::generic::store::MultiSymmetric`]'s own doc comment for the
+//! mechanism.
 //!
 //! # `kind`, not a plain number, is the equality-filterable field
 //!
-//! `filter_eq`/`update_field` validate an incoming `kind` discriminant
-//! against [`crate::generic::entity::kind_from_u32`] before ever
-//! reaching the store — `ErrorCode::Malformed` on an unrecognized
-//! value — the same "validate before write" shape `server::reminder`'s
-//! own `status` handling already established, here applied to
-//! `FilterEq` since `kind` is the `IndexedField`, not the
-//! `ScannableField`.
+//! `filter_eq` on `kind` accepts any string now (open-ended, `ENT2-FR-001`)
+//! — no discriminant validation, unlike v1's fixed-enum `kind_from_u32`
+//! check. `kind` is **not** durably updatable over the wire (unlike v1) —
+//! see `crate::generic::entity`'s own module doc for why (`ScannableField::
+//! ScanValue: Copy`, and `String` is neither `Copy` nor mmap-fixed-width).
+//! `mention_count` fills that role instead, kept unchanged from v1.
 
 use super::journal::{CheckpointFlush, CommitError, CommitGroup, JournalError};
 use super::protocol::{
@@ -26,10 +26,7 @@ use super::protocol::{
     RelationCapabilities, ScanValue, TransactionOp, ValueKind,
 };
 use super::ConnectionStore;
-use crate::generic::entity::{
-    kind_from_u32, kind_to_u32, Entity, EntityProductionStack, KindField, MentionCountField,
-    RelatesTo,
-};
+use crate::generic::entity::{Entity, EntityProductionStack, KindField, MentionCountField};
 use crate::generic::production::GenericProductionStore;
 use crate::generic::query::{GetById, UpdateField};
 use std::path::Path;
@@ -76,9 +73,9 @@ impl EntityConnectionStore {
         })
     }
 
-    /// Same validate-then-apply shape `server::reminder`'s own uses —
     /// `Entity`'s only mutable field over this protocol is
-    /// `mention_count`.
+    /// `mention_count` — `kind` moved to read-only in v2 (see module
+    /// docs).
     fn validate_batch(
         updates: &[TransactionOp],
         exists: impl Fn(RecordId) -> bool,
@@ -120,7 +117,7 @@ impl EntityConnectionStore {
         for (id, field, value) in reads {
             let current = get(*id).and_then(|entity| match *field {
                 FIELD_LABEL => Some(ScanValue::Str(entity.label)),
-                FIELD_KIND => Some(ScanValue::U32(kind_to_u32(entity.kind))),
+                FIELD_KIND => Some(ScanValue::Str(entity.kind)),
                 FIELD_MENTION_COUNT => Some(ScanValue::I64(entity.mention_count)),
                 _ => None,
             });
@@ -137,7 +134,7 @@ impl ConnectionStore for EntityConnectionStore {
         self.store.get::<Entity>(id).map(|entity| {
             vec![
                 (FIELD_LABEL, ScanValue::Str(entity.label)),
-                (FIELD_KIND, ScanValue::U32(kind_to_u32(entity.kind))),
+                (FIELD_KIND, ScanValue::Str(entity.kind)),
                 (FIELD_MENTION_COUNT, ScanValue::I64(entity.mention_count)),
             ]
         })
@@ -155,10 +152,9 @@ impl ConnectionStore for EntityConnectionStore {
 
     fn filter_eq(&self, field: FieldRef, value: &ScanValue) -> Result<Vec<RecordId>, ErrorCode> {
         match (field, value) {
-            (FIELD_KIND, ScanValue::U32(raw)) => match kind_from_u32(*raw) {
-                Some(kind) => Ok(self.store.filter_eq::<Entity, KindField>(&kind)),
-                None => Err(ErrorCode::Malformed),
-            },
+            (FIELD_KIND, ScanValue::Str(kind)) => {
+                Ok(self.store.filter_eq::<Entity, KindField>(kind))
+            }
             (FIELD_KIND, _) => Err(ErrorCode::Malformed),
             (FIELD_LABEL | FIELD_MENTION_COUNT, _) => Err(ErrorCode::Unsupported),
             _ => Err(ErrorCode::UnknownField),
@@ -200,7 +196,7 @@ impl ConnectionStore for EntityConnectionStore {
         }
     }
 
-    /// `ENT-FR-005`: `Entity` has no `ChildOf` relation.
+    /// `ENT2-FR-006`: `Entity` has no `ChildOf` relation.
     fn parent(&self, _id: RecordId) -> Result<ParentLookup, ErrorCode> {
         Err(ErrorCode::Unsupported)
     }
@@ -210,7 +206,22 @@ impl ConnectionStore for EntityConnectionStore {
     }
 
     fn neighbors(&self, id: RecordId) -> Result<Vec<RecordId>, ErrorCode> {
-        Ok(self.store.neighbors::<Entity, RelatesTo>(id))
+        Ok(self.store.all_neighbors::<Entity>(id))
+    }
+
+    fn neighbors_by_relation(
+        &self,
+        id: RecordId,
+        relation: &str,
+    ) -> Result<Vec<RecordId>, ErrorCode> {
+        match self.store.neighbors_by_relation::<Entity>(relation, id) {
+            Some(records) => Ok(records),
+            None => Err(ErrorCode::Malformed),
+        }
+    }
+
+    fn list_relation_kinds(&self) -> Vec<String> {
+        self.store.relation_kinds::<Entity>()
     }
 
     /// `STV-FR-002`: `validate_batch` on this one operation, with the
@@ -238,7 +249,7 @@ impl ConnectionStore for EntityConnectionStore {
                 FieldDescriptor {
                     tag: FIELD_KIND,
                     name: "kind".into(),
-                    value_kind: ValueKind::U32,
+                    value_kind: ValueKind::Str,
                     capabilities: FieldCapabilities {
                         filter_eq: true,
                         scan: false,
@@ -300,38 +311,37 @@ impl ConnectionStore for EntityConnectionStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::generic::entity::{create_entity_production_stack, EntityKind};
+    use crate::generic::entity::create_entity_production_stack;
     use crate::test_support::fresh_temp_dir;
     use uuid::Uuid;
 
     fn sample_adapter() -> EntityConnectionStore {
-        let dir = fresh_temp_dir("server_entity_adapter").unwrap();
+        let dir = fresh_temp_dir("server_entity_v2_adapter").unwrap();
         let path = dir.join("entities.mmap");
         let entities = vec![
             Entity {
                 id: Uuid::from_u128(1),
                 label: "Ada Lovelace".into(),
-                kind: EntityKind::Person,
+                kind: "person".into(),
                 mention_count: 3,
             },
             Entity {
                 id: Uuid::from_u128(2),
                 label: "Analytical Engine".into(),
-                kind: EntityKind::Concept,
+                kind: "concept".into(),
                 mention_count: 5,
             },
             Entity {
                 id: Uuid::from_u128(3),
                 label: "London".into(),
-                kind: EntityKind::Place,
+                kind: "place".into(),
                 mention_count: 1,
             },
         ];
-        let edges = vec![
-            (Uuid::from_u128(1), Uuid::from_u128(2)),
-            (Uuid::from_u128(1), Uuid::from_u128(3)),
-        ];
-        let stack = create_entity_production_stack(entities, &edges, &path).unwrap();
+        let relates_to = vec![(Uuid::from_u128(1), Uuid::from_u128(2))];
+        let mentioned_with = vec![(Uuid::from_u128(1), Uuid::from_u128(3))];
+        let stack =
+            create_entity_production_stack(entities, &relates_to, &mentioned_with, &path).unwrap();
         EntityConnectionStore::new(GenericProductionStore::new(stack))
     }
 
@@ -342,7 +352,7 @@ mod tests {
             adapter.get(Uuid::from_u128(1)).unwrap(),
             vec![
                 (FIELD_LABEL, ScanValue::Str("Ada Lovelace".into())),
-                (FIELD_KIND, ScanValue::U32(0)),
+                (FIELD_KIND, ScanValue::Str("person".into())),
                 (FIELD_MENTION_COUNT, ScanValue::I64(3)),
             ]
         );
@@ -350,21 +360,17 @@ mod tests {
     }
 
     #[test]
-    fn filter_eq_by_kind_with_discriminant_validation_and_unsupported_fields() {
+    fn filter_eq_by_kind_open_ended_and_unsupported_fields() {
         let adapter = sample_adapter();
         assert_eq!(
-            adapter.filter_eq(FIELD_KIND, &ScanValue::U32(0)),
+            adapter.filter_eq(FIELD_KIND, &ScanValue::Str("person".into())),
             Ok(vec![Uuid::from_u128(1)])
         );
+        // Open-ended: any string is accepted, no discriminant to fail.
         assert!(adapter
-            .filter_eq(FIELD_KIND, &ScanValue::U32(4))
+            .filter_eq(FIELD_KIND, &ScanValue::Str("nonexistent-kind".into()))
             .unwrap()
             .is_empty());
-        assert_eq!(
-            adapter.filter_eq(FIELD_KIND, &ScanValue::U32(99)),
-            Err(ErrorCode::Malformed),
-            "an unrecognized discriminant is rejected"
-        );
         assert_eq!(
             adapter.filter_eq(FIELD_MENTION_COUNT, &ScanValue::I64(0)),
             Err(ErrorCode::Unsupported)
@@ -373,14 +379,10 @@ mod tests {
             adapter.filter_eq(FIELD_LABEL, &ScanValue::Str("x".into())),
             Err(ErrorCode::Unsupported)
         );
-        assert_eq!(
-            adapter.filter_eq(99, &ScanValue::I64(0)),
-            Err(ErrorCode::UnknownField)
-        );
     }
 
     #[test]
-    fn scan_and_update_mention_count_only() {
+    fn scan_and_update_mention_count_only_kind_is_read_only() {
         let adapter = sample_adapter();
         let mut counts = adapter.scan_field(FIELD_MENTION_COUNT).unwrap();
         counts.sort_by_key(|v| match v {
@@ -398,25 +400,35 @@ mod tests {
             Ok(true)
         );
         assert_eq!(
-            adapter.get(Uuid::from_u128(1)).unwrap()[2],
-            (FIELD_MENTION_COUNT, ScanValue::I64(4))
-        );
-        assert_eq!(
-            adapter.update_field(Uuid::from_u128(99), FIELD_MENTION_COUNT, ScanValue::I64(1)),
-            Ok(false)
-        );
-        assert_eq!(
-            adapter.update_field(Uuid::from_u128(1), FIELD_LABEL, ScanValue::Str("x".into())),
+            adapter.update_field(Uuid::from_u128(1), FIELD_KIND, ScanValue::Str("x".into())),
             Err(ErrorCode::Unsupported)
         );
     }
 
     #[test]
-    fn neighbors_reflects_relates_to_and_parent_children_are_unsupported() {
+    fn neighbors_by_relation_and_unfiltered_and_list_relation_kinds() {
         let adapter = sample_adapter();
-        let mut neighbors = adapter.neighbors(Uuid::from_u128(1)).unwrap();
-        neighbors.sort();
-        assert_eq!(neighbors, vec![Uuid::from_u128(2), Uuid::from_u128(3)]);
+        assert_eq!(
+            adapter.neighbors_by_relation(Uuid::from_u128(1), "relates_to"),
+            Ok(vec![Uuid::from_u128(2)])
+        );
+        assert_eq!(
+            adapter.neighbors_by_relation(Uuid::from_u128(1), "mentioned_with"),
+            Ok(vec![Uuid::from_u128(3)])
+        );
+        assert_eq!(
+            adapter.neighbors_by_relation(Uuid::from_u128(1), "unknown"),
+            Err(ErrorCode::Malformed)
+        );
+        let mut unfiltered = adapter.neighbors(Uuid::from_u128(1)).unwrap();
+        unfiltered.sort();
+        assert_eq!(unfiltered, vec![Uuid::from_u128(2), Uuid::from_u128(3)]);
+        let mut kinds = adapter.list_relation_kinds();
+        kinds.sort();
+        assert_eq!(
+            kinds,
+            vec!["mentioned_with".to_string(), "relates_to".to_string()]
+        );
         assert_eq!(
             adapter.parent(Uuid::from_u128(1)),
             Err(ErrorCode::Unsupported)

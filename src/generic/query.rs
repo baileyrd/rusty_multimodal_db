@@ -55,6 +55,38 @@ where
     fn neighbors(&self, id: R::Id) -> Vec<R::Id>;
 }
 
+/// More than one named symmetric relation on the same record type `R`,
+/// each identified by a runtime string label rather than a compile-time
+/// marker type — `ENT2-FR-002`/`003` (ADR-0039). **Not** a generalization
+/// of [`Neighbors`]: a `Symmetric<S, R, Marker>` already answers
+/// `Neighbors<R, Marker>` for its own compile-time `Marker` via `self`'s
+/// own adjacency map, and a second, independent `impl<.., R2, RelMarker>
+/// Neighbors<R2, RelMarker> for Symmetric<..>` generic forwarding impl —
+/// mirroring `Reversed`'s own `Neighbors`-forwarding fix (`FR-012`) —
+/// was tried and confirmed (directly, with `rustc`) to conflict with that
+/// existing direct impl: `Reversed` has no competing direct `Neighbors`
+/// impl of its own to conflict with (its own relation is `ChildOf`, a
+/// different trait entirely), but `Symmetric` does, so the identical
+/// trick does not generalize. `MultiNeighbors` sidesteps the conflict
+/// entirely by not using the marker-typed `Neighbors` trait for the
+/// multi-relation case at all — a deliberate, load-bearing choice, not
+/// an oversight, and one that happens to match the wire protocol's own
+/// shape exactly: `Request::NeighborsByRelation`'s `relation` field was
+/// always a runtime `String`, never a compile-time type.
+pub trait MultiNeighbors<R: Record> {
+    /// `None` if `relation` names no relation this store has at all
+    /// (an unknown label — `ErrorCode::Malformed` at the wire boundary);
+    /// `Some` (possibly empty) otherwise.
+    fn neighbors_by_relation(&self, relation: &str, id: R::Id) -> Option<Vec<R::Id>>;
+
+    /// The union of every named relation's neighbors — what a plain,
+    /// relation-unfiltered `Request::Neighbors` answers.
+    fn all_neighbors(&self, id: R::Id) -> Vec<R::Id>;
+
+    /// Every relation label this store knows, unspecified order.
+    fn relation_kinds(&self) -> Vec<String>;
+}
+
 /// The "one hop up" side of a *directed* relation. Has a blanket impl
 /// (`store.rs`) over anything providing `GetById<C>` — no new index
 /// needed, the foreign key already lives on the child.

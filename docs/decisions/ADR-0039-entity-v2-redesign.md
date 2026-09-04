@@ -122,3 +122,88 @@ own scope, `ADR-0037`'s client-side-traversal call left unrevisited].
   Implementation follows as `SERVER-001`'s next minor / FR (protocol
   10), per `docs/design/SERVER-ENTITY-V2-REDESIGN-DESIGN.md`. (This
   PR.)
+- 2026-09-04: **implemented** as `SERVER-001-FR-041` (v0.31.0, this
+  PR). Two real architectural blockers surfaced by direct
+  investigation before any implementation code was written, neither
+  assumed away, both resolved with the owner via `AskUserQuestion`
+  rather than silently reinterpreted — recorded here in full, since
+  both are real deviations from this ADR's own accepted text.
+
+  **Blocker 1 — `kind` cannot fill both structural roles.** This
+  ADR's own "Decision" proposed `kind: String` filling both
+  `IndexedField` and `ScannableField` (retiring `mention_count`'s
+  synthetic role). That does not compile:
+  `ScannableField::ScanValue: Copy`, and `GenericMmapStore`'s own mmap
+  slot mechanism (`src/generic/mmap_field.rs`) is fixed-width only by
+  `ADR-0009`'s own design — `String` is neither `Copy` nor
+  fixed-width. Three options were put to the owner: `kind` becomes
+  read-only (stays the `IndexedField`, `mention_count` stays,
+  unretired, as the `ScannableField`); split `kind` into two fields
+  (an indexed enum-like tag plus a separate free-text field); or
+  revisit whether `kind` needs to be `String` at all. The owner picked
+  the first, recommended option. `kind` stays exactly where `ADR-0037`
+  had it structurally — the equality-filterable `IndexedField` — now
+  open-ended rather than a fixed enum, but not durably updatable over
+  the wire, the same always-read-only shape every other domain's
+  `IndexedField` already has (`Order::status`, `Employee::department`).
+  `mention_count` was not retired.
+
+  **Blocker 2 — the `Symmetric`-forwarding fix does not compile.**
+  This ADR's own "Decision" and "Context" (mirroring `ADR-0037`, Unit
+  41 Finding 6, and `ADR-0038` before it) all named a generic
+  `Neighbors`-forwarding impl for `Symmetric` — the same shape
+  `Reversed` used for its own `Neighbors` forwarding fix (`FR-012`) —
+  as the mechanism `MentionedWith` would prove real. It does not
+  compile. Verified directly with `rustc` on two isolated test files
+  before writing any real implementation code: a direct
+  `Neighbors<R, Marker>` impl (which `Symmetric` needs for every
+  existing single-relation domain, e.g. `Dog::littermate_of`) produces
+  `E0119` (conflicting implementations) against any additional generic
+  forwarding impl for a second, independent marker on the same struct.
+  `Reversed` never faces this conflict, because its own relation
+  (`ChildOf`) is a different trait entirely from the one it forwards
+  (`Neighbors`) — there is no direct `Neighbors` impl on `Reversed` to
+  conflict with. `Symmetric` has no such luxury: a direct `Neighbors`
+  impl is exactly what makes it usable for every domain that has only
+  one relation today. **This is a genuine, previously-unverified-and-
+  wrong claim that had propagated across four prior documents**
+  (`ADR-0037`, Unit 41 Finding 6, `ADR-0038`, and this ADR's own
+  original "Decision" text) — none of them had actually compiled the
+  fix; each cited the prior document's own claim. Caught here, before
+  implementation, and corrected rather than perpetuated. Three options
+  were put to the owner: a new runtime-keyed multi-relation primitive
+  sidestepping the type-level conflict entirely; a nested
+  `Symmetric<Symmetric<..>, ..>` nominal-type trick (rejected as
+  investigated further — it does not actually resolve the same
+  conflict, since both layers still compete for the same `Neighbors<R,
+  ..>` impl surface on the outer type); or dropping the second
+  relation from this round's scope entirely. The owner picked the
+  first, recommended option. `MultiSymmetric<S, R>`/`MultiNeighbors<R>`
+  (`src/generic/{store,query}.rs`, new) key relations by a runtime
+  `String` label held in a `HashMap<String, HashMap<R::Id, Vec<R::Id>>>`
+  rather than by a compile-time `Marker` — which also happens to match
+  `Request::NeighborsByRelation`'s own wire shape exactly, since that
+  field was always going to be a runtime string, never a compile-time
+  type. Each relation's edge list stays independently durable via
+  `STORAGE-016`'s own `EdgeBlob` mechanism, reused directly, one blob
+  per label.
+
+  **A third, smaller, real deviation, named here for the first time**:
+  this ADR's own "Decision" prose described `label` being renamed to
+  `name`. The field's identifier is unchanged — `src/generic/entity.rs`
+  still declares `pub label: String`; its own doc comment states the
+  field fulfills the "name" role concept this ADR describes, but the
+  identifier itself was never renamed. Not caught via `AskUserQuestion`
+  like the two blockers above (it is cosmetic, not structural), but
+  recorded here rather than left silently inconsistent with this ADR's
+  own text.
+
+  Everything else in this ADR's "Decision" landed as proposed:
+  `PROTOCOL_VERSION` 10 with `Request::NeighborsByRelation`/
+  `ListRelationKinds`/`Response::RelationKinds`, all append-only, gated
+  entirely client-side; `MentionedWith` as the second relation proving
+  the (corrected) mechanism; `traverse`'s optional relation filter;
+  `aliases`, case-insensitive name resolution, and server-side
+  multi-hop traversal all still deferred. Full validation sweep green
+  — see `docs/PROJECT-STATUS.md` item 117 and `SERVER-001-FR-041` for
+  the complete test/tooling account.

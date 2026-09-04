@@ -1307,6 +1307,55 @@ impl SchemaDrivenClient {
         }
     }
 
+    /// `ENT2-FR-004` (ADR-0039, protocol 10): the symmetric relation,
+    /// filtered to one named label — for a domain with more than one
+    /// `SymmetricRelation`. `Err(ClientError::Server(ErrorCode::
+    /// Malformed, ..))` for a label this domain doesn't have.
+    /// `Err(ClientError::Unsupported)` locally, no round trip, on a
+    /// connection negotiated below 10 or a domain with no symmetric
+    /// relation at all — the same client-side gate [`Self::neighbors`]
+    /// already uses.
+    pub fn neighbors_by_relation(
+        &mut self,
+        id: RecordId,
+        relation: &str,
+    ) -> Result<Vec<RecordId>, ClientError> {
+        if !self.schema.relations.neighbors {
+            return Err(ClientError::Unsupported(
+                "NeighborsByRelation on this domain",
+            ));
+        }
+        if self.server_protocol_version < 10 {
+            return Err(ClientError::Unsupported("neighbors_by_relation"));
+        }
+        match self.roundtrip(Request::NeighborsByRelation {
+            id,
+            relation: relation.to_string(),
+        })? {
+            Response::RecordList { records } => Ok(records),
+            Response::Err { code, message } => Err(ClientError::Server(code, message)),
+            _ => Err(ClientError::UnexpectedResponse("RecordList")),
+        }
+    }
+
+    /// `ENT2-FR-005` (ADR-0039, protocol 10): every relation label this
+    /// domain knows. `Err(ClientError::Unsupported)` locally, no round
+    /// trip, on a connection negotiated below 10 or a domain with no
+    /// symmetric relation at all.
+    pub fn list_relation_kinds(&mut self) -> Result<Vec<String>, ClientError> {
+        if !self.schema.relations.neighbors {
+            return Err(ClientError::Unsupported("ListRelationKinds on this domain"));
+        }
+        if self.server_protocol_version < 10 {
+            return Err(ClientError::Unsupported("list_relation_kinds"));
+        }
+        match self.roundtrip(Request::ListRelationKinds)? {
+            Response::RelationKinds { kinds } => Ok(kinds),
+            Response::Err { code, message } => Err(ClientError::Server(code, message)),
+            _ => Err(ClientError::UnexpectedResponse("RelationKinds")),
+        }
+    }
+
     /// `ENT-FR-007`/`ENT-FR-008` (ADR-0037): bounded breadth-first graph
     /// walking from `id` (included at depth `0`), built entirely
     /// client-side over the existing [`Self::neighbors`] — no new
@@ -1332,11 +1381,18 @@ impl SchemaDrivenClient {
     /// surfaced immediately, aborting the walk with whatever nodes it
     /// had already collected discarded — a partial BFS result is never
     /// returned as if complete.
+    ///
+    /// `relation` (`ENT2-FR-006`, ADR-0039, protocol 10): `None` walks
+    /// every relation this domain has, unchanged from `ADR-0037`'s own
+    /// behavior; `Some(label)` routes each hop through
+    /// [`Self::neighbors_by_relation`] instead, following only that one
+    /// named relation.
     pub fn traverse(
         &mut self,
         id: RecordId,
         max_depth: usize,
         max_nodes: usize,
+        relation: Option<&str>,
     ) -> Result<Vec<(RecordId, usize)>, ClientError> {
         if !self.schema.relations.neighbors {
             return Err(ClientError::Unsupported("traverse"));
@@ -1353,7 +1409,11 @@ impl SchemaDrivenClient {
                 if visited.len() >= max_nodes {
                     break;
                 }
-                for neighbor in self.neighbors(node)? {
+                let neighbors = match relation {
+                    Some(label) => self.neighbors_by_relation(node, label)?,
+                    None => self.neighbors(node)?,
+                };
+                for neighbor in neighbors {
                     if visited.len() >= max_nodes {
                         break;
                     }

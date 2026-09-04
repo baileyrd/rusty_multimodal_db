@@ -248,6 +248,25 @@ where
         Ok(DogStore::neighbors(&self.store, id))
     }
 
+    /// `ENT2-FR-004`: `Dog` has exactly one relation label, `littermate_of`
+    /// — `neighbors_by_relation` with that label behaves as `neighbors`
+    /// does; any other label is `ErrorCode::Malformed`.
+    fn neighbors_by_relation(
+        &self,
+        id: RecordId,
+        relation: &str,
+    ) -> Result<Vec<RecordId>, ErrorCode> {
+        if relation == "littermate_of" {
+            Ok(DogStore::neighbors(&self.store, id))
+        } else {
+            Err(ErrorCode::Malformed)
+        }
+    }
+
+    fn list_relation_kinds(&self) -> Vec<String> {
+        vec!["littermate_of".to_string()]
+    }
+
     /// `STV-FR-002`: `validate_batch` on this one operation, with the
     /// same per-call existence read the journaled path uses.
     fn validate_op(&self, op: &TransactionOp) -> Result<(), ErrorCode> {

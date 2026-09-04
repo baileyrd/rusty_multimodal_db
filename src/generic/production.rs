@@ -281,6 +281,50 @@ impl<S> GenericProductionStore<S> {
         self.inner.read().expect(LOCK_POISONED).neighbors(id)
     }
 
+    /// More than one named symmetric relation, keyed at runtime rather
+    /// than by a compile-time `Marker` — `ENT2-FR-002`/`003` (ADR-0039).
+    /// See [`super::query::MultiNeighbors`]'s own doc comment for why
+    /// this is a separate mechanism from [`Self::neighbors`], not a
+    /// generalization of it.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the lock is poisoned — see `LOCK_POISONED`.
+    pub fn neighbors_by_relation<R: Record>(&self, relation: &str, id: R::Id) -> Option<Vec<R::Id>>
+    where
+        S: super::query::MultiNeighbors<R>,
+    {
+        self.inner
+            .read()
+            .expect(LOCK_POISONED)
+            .neighbors_by_relation(relation, id)
+    }
+
+    /// The union of every named relation's neighbors — what a plain,
+    /// relation-unfiltered lookup answers.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the lock is poisoned — see `LOCK_POISONED`.
+    pub fn all_neighbors<R: Record>(&self, id: R::Id) -> Vec<R::Id>
+    where
+        S: super::query::MultiNeighbors<R>,
+    {
+        self.inner.read().expect(LOCK_POISONED).all_neighbors(id)
+    }
+
+    /// Every relation label this store knows, unspecified order.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the lock is poisoned — see `LOCK_POISONED`.
+    pub fn relation_kinds<R: Record>(&self) -> Vec<String>
+    where
+        S: super::query::MultiNeighbors<R>,
+    {
+        self.inner.read().expect(LOCK_POISONED).relation_kinds()
+    }
+
     /// Force the durable layer(s) inside `S` to physical disk. Takes the
     /// write lock, same rationale as `ProductionStore::flush`: a
     /// checkpoint wants a quiescent snapshot, not a value racing an

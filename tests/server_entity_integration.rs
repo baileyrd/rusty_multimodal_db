@@ -1,10 +1,10 @@
-//! Real end-to-end coverage of the `Entity` domain (`ENT-FR-001`–`008`,
-//! ADR-0037, `docs/design/SERVER-ENTITY-DOMAIN-DESIGN.md`) — a real
+//! Real end-to-end coverage of `Entity` v2 (`ENT2-FR-001`–`007`,
+//! ADR-0039, `docs/design/SERVER-ENTITY-V2-REDESIGN-DESIGN.md`) — a real
 //! `TcpListener`, a real `SchemaDrivenClient`. `required-features =
 //! ["server"]` only, no `research` — `Entity` is front-door, matching
 //! `tests/server_reminder_integration.rs`'s own precedent.
 
-use rusty_multimodal_db::generic::entity::{create_entity_production_stack, Entity, EntityKind};
+use rusty_multimodal_db::generic::entity::{create_entity_production_stack, Entity};
 use rusty_multimodal_db::generic::production::GenericProductionStore;
 use rusty_multimodal_db::generic::reminder::{
     create_reminder_production_stack, Reminder, ReminderStatus,
@@ -36,34 +36,42 @@ fn sample_entities() -> Vec<Entity> {
         Entity {
             id: Uuid::from_u128(1),
             label: "Ada Lovelace".into(),
-            kind: EntityKind::Person,
+            kind: "person".into(),
             mention_count: 3,
         },
         Entity {
             id: Uuid::from_u128(2),
             label: "Analytical Engine".into(),
-            kind: EntityKind::Concept,
+            kind: "concept".into(),
             mention_count: 5,
         },
         Entity {
             id: Uuid::from_u128(3),
             label: "London".into(),
-            kind: EntityKind::Place,
+            kind: "place".into(),
             mention_count: 1,
         },
         Entity {
             id: Uuid::from_u128(4),
             label: "Royal Society".into(),
-            kind: EntityKind::Organization,
+            kind: "organization".into(),
+            mention_count: 2,
+        },
+        Entity {
+            id: Uuid::from_u128(5),
+            label: "Charles Babbage".into(),
+            kind: "person".into(),
             mention_count: 2,
         },
     ]
 }
 
-/// A triangle (1-2, 2-3, 3-1 — a real cycle) plus one extra hop (3-4),
-/// so `traverse`'s `max_depth`/`max_nodes` bounds and cycle-safety are
-/// all observable: from `1`, `2`/`3` are depth 1, `4` is depth 2.
-fn sample_edges() -> Vec<(Uuid, Uuid)> {
+/// A triangle (1-2, 2-3, 3-1 — a real cycle) plus one extra `relates_to`
+/// hop (3-4), so `traverse`'s bounds and cycle-safety are observable —
+/// the same fixture `Entity` v1's own tests used. `mentioned_with` is a
+/// disjoint edge (1-5), so relation-filtered traversal/neighbors are
+/// distinguishable from the unfiltered union.
+fn sample_relates_to_edges() -> Vec<(Uuid, Uuid)> {
     vec![
         (Uuid::from_u128(1), Uuid::from_u128(2)),
         (Uuid::from_u128(2), Uuid::from_u128(3)),
@@ -72,11 +80,21 @@ fn sample_edges() -> Vec<(Uuid, Uuid)> {
     ]
 }
 
+fn sample_mentioned_with_edges() -> Vec<(Uuid, Uuid)> {
+    vec![(Uuid::from_u128(1), Uuid::from_u128(5))]
+}
+
 fn start_server() -> SocketAddr {
-    let dir = unique_dir("entity_integration");
+    let dir = unique_dir("entity_v2_integration");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("entities.mmap");
-    let stack = create_entity_production_stack(sample_entities(), &sample_edges(), &path).unwrap();
+    let stack = create_entity_production_stack(
+        sample_entities(),
+        &sample_relates_to_edges(),
+        &sample_mentioned_with_edges(),
+        &path,
+    )
+    .unwrap();
     let connection_store = Arc::new(EntityConnectionStore::new(GenericProductionStore::new(
         stack,
     )));
@@ -89,7 +107,7 @@ fn start_server() -> SocketAddr {
 /// A `Reminder` server — `relations.neighbors: false` — used only to
 /// prove `traverse`'s client-side capability gate (`ENT-FR-007`).
 fn start_reminder_server() -> SocketAddr {
-    let dir = unique_dir("entity_traverse_gate");
+    let dir = unique_dir("entity_v2_traverse_gate");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("reminders.mmap");
     let reminders = vec![Reminder {
@@ -127,7 +145,7 @@ fn get_returns_every_field_and_group_by_kind_counts_correctly() {
         fields,
         vec![
             ("label".to_string(), ScanValue::Str("Ada Lovelace".into())),
-            ("kind".to_string(), ScanValue::U32(0)),
+            ("kind".to_string(), ScanValue::Str("person".into())),
             ("mention_count".to_string(), ScanValue::I64(3)),
         ]
     );
@@ -138,31 +156,32 @@ fn get_returns_every_field_and_group_by_kind_counts_correctly() {
             .query("SELECT kind, COUNT(*) FROM entity GROUP BY kind")
             .unwrap(),
     );
-    assert_eq!(
-        counts.len(),
-        4,
-        "Person, Concept, Place, Organization — one each"
-    );
+    assert_eq!(counts.len(), 4, "person(x2), concept, place, organization");
     for row in &counts {
-        assert_eq!(row[1], ("COUNT(*)".to_string(), ScanValue::I64(1)));
+        let expected = if row[0] == ("kind".to_string(), ScanValue::Str("person".into())) {
+            2
+        } else {
+            1
+        };
+        assert_eq!(row[1], ("COUNT(*)".to_string(), ScanValue::I64(expected)));
     }
 }
 
-/// Acceptance criterion 3: `FilterEq` on `kind` returns exactly the
-/// matching ids; `FilterEq` on `label`/`mention_count` is client-side
-/// `Unsupported`, no round trip.
+/// Acceptance criterion 3: `FilterEq` on `kind` is open-ended (any
+/// string, no discriminant) and returns exactly the matching ids;
+/// `FilterEq` on `label`/`mention_count` is client-side `Unsupported`.
 #[test]
-fn filter_eq_by_kind_and_unsupported_fields() {
+fn filter_eq_by_kind_open_ended_and_unsupported_fields() {
     let addr = start_server();
     let mut client = SchemaDrivenClient::connect(addr).unwrap();
 
-    assert_eq!(
-        client.filter_eq("kind", ScanValue::U32(0)).unwrap(),
-        vec![Uuid::from_u128(1)],
-        "Person"
-    );
+    let mut persons = client
+        .filter_eq("kind", ScanValue::Str("person".into()))
+        .unwrap();
+    persons.sort();
+    assert_eq!(persons, vec![Uuid::from_u128(1), Uuid::from_u128(5)]);
     assert!(client
-        .filter_eq("kind", ScanValue::U32(4))
+        .filter_eq("kind", ScanValue::Str("nonexistent-kind".into()))
         .unwrap()
         .is_empty());
 
@@ -176,11 +195,13 @@ fn filter_eq_by_kind_and_unsupported_fields() {
     ));
 }
 
-/// Acceptance criterion 4: `UpdateField`/`Session::update` on
-/// `mention_count` succeeds and is immediately visible; `UpdateField`
-/// on `label`/`kind` is client-side `Unsupported`.
+/// Acceptance criterion 4 (v2, narrowed — see `crate::generic::entity`'s
+/// own module docs for why): `UpdateField` on `mention_count` succeeds
+/// and is immediately visible; `UpdateField` on `label`/`kind` is
+/// client-side `Unsupported` (`kind` moved to read-only in v2, unlike
+/// v1).
 #[test]
-fn update_mention_count_and_unsupported_fields() {
+fn update_mention_count_kind_is_now_read_only() {
     let addr = start_server();
     let mut client = SchemaDrivenClient::connect(addr).unwrap();
 
@@ -191,7 +212,7 @@ fn update_mention_count_and_unsupported_fields() {
     assert_eq!(fields[2], ("mention_count".to_string(), ScanValue::I64(4)));
 
     assert!(matches!(
-        client.update(Uuid::from_u128(1), "kind", ScanValue::U32(1)),
+        client.update(Uuid::from_u128(1), "kind", ScanValue::Str("x".into())),
         Err(ClientError::Unsupported(_))
     ));
     assert!(matches!(
@@ -200,21 +221,48 @@ fn update_mention_count_and_unsupported_fields() {
     ));
 }
 
-/// Acceptance criterion 5: `Neighbors` returns exactly the entities
-/// connected by a `relates_to` edge, both directions (symmetric);
-/// `parent`/`children` are `Unsupported` unconditionally.
+/// Acceptance criterion 3 (`ENT2-FR-004`/`005`): `Neighbors` (unfiltered)
+/// returns the union of both relations; `NeighborsByRelation` returns
+/// exactly one relation's own edges; an unknown label is a server-side
+/// `Malformed`; `ListRelationKinds` names both labels; `parent`/
+/// `children` stay `Unsupported` unconditionally.
 #[test]
-fn neighbors_reflects_relates_to_both_directions_and_parent_children_are_unsupported() {
+fn neighbors_by_relation_unfiltered_union_and_list_relation_kinds() {
     let addr = start_server();
     let mut client = SchemaDrivenClient::connect(addr).unwrap();
 
-    let mut neighbors_of_1 = client.neighbors(Uuid::from_u128(1)).unwrap();
-    neighbors_of_1.sort();
-    assert_eq!(neighbors_of_1, vec![Uuid::from_u128(2), Uuid::from_u128(3)]);
-    // The symmetric direction: 4 was only ever named as (3, 4), never (4, 3).
+    let mut unfiltered = client.neighbors(Uuid::from_u128(1)).unwrap();
+    unfiltered.sort();
     assert_eq!(
-        client.neighbors(Uuid::from_u128(4)).unwrap(),
-        vec![Uuid::from_u128(3)]
+        unfiltered,
+        vec![Uuid::from_u128(2), Uuid::from_u128(3), Uuid::from_u128(5)],
+        "the union of relates_to {{2,3}} and mentioned_with {{5}}"
+    );
+
+    let mut relates_to = client
+        .neighbors_by_relation(Uuid::from_u128(1), "relates_to")
+        .unwrap();
+    relates_to.sort();
+    assert_eq!(relates_to, vec![Uuid::from_u128(2), Uuid::from_u128(3)]);
+    assert_eq!(
+        client
+            .neighbors_by_relation(Uuid::from_u128(1), "mentioned_with")
+            .unwrap(),
+        vec![Uuid::from_u128(5)]
+    );
+    match client.neighbors_by_relation(Uuid::from_u128(1), "unknown") {
+        Err(ClientError::Server(
+            rusty_multimodal_db::server::protocol::ErrorCode::Malformed,
+            _,
+        )) => {}
+        other => panic!("expected a server-side Malformed rejection, got {other:?}"),
+    }
+
+    let mut kinds = client.list_relation_kinds().unwrap();
+    kinds.sort();
+    assert_eq!(
+        kinds,
+        vec!["mentioned_with".to_string(), "relates_to".to_string()]
     );
 
     assert!(matches!(
@@ -231,68 +279,99 @@ fn neighbors_reflects_relates_to_both_directions_and_parent_children_are_unsuppo
     assert!(!schema.relations.parent_children);
 }
 
-/// Acceptance criterion 6: `SchemaDrivenClient::traverse` from `1` over
-/// the fixture graph (a real cycle, `1`-`2`-`3`-`1`, plus `4` one hop
-/// further out) returns every reachable entity paired with its true
-/// shortest-path hop distance, no duplicate, no infinite loop; the
-/// `max_depth` bound stops discovery at `4` (depth 2); the `max_nodes`
-/// bound can cut a walk off before its `max_depth` is even reached.
+/// Acceptance criterion 5 (`ENT2-FR-006`): `traverse`'s relation filter.
+/// `None` walks both relations, matching `ADR-0037`'s own unfiltered
+/// behavior; `Some("relates_to")`/`Some("mentioned_with")` each walk
+/// only their own edges. Also re-proves the `max_depth`/`max_nodes`
+/// bounds still hold with the filter unset.
 #[test]
-fn traverse_returns_correct_hop_distances_and_respects_both_bounds() {
+fn traverse_relation_filter_and_bounds() {
     let addr = start_server();
     let mut client = SchemaDrivenClient::connect(addr).unwrap();
 
-    let mut full = client.traverse(Uuid::from_u128(1), 3, 10).unwrap();
-    full.sort();
+    let mut unfiltered = client.traverse(Uuid::from_u128(1), 3, 10, None).unwrap();
+    unfiltered.sort();
     assert_eq!(
-        full,
+        unfiltered,
+        vec![
+            (Uuid::from_u128(1), 0),
+            (Uuid::from_u128(2), 1),
+            (Uuid::from_u128(3), 1),
+            (Uuid::from_u128(4), 2),
+            (Uuid::from_u128(5), 1),
+        ],
+        "every entity reachable via either relation, each at its true shortest-path depth"
+    );
+
+    let mut relates_to_only = client
+        .traverse(Uuid::from_u128(1), 3, 10, Some("relates_to"))
+        .unwrap();
+    relates_to_only.sort();
+    assert_eq!(
+        relates_to_only,
         vec![
             (Uuid::from_u128(1), 0),
             (Uuid::from_u128(2), 1),
             (Uuid::from_u128(3), 1),
             (Uuid::from_u128(4), 2),
         ],
-        "every entity, each at its true shortest-path hop distance, no duplicate"
+        "5 is unreachable via relates_to alone"
     );
 
-    let mut depth_bounded = client.traverse(Uuid::from_u128(1), 1, 10).unwrap();
-    depth_bounded.sort();
+    let mentioned_with_only = client
+        .traverse(Uuid::from_u128(1), 3, 10, Some("mentioned_with"))
+        .unwrap();
     assert_eq!(
-        depth_bounded,
-        vec![
-            (Uuid::from_u128(1), 0),
-            (Uuid::from_u128(2), 1),
-            (Uuid::from_u128(3), 1),
-        ],
+        mentioned_with_only,
+        vec![(Uuid::from_u128(1), 0), (Uuid::from_u128(5), 1)],
+        "2/3/4 are unreachable via mentioned_with alone"
+    );
+
+    let depth_bounded = client
+        .traverse(Uuid::from_u128(1), 1, 10, Some("relates_to"))
+        .unwrap();
+    assert_eq!(
+        depth_bounded.len(),
+        3,
         "max_depth = 1 stops before discovering 4"
     );
 
-    let nodes_bounded = client.traverse(Uuid::from_u128(1), 3, 2).unwrap();
+    let nodes_bounded = client
+        .traverse(Uuid::from_u128(1), 3, 2, Some("relates_to"))
+        .unwrap();
     assert_eq!(
         nodes_bounded.len(),
         2,
-        "max_nodes = 2 stops the walk even though max_depth would allow more: {nodes_bounded:?}"
+        "max_nodes = 2 stops the walk even though max_depth would allow more"
     );
-    assert_eq!(nodes_bounded[0], (Uuid::from_u128(1), 0));
 }
 
-/// Acceptance criterion 6 (continued): `traverse` is `Err(ClientError::
-/// Unsupported("traverse"))` with no round trip against a domain whose
-/// schema reports `relations.neighbors: false` — `Reminder`'s own
-/// shape, reused here as the negative fixture.
+/// Acceptance criterion 6: `traverse`/`neighbors_by_relation`/
+/// `list_relation_kinds` are all `Err(ClientError::Unsupported(_))` with
+/// no round trip against a domain whose schema reports
+/// `relations.neighbors: false` — `Reminder`'s own shape, reused as the
+/// negative fixture.
 #[test]
-fn traverse_is_unsupported_against_a_domain_with_no_neighbors_capability() {
+fn traverse_and_relation_methods_are_unsupported_against_a_domain_with_no_neighbors_capability() {
     let addr = start_reminder_server();
     let mut client = SchemaDrivenClient::connect(addr).unwrap();
     assert!(!client.schema().relations.neighbors);
     assert!(matches!(
-        client.traverse(Uuid::from_u128(1), 3, 10),
+        client.traverse(Uuid::from_u128(1), 3, 10, None),
+        Err(ClientError::Unsupported(_))
+    ));
+    assert!(matches!(
+        client.neighbors_by_relation(Uuid::from_u128(1), "relates_to"),
+        Err(ClientError::Unsupported(_))
+    ));
+    assert!(matches!(
+        client.list_relation_kinds(),
         Err(ClientError::Unsupported(_))
     ));
 }
 
-/// Acceptance criterion 7: `Request::Transaction` works against
-/// `Entity` with the same shape every other domain's own tests already
+/// Acceptance criterion 7: `Request::Transaction` works against `Entity`
+/// v2 with the same shape every other domain's own tests already
 /// establish — full success applying every write. Issued via raw
 /// framing (matching `tests/server_transaction_integration.rs`'s own
 /// precedent), since `SchemaDrivenClient` has no `Transaction`
@@ -338,10 +417,8 @@ fn transaction_applies_every_write() {
 }
 
 /// Acceptance criterion 7 (continued): a read-your-writes session sees
-/// its own staged `mention_count` write; a snapshot-isolation
-/// session's `Commit` succeeds normally with no conflicting external
-/// write — the same session-composition shape every other domain's
-/// own tests already establish.
+/// its own staged `mention_count` write; a snapshot-isolation session's
+/// `Commit` succeeds normally with no conflicting external write.
 #[test]
 fn sessions_compose_with_entity_the_same_as_every_other_domain() {
     let addr = start_server();
@@ -370,7 +447,7 @@ fn sessions_compose_with_entity_the_same_as_every_other_domain() {
     session.commit().unwrap();
 }
 
-/// Acceptance criterion 5 (sanity check on the schema itself, matching
+/// Acceptance criterion 3 (sanity check on the schema itself, matching
 /// `Order`/`Reminder`'s own "every capability flag false" precedent):
 /// `label` has every capability flag `false` but is still fully
 /// selectable/filterable via `Query` — a full scan needs no index.

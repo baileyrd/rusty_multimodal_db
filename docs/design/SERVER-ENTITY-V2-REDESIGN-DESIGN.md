@@ -446,3 +446,24 @@ respectively (mirroring how every pre-`Employee` adapter answered
   relation-filtered neighbor lookup and relation-kind discovery.
 - 2026-09-04: Accepted as proposed, `ADR-0039` option (a); (b) and (c)
   declined.
+- 2026-09-04: **Implemented** (`SERVER-001-FR-041`, v0.31.0). Two of
+  this document's own proposed mechanisms did not survive contact with
+  the compiler, both caught before implementation code was written and
+  resolved with the owner rather than assumed away — see
+  `ADR-0039`'s own implementation-log entry for the full account of
+  each. Summary: `kind` could not fill both `IndexedField` and
+  `ScannableField` roles (`ScanValue: Copy`, `GenericMmapStore`'s
+  fixed-width mmap slots) — it stays the read-only `IndexedField`
+  instead, `mention_count` not retired; the `Symmetric`-forwarding fix
+  this document's own "Considered options"/"Proposed shape" described
+  (mirroring `Reversed`'s `FR-012` fix) does not compile —
+  confirmed directly with `rustc`, `E0119` — so a genuinely new
+  primitive, `MultiSymmetric`/`MultiNeighbors`, was built instead,
+  keying relations by a runtime `String` label rather than a
+  compile-time `Marker`. A third, smaller deviation: `label`'s field
+  identifier was not renamed to `name` as this document's own
+  "Proposed shape" showed — the field fulfills that role under its
+  existing v1 name. Everything else — `PROTOCOL_VERSION` 10's two new
+  variants, `MentionedWith` as the second relation, `traverse`'s
+  optional relation filter, `aliases`/case-insensitive names/
+  server-side traversal deferred — landed as proposed.

@@ -212,10 +212,34 @@ pub trait ConnectionStore: Send + Sync {
     /// relation at all.
     fn children(&self, id: RecordId) -> Result<Vec<RecordId>, ErrorCode>;
 
-    /// A symmetric relation (e.g. `Dog`'s `littermate_of`).
-    /// `Err(ErrorCode::Unsupported)` for a domain with no symmetric
-    /// relation at all (e.g. `Order`/`Customer`).
+    /// A symmetric relation (e.g. `Dog`'s `littermate_of`). Returns the
+    /// union of every named relation this domain has, if it has more
+    /// than one — the same "no relation-type discriminant" shape
+    /// [`Request::Neighbors`] has always had. `Err(ErrorCode::Unsupported)`
+    /// for a domain with no symmetric relation at all (e.g.
+    /// `Order`/`Customer`).
     fn neighbors(&self, id: RecordId) -> Result<Vec<RecordId>, ErrorCode>;
+
+    /// `ENT2-FR-004` (ADR-0039): a symmetric relation filtered to one
+    /// named label — for a domain with more than one `SymmetricRelation`
+    /// (`Entity`, the first). `Err(ErrorCode::Malformed)` for a label
+    /// this domain doesn't have at all; `Err(ErrorCode::Unsupported)`
+    /// for a domain with no symmetric relation, matching `neighbors`'s
+    /// own convention. Every adapter with at most one relation label
+    /// implements this as `Err(ErrorCode::Unsupported)` unconditionally
+    /// — the same "not yet needed" shape `parent`/`children` had before
+    /// `Employee` needed them for real.
+    fn neighbors_by_relation(
+        &self,
+        id: RecordId,
+        relation: &str,
+    ) -> Result<Vec<RecordId>, ErrorCode>;
+
+    /// `ENT2-FR-005` (ADR-0039): every relation label this domain knows
+    /// — `[]` for a domain with no symmetric relation at all, one label
+    /// for a single-relation domain, more than one for `Entity`.
+    /// Infallible, the same shape `describe` already has.
+    fn list_relation_kinds(&self) -> Vec<String>;
 
     /// This domain's schema, for a client that doesn't know it at compile
     /// time — ADR-0011. Infallible: every `ConnectionStore` implementor
@@ -740,7 +764,8 @@ fn outcome_of(resp: &Response) -> access::Outcome {
         | Response::Hello { .. }
         | Response::Staged { .. }
         | Response::Rows { .. }
-        | Response::Groups { .. } => access::Outcome::Ok,
+        | Response::Groups { .. }
+        | Response::RelationKinds { .. } => access::Outcome::Ok,
     }
 }
 
@@ -1530,6 +1555,18 @@ pub fn dispatch<S: ConnectionStore + ?Sized>(store: &S, req: Request) -> Respons
             Ok(records) => Response::RecordList { records },
             Err(code) => err_response(code),
         },
+        // `ENT2-FR-004`/`005` (ADR-0039): gated entirely client-side,
+        // the same posture `Query`/`Aggregate` above already have — no
+        // negotiated-version check here.
+        Request::NeighborsByRelation { id, relation } => {
+            match store.neighbors_by_relation(id, &relation) {
+                Ok(records) => Response::RecordList { records },
+                Err(code) => err_response(code),
+            }
+        }
+        Request::ListRelationKinds => Response::RelationKinds {
+            kinds: store.list_relation_kinds(),
+        },
         Request::DescribeSchema => Response::Schema(store.describe()),
         // `Authenticate` is intercepted directly by `handle_connection`,
         // which has the per-connection state (and `ServeOptions`) this
@@ -2224,6 +2261,16 @@ mod tests {
         }
         fn neighbors(&self, _id: RecordId) -> Result<Vec<RecordId>, ErrorCode> {
             Err(ErrorCode::Unsupported)
+        }
+        fn neighbors_by_relation(
+            &self,
+            _id: RecordId,
+            _relation: &str,
+        ) -> Result<Vec<RecordId>, ErrorCode> {
+            Err(ErrorCode::Unsupported)
+        }
+        fn list_relation_kinds(&self) -> Vec<String> {
+            Vec::new()
         }
         fn validate_op(&self, _op: &TransactionOp) -> Result<(), ErrorCode> {
             Ok(())
