@@ -137,6 +137,10 @@ pub mod journal;
 pub mod order;
 mod pem;
 pub mod protocol;
+/// `Reminder`'s adapter — `server`-gated alone, not `server` +
+/// `research` (`RMD-FR-006`, ADR-0036): unlike `order`/`employee`,
+/// `Reminder` is real, deployable capability, not reference material.
+pub mod reminder;
 mod sql;
 
 use protocol::{

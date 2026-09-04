@@ -108,6 +108,11 @@ pub mod order_customer;
 pub mod production;
 pub mod query;
 pub(crate) mod record_blob;
+/// `Reminder` — this library's first front-door domain, not `research`-
+/// gated (`RMD-FR-001`, ADR-0036): unlike `order_customer`, this is not
+/// reference material validating the design, but real, deployable
+/// capability. See this module's own doc comment for the full account.
+pub mod reminder;
 pub(crate) mod slot_file;
 pub mod store;
 pub mod traits;
