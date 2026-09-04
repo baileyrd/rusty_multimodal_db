@@ -1,6 +1,11 @@
-# Server Entity v2 Redesign (Proposed)
+# Server Entity v2 Redesign (Accepted)
 
-- Status: **Proposed**
+- Status: **Accepted** (promoted from Proposed on 2026-09-04 — the
+  owner approved the design as proposed, `ADR-0039` option (a),
+  including `PROTOCOL_VERSION` 10's wire additions; (b) deferring the
+  wire-protocol half and (c) closing as not warranted both declined).
+  Acceptance authorizes the design; implementation follows as its own
+  unit — see `ADR-0039`'s "Acceptance and implementation" section.
 - Date: 2026-09-04
 - Related: `ADR-0038`/`docs/design/SERVER-ENTITY-INTEGRATION-VERIFICATION-DESIGN.md`
   (the verification findings this design implements, option (a)
@@ -439,3 +444,5 @@ respectively (mirroring how every pre-`Employee` adapter answered
   (`MentionedWith`) proving the `Symmetric`-forwarding fix, and two
   new wire-compatible `Request`/`Response` variants (protocol 10) for
   relation-filtered neighbor lookup and relation-kind discovery.
+- 2026-09-04: Accepted as proposed, `ADR-0039` option (a); (b) and (c)
+  declined.

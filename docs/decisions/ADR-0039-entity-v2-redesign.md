@@ -1,6 +1,11 @@
 # ADR-0039: `Entity` v2 redesign — the concrete mechanism for `ADR-0038` option (a)
 
-- Status: **Proposed**
+- Status: **Accepted** (promoted from Proposed on 2026-09-04 — the
+  owner approved option (a): the full redesign as proposed, including
+  `PROTOCOL_VERSION` 10's wire additions; (b) deferring the
+  wire-protocol half and (c) closing as not warranted both declined).
+  Acceptance authorizes the design; implementation follows as its own
+  unit — see "Acceptance and implementation" below.
 - Date: 2026-09-04
 - Deciders: baileyrd
 - Related: `docs/design/SERVER-ENTITY-V2-REDESIGN-DESIGN.md` (the full
@@ -113,3 +118,7 @@ own scope, `ADR-0037`'s client-side-traversal call left unrevisited].
   divergence named in Non-goals means even this redesign never fully
   matches `rusty_remind_me`, so stop here rather than invest further.
   Proposed in this PR.
+- 2026-09-04: accepted as proposed (option (a); (b) and (c) declined).
+  Implementation follows as `SERVER-001`'s next minor / FR (protocol
+  10), per `docs/design/SERVER-ENTITY-V2-REDESIGN-DESIGN.md`. (This
+  PR.)
