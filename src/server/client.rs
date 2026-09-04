@@ -155,6 +155,8 @@ use super::protocol::{
 };
 use super::sql;
 use super::{pem, TlsConfigError};
+use std::collections::hash_map::Entry;
+use std::collections::HashMap;
 use std::fmt;
 use std::io::{self, BufReader, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
@@ -1303,5 +1305,68 @@ impl SchemaDrivenClient {
             Response::Err { code, message } => Err(ClientError::Server(code, message)),
             _ => Err(ClientError::UnexpectedResponse("RecordList")),
         }
+    }
+
+    /// `ENT-FR-007`/`ENT-FR-008` (ADR-0037): bounded breadth-first graph
+    /// walking from `id` (included at depth `0`), built entirely
+    /// client-side over the existing [`Self::neighbors`] — no new
+    /// `Request`/`Response`, the same "new client-side capability, zero
+    /// new wire primitive" shape [`Self::query`]'s SQL parsing already
+    /// established (ADR-0034). Stops at `max_depth` hops or `max_nodes`
+    /// total visited ids, whichever comes first; both are caller-
+    /// supplied with no crate-side default, since a traversal's right
+    /// bound depends entirely on the caller's own graph and use case.
+    ///
+    /// The returned `visited: HashSet`-equivalent guard is required for
+    /// correctness, not just efficiency: a symmetric relation trivially
+    /// cycles (`A` relates to `B` relates to `A`), so an unguarded walk
+    /// never terminates. Each id's hop distance is its true shortest
+    /// path from `id`, since BFS visits ids in non-decreasing depth
+    /// order and a later, deeper rediscovery of an already-visited id
+    /// is simply skipped.
+    ///
+    /// `Err(ClientError::Unsupported("traverse"))` locally, no round
+    /// trip, if this domain's schema reports `relations.neighbors:
+    /// false` — the identical client-side gate [`Self::neighbors`]
+    /// already uses. A [`Self::neighbors`] failure mid-walk is
+    /// surfaced immediately, aborting the walk with whatever nodes it
+    /// had already collected discarded — a partial BFS result is never
+    /// returned as if complete.
+    pub fn traverse(
+        &mut self,
+        id: RecordId,
+        max_depth: usize,
+        max_nodes: usize,
+    ) -> Result<Vec<(RecordId, usize)>, ClientError> {
+        if !self.schema.relations.neighbors {
+            return Err(ClientError::Unsupported("traverse"));
+        }
+        let mut visited: HashMap<RecordId, usize> = HashMap::new();
+        visited.insert(id, 0);
+        let mut frontier = vec![id];
+        for depth in 0..max_depth {
+            if visited.len() >= max_nodes {
+                break;
+            }
+            let mut next_frontier = Vec::new();
+            for node in frontier {
+                if visited.len() >= max_nodes {
+                    break;
+                }
+                for neighbor in self.neighbors(node)? {
+                    if visited.len() >= max_nodes {
+                        break;
+                    }
+                    if let Entry::Vacant(e) = visited.entry(neighbor) {
+                        e.insert(depth + 1);
+                        next_frontier.push(neighbor);
+                    }
+                }
+            }
+            frontier = next_frontier;
+        }
+        let mut result: Vec<(RecordId, usize)> = visited.into_iter().collect();
+        result.sort_by_key(|(_, depth)| *depth);
+        Ok(result)
     }
 }

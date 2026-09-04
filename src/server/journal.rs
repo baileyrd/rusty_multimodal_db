@@ -169,6 +169,16 @@ impl CheckpointFlush for crate::generic::reminder::ReminderProductionStack {
     }
 }
 
+/// `ENT-FR-006` — not `research`-gated, matching `Reminder`'s own
+/// front-door status (`ADR-0037`): `EntityProductionStack` is
+/// `Symmetric<GenericMmapStore<..>, ..>`, which already implements
+/// `Flush` generically.
+impl CheckpointFlush for crate::generic::entity::EntityProductionStack {
+    fn checkpoint_flush(&self) -> Result<(), DurabilityError> {
+        crate::generic::store::Flush::flush(self)
+    }
+}
+
 /// One adapter's journal file, held open for appends. See the module
 /// docs for the format and the discipline.
 pub(crate) struct BatchJournal {

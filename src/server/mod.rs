@@ -131,6 +131,10 @@ pub mod client;
 pub mod dog;
 #[cfg(feature = "research")]
 pub mod employee;
+/// `Entity`'s adapter — `server`-gated alone, not `server` +
+/// `research` (`ENT-FR-006`, ADR-0037): matching `Reminder`'s own
+/// front-door precedent, not `order`/`employee`'s.
+pub mod entity;
 pub mod framing;
 pub mod journal;
 #[cfg(feature = "research")]

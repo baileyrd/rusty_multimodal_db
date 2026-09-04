@@ -95,6 +95,10 @@
 //! an unexamined regression.
 
 pub(crate) mod edge_blob;
+/// `Entity` — this library's second front-door domain (`ENT-FR-001`,
+/// ADR-0037), and its first with a `SymmetricRelation`. See this
+/// module's own doc comment for the full account.
+pub mod entity;
 pub mod mmap_field;
 pub mod mmap_scanned;
 pub mod mmap_store;
