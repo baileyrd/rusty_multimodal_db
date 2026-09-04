@@ -149,9 +149,9 @@
 
 use super::framing::{self, FrameError};
 use super::protocol::{
-    DomainSchema, ErrorCode, FieldDescriptor, FieldRef, ParentLookup, Predicate, RecordId, Request,
-    Response, ScanValue, Selection, ValueKind, PROTOCOL_VERSION, SESSION_READ_YOUR_WRITES,
-    SESSION_SNAPSHOT_ISOLATION, SESSION_VALIDATE_ON_STAGE,
+    AggregateFn, AggregateSpec, DomainSchema, ErrorCode, FieldDescriptor, FieldRef, ParentLookup,
+    Predicate, RecordId, Request, Response, ScanValue, Selection, ValueKind, PROTOCOL_VERSION,
+    SESSION_READ_YOUR_WRITES, SESSION_SNAPSHOT_ISOLATION, SESSION_VALIDATE_ON_STAGE,
 };
 use super::sql;
 use super::{pem, TlsConfigError};
@@ -566,13 +566,13 @@ impl Session<'_> {
 
     /// [`SchemaDrivenClient::query`] through this session — a `Session`
     /// borrows the client mutably, so this is the only way to run a
-    /// `Query` while one is open. Unlike [`Session::get`], this is
-    /// **never** overlaid with the session's own staged writes and
-    /// **never** tracked into a snapshot-isolated session's read set —
-    /// `Query` is a set-shaped read, the same "only `GetById`" line
-    /// `RYW-FR`/`ISO-FR-002` already draw (`SQL-FR-009`, ADR-0034):
-    /// always committed state, on every session kind.
-    pub fn query(&mut self, sql: &str) -> Result<Vec<QueryRow>, ClientError> {
+    /// `Query`/`Aggregate` while one is open. Unlike [`Session::get`],
+    /// this is **never** overlaid with the session's own staged writes
+    /// and **never** tracked into a snapshot-isolated session's read set
+    /// — both are set-shaped reads, the same "only `GetById`" line
+    /// `RYW-FR`/`ISO-FR-002` already draw (`SQL-FR-009`/`AGG-FR-009`,
+    /// ADR-0034/ADR-0035): always committed state, on every session kind.
+    pub fn query(&mut self, sql: &str) -> Result<QueryResult, ClientError> {
         self.client.query(sql)
     }
 
@@ -612,11 +612,47 @@ impl Drop for Session<'_> {
     }
 }
 
-/// One [`SchemaDrivenClient::query`] result row: the record's id and its
-/// selected fields, named not tagged — named purely to keep that
-/// method's own signature readable, not a type a caller needs to spell
-/// out.
+/// One [`QueryResult::Rows`] row: the record's id and its selected
+/// fields, named not tagged — named purely to keep that variant's own
+/// shape readable, not a type a caller needs to spell out.
 pub type QueryRow = (RecordId, Vec<(String, ScanValue)>);
+
+/// One [`QueryResult::Groups`] row: one group's `GROUP BY` key values and
+/// computed aggregate values, named and ordered exactly as the original
+/// `SELECT` list — not the wire's own `key`/`values` split, which the
+/// SQL text never has to mirror (`SELECT breed, COUNT(*) FROM dog GROUP
+/// BY breed` puts `breed` before `COUNT(*)` in the output regardless of
+/// which order `Request::Aggregate` carries them in). `AGG-FR-002`,
+/// ADR-0035.
+pub type AggregateRow = Vec<(String, ScanValue)>;
+
+/// [`SchemaDrivenClient::query`]'s result. A parsed query with no
+/// aggregate column and no `GROUP BY` clause compiles to
+/// `Request::Query` and answers [`QueryResult::Rows`], exactly as
+/// `ADR-0034` already does; one using either compiles to
+/// `Request::Aggregate` and answers [`QueryResult::Groups`] instead. The
+/// two response shapes genuinely differ — a group has no [`RecordId`],
+/// so there is no honest way to force it into a [`QueryRow`] — this is a
+/// real sum type, not a synthetic id or a second method duplicating this
+/// one's own name resolution. `AGG-FR-002`, ADR-0035.
+#[derive(Debug, Clone, PartialEq)]
+pub enum QueryResult {
+    Rows(Vec<QueryRow>),
+    Groups(Vec<AggregateRow>),
+}
+
+/// The SQL keyword an [`AggregateFn`] parses from — used to build a
+/// synthesized output column label (`SUM(amount)`) and error messages,
+/// the same text a caller would have typed. `AGG-FR-002`, ADR-0035.
+fn aggregate_fn_name(func: AggregateFn) -> &'static str {
+    match func {
+        AggregateFn::Count => "COUNT",
+        AggregateFn::Sum => "SUM",
+        AggregateFn::Avg => "AVG",
+        AggregateFn::Min => "MIN",
+        AggregateFn::Max => "MAX",
+    }
+}
 
 /// [`SchemaDrivenClient::query`]'s own resolution step (`SQL-FR-002`):
 /// turn one parsed `WHERE`-clause literal into the [`ScanValue`] its
@@ -987,41 +1023,190 @@ impl SchemaDrivenClient {
         }
     }
 
-    /// A real, minimal SQL `SELECT` — tokenized and parsed entirely
-    /// client-side, never sent as text on the wire (`SQL-FR-001`/`002`/
-    /// `003`, ADR-0034; see `src/server/sql.rs`'s own grammar and
-    /// `docs/design/SERVER-SQL-SELECT-DESIGN.md`). `Ok(rows)` names
-    /// every matching id and its selected fields, named not tagged, in
-    /// whatever unspecified order the server returned them — the same
-    /// "no meaningful order" convention `get`/`scan` already carry (no
-    /// `ORDER BY`). A syntax error (`ClientError::Sql`), an unknown
+    /// A real, minimal SQL `SELECT`/`GROUP BY`/aggregate-function query —
+    /// tokenized and parsed entirely client-side, never sent as text on
+    /// the wire (`SQL-FR-001`/`002`/`003`, ADR-0034; `AGG-FR-001`–`003`,
+    /// ADR-0035; see `src/server/sql.rs`'s own grammar and each design
+    /// document). A parsed query with no aggregate column and no `GROUP
+    /// BY` clause compiles to `Request::Query` and answers
+    /// [`QueryResult::Rows`], exactly as `ADR-0034` already does — zero
+    /// change to that path; one using either compiles to
+    /// `Request::Aggregate` and answers [`QueryResult::Groups`] instead
+    /// (`AGG-FR-002`). A syntax error (`ClientError::Sql`), an unknown
     /// column (`ClientError::UnknownField`, matching every other
-    /// name-addressed method), a `WHERE` literal that doesn't match its
-    /// field's real type, or an ordering comparator (`<`/`<=`/`>`/`>=`)
-    /// against a `Str`/`Bool` field are each resolved — and rejected,
-    /// where invalid — entirely client-side, no round trip. Requires a
-    /// server negotiated at protocol version 8 or later —
-    /// `ClientError::Unsupported("sql query")`, no frame sent, otherwise
-    /// (`SQL-FR-010`).
-    pub fn query(&mut self, sql: &str) -> Result<Vec<QueryRow>, ClientError> {
-        if self.server_protocol_version < 8 {
-            return Err(ClientError::Unsupported("sql query"));
-        }
+    /// name-addressed method), a `WHERE`/aggregate-argument literal or
+    /// field kind that doesn't fit, an ordering comparator against a
+    /// `Str`/`Bool` field, a plain `SELECT`-list column missing from
+    /// `GROUP BY`, or `SELECT *` alongside `GROUP BY`/an aggregate
+    /// column are each resolved — and rejected, where invalid — entirely
+    /// client-side, no round trip. A plain query needs protocol version
+    /// 8 or later; one using `GROUP BY`/an aggregate function needs
+    /// version 9 — `ClientError::Unsupported("sql query"/"sql
+    /// aggregate")`, no frame sent, otherwise (`SQL-FR-010`,
+    /// `AGG-FR-010`).
+    pub fn query(&mut self, sql: &str) -> Result<QueryResult, ClientError> {
         let parsed = sql::parse(sql).map_err(|e| ClientError::Sql(e.to_string()))?;
+        let is_aggregate = !parsed.group_by.is_empty()
+            || matches!(&parsed.columns, sql::ParsedColumns::Named(items)
+                if items.iter().any(|item| matches!(item, sql::ParsedColumnItem::Aggregate { .. })));
 
+        if is_aggregate {
+            self.query_aggregate(parsed).map(QueryResult::Groups)
+        } else {
+            if self.server_protocol_version < 8 {
+                return Err(ClientError::Unsupported("sql query"));
+            }
+            self.query_rows(parsed).map(QueryResult::Rows)
+        }
+    }
+
+    fn query_rows(&mut self, parsed: sql::ParsedQuery) -> Result<Vec<QueryRow>, ClientError> {
         let select = match parsed.columns {
             sql::ParsedColumns::All => Selection::All,
-            sql::ParsedColumns::Named(names) => {
-                let mut tags: Vec<FieldRef> = Vec::with_capacity(names.len());
-                for name in &names {
+            sql::ParsedColumns::Named(items) => {
+                let mut tags: Vec<FieldRef> = Vec::with_capacity(items.len());
+                for item in &items {
+                    let sql::ParsedColumnItem::Plain(name) = item else {
+                        unreachable!("query() routes any aggregate column to query_aggregate")
+                    };
                     tags.push(self.field(name)?.tag);
                 }
                 Selection::Fields(tags)
             }
         };
+        let filter = self.resolve_filter(&parsed.conditions)?;
 
-        let mut filter = Vec::with_capacity(parsed.conditions.len());
-        for condition in &parsed.conditions {
+        match self.roundtrip(Request::Query {
+            select,
+            filter,
+            limit: parsed.limit,
+        })? {
+            Response::Rows { rows } => Ok(rows
+                .into_iter()
+                .map(|(id, fields)| {
+                    let named = fields
+                        .into_iter()
+                        .map(|(tag, value)| (self.field_name(tag), value))
+                        .collect();
+                    (id, named)
+                })
+                .collect()),
+            Response::Err { code, message } => Err(ClientError::Server(code, message)),
+            _ => Err(ClientError::UnexpectedResponse("Rows")),
+        }
+    }
+
+    /// `AGG-FR-002`/`003`/`010`: compiles a `GROUP BY`/aggregate-bearing
+    /// `ParsedQuery` to `Request::Aggregate` and translates
+    /// `Response::Groups` back to [`AggregateRow`]s in the original
+    /// `SELECT`-list order — not the wire's own `key`/`values` split.
+    fn query_aggregate(
+        &mut self,
+        parsed: sql::ParsedQuery,
+    ) -> Result<Vec<AggregateRow>, ClientError> {
+        if self.server_protocol_version < 9 {
+            return Err(ClientError::Unsupported("sql aggregate"));
+        }
+        let items = match parsed.columns {
+            sql::ParsedColumns::Named(items) => items,
+            sql::ParsedColumns::All => {
+                return Err(ClientError::Sql(
+                    "SELECT * cannot be combined with GROUP BY or an aggregate function".into(),
+                ))
+            }
+        };
+
+        let mut group_by = Vec::with_capacity(parsed.group_by.len());
+        for name in &parsed.group_by {
+            group_by.push(self.field(name)?.tag);
+        }
+
+        enum OutputColumn {
+            Key(String, FieldRef),
+            Agg(String, usize),
+        }
+        let mut aggregates: Vec<AggregateSpec> = Vec::new();
+        let mut plan: Vec<OutputColumn> = Vec::with_capacity(items.len());
+        for item in items {
+            match item {
+                sql::ParsedColumnItem::Plain(name) => {
+                    if !parsed.group_by.contains(&name) {
+                        return Err(ClientError::Sql(format!(
+                            "{name}: every non-aggregated column must also appear in GROUP BY"
+                        )));
+                    }
+                    let tag = self.field(&name)?.tag;
+                    plan.push(OutputColumn::Key(name, tag));
+                }
+                sql::ParsedColumnItem::Aggregate { func, arg } => {
+                    let (arg_label, field) = match arg {
+                        sql::AggregateArg::Star => ("*".to_string(), None),
+                        sql::AggregateArg::Field(name) => {
+                            let descriptor = self.field(&name)?;
+                            let kind = descriptor.value_kind;
+                            if !matches!(kind, ValueKind::U32 | ValueKind::I64) {
+                                return Err(ClientError::Sql(format!(
+                                    "{name}: {} needs a U32 or I64 field, not {kind:?}",
+                                    aggregate_fn_name(func)
+                                )));
+                            }
+                            (name.clone(), Some(descriptor.tag))
+                        }
+                    };
+                    let label = format!("{}({arg_label})", aggregate_fn_name(func));
+                    let index = aggregates.len();
+                    aggregates.push(AggregateSpec { func, field });
+                    plan.push(OutputColumn::Agg(label, index));
+                }
+            }
+        }
+
+        let filter = self.resolve_filter(&parsed.conditions)?;
+
+        match self.roundtrip(Request::Aggregate {
+            group_by,
+            filter,
+            aggregates,
+            limit: parsed.limit,
+        })? {
+            Response::Groups { groups } => Ok(groups
+                .into_iter()
+                .map(|group| {
+                    plan.iter()
+                        .map(|column| match column {
+                            OutputColumn::Key(label, tag) => {
+                                let value = group
+                                    .key
+                                    .iter()
+                                    .find(|(t, _)| t == tag)
+                                    .map(|(_, v)| v.clone())
+                                    .expect(
+                                        "evaluate_aggregate echoes every requested group_by field",
+                                    );
+                                (label.clone(), value)
+                            }
+                            OutputColumn::Agg(label, index) => {
+                                (label.clone(), group.values[*index].clone())
+                            }
+                        })
+                        .collect()
+                })
+                .collect()),
+            Response::Err { code, message } => Err(ClientError::Server(code, message)),
+            _ => Err(ClientError::UnexpectedResponse("Groups")),
+        }
+    }
+
+    /// Shared by [`SchemaDrivenClient::query_rows`] and
+    /// [`SchemaDrivenClient::query_aggregate`]: `WHERE`-clause resolution
+    /// is identical either way (`SQL-FR-002`) — `Request::Aggregate`
+    /// reuses `Predicate`/`CompareOp` from `Request::Query` unchanged.
+    fn resolve_filter(
+        &self,
+        conditions: &[sql::ParsedCondition],
+    ) -> Result<Vec<Predicate>, ClientError> {
+        let mut filter = Vec::with_capacity(conditions.len());
+        for condition in conditions {
             let field = self.field(&condition.name)?;
             let tag = field.tag;
             let kind = field.value_kind;
@@ -1038,34 +1223,20 @@ impl SchemaDrivenClient {
                 value,
             });
         }
+        Ok(filter)
+    }
 
-        match self.roundtrip(Request::Query {
-            select,
-            filter,
-            limit: parsed.limit,
-        })? {
-            Response::Rows { rows } => Ok(rows
-                .into_iter()
-                .map(|(id, fields)| {
-                    let named = fields
-                        .into_iter()
-                        .map(|(tag, value)| {
-                            let name = self
-                                .schema
-                                .fields
-                                .iter()
-                                .find(|f| f.tag == tag)
-                                .map(|f| f.name.clone())
-                                .unwrap_or_else(|| tag.to_string());
-                            (name, value)
-                        })
-                        .collect();
-                    (id, named)
-                })
-                .collect()),
-            Response::Err { code, message } => Err(ClientError::Server(code, message)),
-            _ => Err(ClientError::UnexpectedResponse("Rows")),
-        }
+    /// A field's name, for a tag [`DomainSchema`] describes — falls back
+    /// to the bare tag only for a tag the schema doesn't (which never
+    /// happens through a real server, since every returned tag came from
+    /// this same schema).
+    fn field_name(&self, tag: FieldRef) -> String {
+        self.schema
+            .fields
+            .iter()
+            .find(|f| f.tag == tag)
+            .map(|f| f.name.clone())
+            .unwrap_or_else(|| tag.to_string())
     }
 
     /// `Ok(true)` if `id` was found and updated, `Ok(false)` if `id` has

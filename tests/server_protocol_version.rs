@@ -257,7 +257,7 @@ fn hello_zero_and_a_late_hello_are_malformed_and_a_silent_client_is_served() {
 fn schema_driven_client_negotiates_the_current_version_on_every_domain() {
     let mut dog = SchemaDrivenClient::connect(start_dog_server(ServeOptions::default())).unwrap();
     assert_eq!(dog.server_protocol_version(), PROTOCOL_VERSION);
-    assert_eq!(dog.server_protocol_version(), 8);
+    assert_eq!(dog.server_protocol_version(), 9);
     let fields = dog.get(Uuid::from_u128(1)).unwrap().unwrap();
     assert!(fields
         .iter()
@@ -275,18 +275,20 @@ fn schema_driven_client_negotiates_the_current_version_on_every_domain() {
 /// Criterion 8: a request index this build does not know (the one just
 /// past `Rollback`, the highest at protocol version 3) is a decode error,
 /// and the connection closes with no reply — the pre-hello failure mode,
-/// unchanged and pinned. This test has moved three times: when version 3
-/// appended 11–13 (ADR-0024), when version 5 appended 14 (ADR-0027), and
-/// when version 8 appended `Query` at 15 (ADR-0034); the next version
-/// that appends a variant moves it again.
+/// unchanged and pinned. This test has moved four times: when version 3
+/// appended 11–13 (ADR-0024), when version 5 appended 14 (ADR-0027), when
+/// version 8 appended `Query` at 15 (ADR-0034), and when version 9
+/// appended `Aggregate` at 16 (ADR-0035); the next version that appends a
+/// variant moves it again.
 #[test]
 fn an_unknown_request_index_closes_the_connection_without_a_reply() {
     let addr = start_dog_server(ServeOptions::default());
     let (mut reader, mut writer) = connect(addr);
 
     // Frame: u32 LE length 4, then a `Request` whose declaration index is
-    // 16 — one past `Request::Query` (15), the highest this build knows.
-    writer.write_all(&[0x04, 0, 0, 0, 0x10, 0, 0, 0]).unwrap();
+    // 17 — one past `Request::Aggregate` (16), the highest this build
+    // knows.
+    writer.write_all(&[0x04, 0, 0, 0, 0x11, 0, 0, 0]).unwrap();
     writer.flush().unwrap();
 
     let reply: Result<Response, _> = read_message(&mut reader);

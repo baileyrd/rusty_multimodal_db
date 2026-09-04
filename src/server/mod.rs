@@ -140,10 +140,10 @@ pub mod protocol;
 mod sql;
 
 use protocol::{
-    CompareOp, DomainSchema, ErrorCode, FieldRef, ParentLookup, Predicate, RecordId, Request,
-    Response, ScanValue, Selection, TransactionOp, MAX_STAGED_OPS, MAX_TRACKED_READS,
-    PROTOCOL_VERSION, SESSION_READ_YOUR_WRITES, SESSION_SNAPSHOT_ISOLATION,
-    SESSION_VALIDATE_ON_STAGE,
+    AggregateFn, AggregateGroup, AggregateSpec, CompareOp, DomainSchema, ErrorCode, FieldRef,
+    ParentLookup, Predicate, RecordId, Request, Response, ScanValue, Selection, TransactionOp,
+    MAX_STAGED_OPS, MAX_TRACKED_READS, PROTOCOL_VERSION, SESSION_READ_YOUR_WRITES,
+    SESSION_SNAPSHOT_ISOLATION, SESSION_VALIDATE_ON_STAGE,
 };
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -461,6 +461,217 @@ fn select_fields(
     }
 }
 
+/// `AGG-FR-006` (ADR-0035): every rejection `Request::Aggregate` can
+/// produce, checked against `schema` alone — before
+/// `ConnectionStore::scan_all` ever runs. `filter` is validated exactly
+/// like `Request::Query`'s own filter (`validate_query`'s identical
+/// checks). An unknown tag in `group_by` or an `AggregateSpec::field` is
+/// `ErrorCode::UnknownField`; a `Count` whose `field` is `Some(_)` (only
+/// `COUNT(*)` is supported — this schema has no `NULL` concept, so
+/// `COUNT(field)` would be unconditionally identical), or a
+/// `Sum`/`Avg`/`Min`/`Max` with no field or a non-`U32`/`I64` field (the
+/// identical "orderable kind" rule `CompareOp::is_ordering` already
+/// established), is `ErrorCode::Malformed`.
+fn validate_aggregate(
+    schema: &DomainSchema,
+    group_by: &[FieldRef],
+    filter: &[Predicate],
+    aggregates: &[AggregateSpec],
+) -> Result<(), ErrorCode> {
+    let kind_of = |tag: FieldRef| {
+        schema
+            .fields
+            .iter()
+            .find(|f| f.tag == tag)
+            .map(|f| f.value_kind)
+    };
+    for &tag in group_by {
+        if kind_of(tag).is_none() {
+            return Err(ErrorCode::UnknownField);
+        }
+    }
+    for predicate in filter {
+        let kind = kind_of(predicate.field).ok_or(ErrorCode::UnknownField)?;
+        if !value_matches_kind(kind, &predicate.value) {
+            return Err(ErrorCode::Malformed);
+        }
+        let orderable_kind = matches!(kind, protocol::ValueKind::U32 | protocol::ValueKind::I64);
+        if predicate.op.is_ordering() && !orderable_kind {
+            return Err(ErrorCode::Malformed);
+        }
+    }
+    for spec in aggregates {
+        match (spec.func, spec.field) {
+            (AggregateFn::Count, None) => {}
+            (AggregateFn::Count, Some(_)) => return Err(ErrorCode::Malformed),
+            (_, None) => return Err(ErrorCode::Malformed),
+            (_, Some(tag)) => {
+                let kind = kind_of(tag).ok_or(ErrorCode::UnknownField)?;
+                if !matches!(kind, protocol::ValueKind::U32 | protocol::ValueKind::I64) {
+                    return Err(ErrorCode::Malformed);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `AGG-FR-007`/`AGG-FR-008` (ADR-0035): filter, bucket, and reduce
+/// `rows` — the one place this logic is written, shared by every
+/// domain's `Request::Aggregate` (`scan_all`'s result is unfiltered and
+/// unbucketed). `filter` reuses `predicate_matches` unchanged; `group_by`
+/// empty means exactly one implicit bucket over every filtered row (the
+/// `SELECT COUNT(*) FROM t` case with no `GROUP BY`) — that bucket always
+/// exists, even holding zero rows (`SELECT COUNT(*) FROM t WHERE false`-
+/// equivalent still returns one group whose `Count` is `0`, acceptance
+/// criterion 4); a *keyed* bucket (`group_by` non-empty) whose key
+/// matches zero rows never appears, since there is no key to have not
+/// matched. `limit` truncates the *group* count, applied after the full
+/// reduction — the same "bounds the response, not the work" shape
+/// `evaluate_query`'s own `limit` already has. `schema` resolves each
+/// `Sum`/`Avg`/`Min`/`Max` field's `ValueKind` for the one case a real
+/// observed value can't: the implicit whole-table bucket with zero rows.
+fn evaluate_aggregate(
+    rows: Vec<(RecordId, Vec<(FieldRef, ScanValue)>)>,
+    group_by: &[FieldRef],
+    filter: &[Predicate],
+    aggregates: &[AggregateSpec],
+    limit: Option<usize>,
+    schema: &DomainSchema,
+) -> Vec<AggregateGroup> {
+    type RowFields = Vec<(FieldRef, ScanValue)>;
+    let mut buckets: Vec<(RowFields, Vec<RowFields>)> = if group_by.is_empty() {
+        vec![(Vec::new(), Vec::new())]
+    } else {
+        Vec::new()
+    };
+    for (_, fields) in rows
+        .into_iter()
+        .filter(|(_, fields)| filter.iter().all(|p| predicate_matches(fields, p)))
+    {
+        let key: Vec<(FieldRef, ScanValue)> = group_by
+            .iter()
+            .filter_map(|&tag| fields.iter().find(|(f, _)| *f == tag).cloned())
+            .collect();
+        match buckets.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, group_rows)) => group_rows.push(fields),
+            None => buckets.push((key, vec![fields])),
+        }
+    }
+    let mut groups: Vec<AggregateGroup> = buckets
+        .into_iter()
+        .map(|(key, group_rows)| AggregateGroup {
+            key,
+            values: aggregates
+                .iter()
+                .map(|spec| reduce(spec, &group_rows, schema))
+                .collect(),
+        })
+        .collect();
+    if let Some(limit) = limit {
+        groups.truncate(limit);
+    }
+    groups
+}
+
+/// One `AggregateSpec`'s result over one bucket's rows — `AGG-FR-008`.
+/// `validate_aggregate` already guarantees `Sum`/`Avg`/`Min`/`Max` carry
+/// a field of `U32`/`I64` kind, and `Count` carries none. `rows` is empty
+/// only for the implicit whole-table bucket when no row matched `filter`
+/// (`evaluate_aggregate`'s own doc comment) — `Sum` and `Avg` are already
+/// well-defined there (an empty sum is `0`, an empty average is defined
+/// as `0.0` by this schema's own choice, since it has no `NULL` to return
+/// instead); `Min`/`Max` have no real observed value to pass through, so
+/// they fall back to `schema`-typed zero rather than panicking.
+fn reduce(
+    spec: &AggregateSpec,
+    rows: &[Vec<(FieldRef, ScanValue)>],
+    schema: &DomainSchema,
+) -> ScanValue {
+    const FIELD_REQUIRED: &str = "validate_aggregate requires a field for Sum/Avg/Min/Max";
+    match spec.func {
+        AggregateFn::Count => ScanValue::I64(rows.len() as i64),
+        AggregateFn::Sum => {
+            let field = spec.field.expect(FIELD_REQUIRED);
+            ScanValue::I64(field_values(field, rows).map(|v| numeric_i64(&v)).sum())
+        }
+        AggregateFn::Avg => {
+            let field = spec.field.expect(FIELD_REQUIRED);
+            let values: Vec<i64> = field_values(field, rows).map(|v| numeric_i64(&v)).collect();
+            if values.is_empty() {
+                ScanValue::F64(0.0)
+            } else {
+                let sum: i64 = values.iter().sum();
+                ScanValue::F64(sum as f64 / values.len() as f64)
+            }
+        }
+        AggregateFn::Min => reduce_extreme(spec.field.expect(FIELD_REQUIRED), rows, false, schema),
+        AggregateFn::Max => reduce_extreme(spec.field.expect(FIELD_REQUIRED), rows, true, schema),
+    }
+}
+
+fn field_values<'a>(
+    field: FieldRef,
+    rows: &'a [Vec<(FieldRef, ScanValue)>],
+) -> impl Iterator<Item = ScanValue> + 'a {
+    rows.iter()
+        .filter_map(move |fields| fields.iter().find(|(f, _)| *f == field))
+        .map(|(_, v)| v.clone())
+}
+
+fn numeric_i64(value: &ScanValue) -> i64 {
+    match value {
+        ScanValue::U32(n) => i64::from(*n),
+        ScanValue::I64(n) => *n,
+        other => unreachable!(
+            "validate_aggregate only allows U32/I64 fields for Sum/Avg/Min/Max, got {other:?}"
+        ),
+    }
+}
+
+/// The actual observed `ScanValue` with the largest (`want_max`) or
+/// smallest numeric value in `rows` for `field` — a passthrough of a
+/// real stored value, never promoted or converted, unlike `Sum`/`Avg`.
+/// `rows` is empty only for the implicit whole-table bucket with no
+/// matching row (`reduce`'s own doc comment): there is no real value to
+/// pass through, so this falls back to a `schema`-typed zero
+/// (`ScanValue::U32(0)`/`ScanValue::I64(0)` matching `field`'s declared
+/// kind) rather than panicking on an empty iterator.
+fn reduce_extreme(
+    field: FieldRef,
+    rows: &[Vec<(FieldRef, ScanValue)>],
+    want_max: bool,
+    schema: &DomainSchema,
+) -> ScanValue {
+    let mut values = field_values(field, rows);
+    let mut best = match values.next() {
+        Some(first) => first,
+        None => {
+            let kind = schema
+                .fields
+                .iter()
+                .find(|f| f.tag == field)
+                .map(|f| f.value_kind)
+                .expect("validate_aggregate already confirmed this field exists in schema");
+            return match kind {
+                protocol::ValueKind::U32 => ScanValue::U32(0),
+                _ => ScanValue::I64(0),
+            };
+        }
+    };
+    for v in values {
+        let replace = if want_max {
+            numeric_i64(&v) > numeric_i64(&best)
+        } else {
+            numeric_i64(&v) < numeric_i64(&best)
+        };
+        if replace {
+            best = v;
+        }
+    }
+    best
+}
+
 /// Compatibility rule 3's "nearest older shape" (`protocol.rs`): a
 /// response carrying a variant introduced after the connection's
 /// negotiated version is rewritten before it is sent. Two cases exist —
@@ -520,7 +731,8 @@ fn outcome_of(resp: &Response) -> access::Outcome {
         | Response::Ok
         | Response::Hello { .. }
         | Response::Staged { .. }
-        | Response::Rows { .. } => access::Outcome::Ok,
+        | Response::Rows { .. }
+        | Response::Groups { .. } => access::Outcome::Ok,
     }
 }
 
@@ -1266,6 +1478,31 @@ pub fn dispatch<S: ConnectionStore + ?Sized>(store: &S, req: Request) -> Respons
             },
             Err(code) => err_response(code),
         },
+        // `AGG-FR-006`/`AGG-FR-009` (ADR-0035): the same validate-then-scan
+        // shape `Query` above uses, and the same "never overlaid, never
+        // read-set-tracked" posture — `Aggregate` never reaches the
+        // `GetById`-keyed session intercepts in `handle_connection` either.
+        Request::Aggregate {
+            group_by,
+            filter,
+            aggregates,
+            limit,
+        } => {
+            let schema = store.describe();
+            match validate_aggregate(&schema, &group_by, &filter, &aggregates) {
+                Ok(()) => Response::Groups {
+                    groups: evaluate_aggregate(
+                        store.scan_all(),
+                        &group_by,
+                        &filter,
+                        &aggregates,
+                        limit,
+                        &schema,
+                    ),
+                },
+                Err(code) => err_response(code),
+            }
+        }
         Request::UpdateField { id, field, value } => match store.update_field(id, field, value) {
             Ok(true) => Response::Ok,
             Ok(false) => Response::NotFound,
@@ -2677,6 +2914,291 @@ mod tests {
         assert_eq!(unbounded.len(), 3);
         let zero = evaluate_query(sql_test_rows(), &Selection::All, &[], Some(0));
         assert!(zero.is_empty());
+    }
+
+    /// `AGG-FR-006`: an unknown field in `group_by` or an `AggregateSpec`
+    /// is `UnknownField`; `Count` with an explicit field, `Sum`/`Avg`/
+    /// `Min`/`Max` with no field, and `Sum`/`Avg`/`Min`/`Max` against
+    /// `breed` (`Str`, non-orderable) are each `Malformed`; a fully valid
+    /// spec is `Ok`.
+    #[test]
+    fn validate_aggregate_reports_unknown_fields_and_malformed_specs() {
+        let schema = sql_test_schema();
+        assert_eq!(
+            validate_aggregate(&schema, &[99], &[], &[]),
+            Err(ErrorCode::UnknownField),
+            "unknown field in group_by"
+        );
+        assert_eq!(
+            validate_aggregate(
+                &schema,
+                &[],
+                &[],
+                &[AggregateSpec {
+                    func: AggregateFn::Sum,
+                    field: Some(99),
+                }]
+            ),
+            Err(ErrorCode::UnknownField),
+            "unknown field in an AggregateSpec"
+        );
+        assert_eq!(
+            validate_aggregate(
+                &schema,
+                &[],
+                &[],
+                &[AggregateSpec {
+                    func: AggregateFn::Count,
+                    field: Some(1),
+                }]
+            ),
+            Err(ErrorCode::Malformed),
+            "COUNT with an explicit field"
+        );
+        for func in [
+            AggregateFn::Sum,
+            AggregateFn::Avg,
+            AggregateFn::Min,
+            AggregateFn::Max,
+        ] {
+            assert_eq!(
+                validate_aggregate(&schema, &[], &[], &[AggregateSpec { func, field: None }]),
+                Err(ErrorCode::Malformed),
+                "{func:?} with no field"
+            );
+            assert_eq!(
+                validate_aggregate(
+                    &schema,
+                    &[],
+                    &[],
+                    &[AggregateSpec {
+                        func,
+                        field: Some(2),
+                    }]
+                ),
+                Err(ErrorCode::Malformed),
+                "{func:?} against a Str field"
+            );
+        }
+        assert_eq!(
+            validate_aggregate(
+                &schema,
+                &[2],
+                &[],
+                &[
+                    AggregateSpec {
+                        func: AggregateFn::Count,
+                        field: None,
+                    },
+                    AggregateSpec {
+                        func: AggregateFn::Sum,
+                        field: Some(1),
+                    }
+                ]
+            ),
+            Ok(()),
+            "GROUP BY breed, COUNT(*), SUM(age) is valid"
+        );
+    }
+
+    /// `AGG-FR-007`: `group_by` empty means exactly one implicit bucket
+    /// over every filtered row; a filter matching nothing produces zero
+    /// groups when `group_by` is non-empty, or one group whose `Count` is
+    /// `0` when `group_by` is empty.
+    #[test]
+    fn evaluate_aggregate_group_by_empty_vs_grouped_and_a_filter_matching_nothing() {
+        let whole_table = evaluate_aggregate(
+            sql_test_rows(),
+            &[],
+            &[],
+            &[AggregateSpec {
+                func: AggregateFn::Count,
+                field: None,
+            }],
+            None,
+            &sql_test_schema(),
+        );
+        assert_eq!(whole_table.len(), 1);
+        assert!(whole_table[0].key.is_empty());
+        assert_eq!(whole_table[0].values, vec![ScanValue::I64(3)]);
+
+        let grouped = evaluate_aggregate(
+            sql_test_rows(),
+            &[2],
+            &[],
+            &[AggregateSpec {
+                func: AggregateFn::Count,
+                field: None,
+            }],
+            None,
+            &sql_test_schema(),
+        );
+        assert_eq!(grouped.len(), 2, "labrador and poodle");
+
+        let no_group_by_no_match = evaluate_aggregate(
+            sql_test_rows(),
+            &[],
+            &[Predicate {
+                field: 1,
+                op: CompareOp::Gt,
+                value: ScanValue::U32(100),
+            }],
+            &[AggregateSpec {
+                func: AggregateFn::Count,
+                field: None,
+            }],
+            None,
+            &sql_test_schema(),
+        );
+        assert_eq!(no_group_by_no_match.len(), 1);
+        assert!(no_group_by_no_match[0].key.is_empty());
+        assert_eq!(no_group_by_no_match[0].values, vec![ScanValue::I64(0)]);
+
+        let grouped_no_match = evaluate_aggregate(
+            sql_test_rows(),
+            &[2],
+            &[Predicate {
+                field: 1,
+                op: CompareOp::Gt,
+                value: ScanValue::U32(100),
+            }],
+            &[AggregateSpec {
+                func: AggregateFn::Count,
+                field: None,
+            }],
+            None,
+            &sql_test_schema(),
+        );
+        assert!(grouped_no_match.is_empty());
+    }
+
+    /// The implicit whole-table bucket's `Min`/`Max`/`Avg` on zero
+    /// matching rows fall back to a `schema`-typed zero rather than
+    /// panicking — the one case `AGG-FR-008`'s "a group with zero rows
+    /// never appears" guarantee does not cover, since this group is the
+    /// deliberate exception (acceptance criterion 4).
+    #[test]
+    fn evaluate_aggregate_min_max_avg_on_an_empty_implicit_bucket_do_not_panic() {
+        let groups = evaluate_aggregate(
+            sql_test_rows(),
+            &[],
+            &[Predicate {
+                field: 1,
+                op: CompareOp::Gt,
+                value: ScanValue::U32(100),
+            }],
+            &[
+                AggregateSpec {
+                    func: AggregateFn::Sum,
+                    field: Some(1),
+                },
+                AggregateSpec {
+                    func: AggregateFn::Avg,
+                    field: Some(1),
+                },
+                AggregateSpec {
+                    func: AggregateFn::Min,
+                    field: Some(1),
+                },
+                AggregateSpec {
+                    func: AggregateFn::Max,
+                    field: Some(1),
+                },
+            ],
+            None,
+            &sql_test_schema(),
+        );
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].values[0], ScanValue::I64(0), "SUM");
+        assert_eq!(groups[0].values[1], ScanValue::F64(0.0), "AVG");
+        assert_eq!(groups[0].values[2], ScanValue::U32(0), "MIN, age is U32");
+        assert_eq!(groups[0].values[3], ScanValue::U32(0), "MAX, age is U32");
+    }
+
+    /// `AGG-FR-008`: every aggregate function's reduction, including the
+    /// `Sum`/`Count`-vs-`Avg` cross-check acceptance criterion 6 names —
+    /// `AVG` equals that same group's `SUM` divided by its `COUNT`.
+    #[test]
+    fn evaluate_aggregate_every_function_reduces_correctly() {
+        // Grouped by breed: labrador = {age 3, age 9}, poodle = {age 5}.
+        let groups = evaluate_aggregate(
+            sql_test_rows(),
+            &[2],
+            &[],
+            &[
+                AggregateSpec {
+                    func: AggregateFn::Count,
+                    field: None,
+                },
+                AggregateSpec {
+                    func: AggregateFn::Sum,
+                    field: Some(1),
+                },
+                AggregateSpec {
+                    func: AggregateFn::Avg,
+                    field: Some(1),
+                },
+                AggregateSpec {
+                    func: AggregateFn::Min,
+                    field: Some(1),
+                },
+                AggregateSpec {
+                    func: AggregateFn::Max,
+                    field: Some(1),
+                },
+            ],
+            None,
+            &sql_test_schema(),
+        );
+        assert_eq!(groups.len(), 2);
+        let by_breed = |breed: &str| {
+            groups
+                .iter()
+                .find(|g| g.key == vec![(2, ScanValue::Str(breed.into()))])
+                .unwrap_or_else(|| panic!("no group for {breed}"))
+        };
+        let labrador = by_breed("labrador");
+        assert_eq!(labrador.values[0], ScanValue::I64(2), "COUNT");
+        assert_eq!(labrador.values[1], ScanValue::I64(12), "SUM(3+9)");
+        assert_eq!(labrador.values[2], ScanValue::F64(6.0), "AVG(12/2)");
+        assert_eq!(labrador.values[3], ScanValue::U32(3), "MIN");
+        assert_eq!(labrador.values[4], ScanValue::U32(9), "MAX");
+        let poodle = by_breed("poodle");
+        assert_eq!(poodle.values[0], ScanValue::I64(1), "COUNT");
+        assert_eq!(poodle.values[1], ScanValue::I64(5), "SUM");
+        assert_eq!(poodle.values[2], ScanValue::F64(5.0), "AVG(5/1)");
+        assert_eq!(poodle.values[3], ScanValue::U32(5), "MIN");
+        assert_eq!(poodle.values[4], ScanValue::U32(5), "MAX");
+    }
+
+    /// `AGG-FR-007`: `limit` truncates the *group* count, applied after
+    /// the full reduction.
+    #[test]
+    fn evaluate_aggregate_limit_truncates_the_group_count_only() {
+        let limited = evaluate_aggregate(
+            sql_test_rows(),
+            &[2],
+            &[],
+            &[AggregateSpec {
+                func: AggregateFn::Count,
+                field: None,
+            }],
+            Some(1),
+            &sql_test_schema(),
+        );
+        assert_eq!(limited.len(), 1);
+        let unbounded = evaluate_aggregate(
+            sql_test_rows(),
+            &[2],
+            &[],
+            &[AggregateSpec {
+                func: AggregateFn::Count,
+                field: None,
+            }],
+            Some(100),
+            &sql_test_schema(),
+        );
+        assert_eq!(unbounded.len(), 2);
     }
 
     /// Spin up `serve` over `FixtureStore` on a loopback port with

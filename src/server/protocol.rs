@@ -63,6 +63,7 @@
 //! | 6 | `SERVER-001` v0.20.0 | No new variant: `BeginWith` learns a flag bit, [`SESSION_VALIDATE_ON_STAGE`] — every `UpdateField` staged in such a session is validated when staged, refused with the code `Commit` would have given, nothing staged (`STV-FR-001`/`002`). A flag bit is introduced at a version exactly as a variant is: unknown (`Malformed`) below 6 (rule 3), sent only after negotiating ≥ 6 (rule 4). `ADR-0024`'s second trigger |
 //! | 7 | `SERVER-001` v0.26.0 | + `ErrorCode::Conflict` (10) — a snapshot-isolated session's read set was invalidated by a commit from another connection before its own `Commit` landed; carried by `Response::TransactionFailed { index: 0, .. }`, the same sentinel-index shape `ErrorCode::Journal` established, and downgraded to `Unsupported` on a connection negotiated below 7 (rule 3). `BeginWith` learns a third flag bit, [`SESSION_SNAPSHOT_ISOLATION`] — every session `GetById` records the committed value it returned into a read set re-checked atomically at `Commit` (`ISO-FR-001`–`003`). Unknown below 7 (rule 3), sent only after negotiating ≥ 7 (rule 4). ADR-0033 |
 //! | 8 | `SERVER-001` v0.27.0 | + [`Request::Query`] (15) and [`Response::Rows`] (12) — a read-only `SELECT`-shaped query (`Selection`/`Predicate`/`CompareOp`), parsed client-side from real SQL text and compiled to a new unconditional full-scan-then-filter, never an index — see `src/server/sql.rs`/[`super::client::SchemaDrivenClient::query`]. `Malformed` below 8 is not reachable (the client never sends one below 8, `SQL-FR-010`); no new `ErrorCode` — `UnknownField`/`Malformed` cover every rejection, reused. Not overlaid by a read-your-writes session and never tracked into a snapshot-isolated session's read set — the same "only `GetById`" line `RYW-FR`/`ISO-FR-002` already draw (`SQL-FR-009`). ADR-0034 |
+//! | 9 | `SERVER-001` v0.28.0 | + [`Request::Aggregate`] (16) and [`Response::Groups`] (13) — `GROUP BY`/`COUNT`/`SUM`/`AVG`/`MIN`/`MAX` on top of [`Request::Query`]'s own machinery: `group_by` buckets `ConnectionStore::scan_all`'s already-filtered rows (empty `group_by` is one implicit whole-table group), `aggregates` reduces each bucket (`AggregateFn`/`AggregateSpec`), `filter` reuses [`Predicate`]/[`CompareOp`] unchanged. [`ScanValue`] gains `F64(f64)` — [`AggregateFn::Avg`]'s result, the wire's first fractional value; never a stored field's `ValueKind`. No new `ErrorCode`. Not overlaid, not read-set-tracked — the identical line `SQL-FR-009` already draws. `Malformed` below 9 is not reachable (`AGG-FR-010`); `Request::Query`/`Response::Rows` and every byte at version 8 and below are unchanged — a plain `SELECT` still only needs version 8. ADR-0035 |
 //!
 //! ## Compatibility rules (`PROTO-FR-005`)
 //!
@@ -97,7 +98,7 @@ use uuid::Uuid;
 /// versions" table. Bumped by exactly one in any change that appends a
 /// variant (rule 2). Version 1 is retroactively the `SERVER-001` v0.9.1
 /// shape: what a client that never sends [`Request::Hello`] speaks.
-pub const PROTOCOL_VERSION: u32 = 8;
+pub const PROTOCOL_VERSION: u32 = 9;
 
 /// `Request::BeginWith` flag bit 0 (protocol 5, `RYW-FR-001`, ADR-0027):
 /// the session's own point reads (`GetById`) see its staged writes —
@@ -152,13 +153,17 @@ pub type FieldRef = u16;
 
 /// The scan/filter/update/field value type. See this module's own doc
 /// comment for why `Str` was added beyond the design document's original
-/// `U32`/`I64`/`Bool`.
+/// `U32`/`I64`/`Bool`. `F64` (protocol 9, `AGG-FR-005`, ADR-0035) is a
+/// later, narrower addition: it never describes a stored field's real
+/// type (no `ValueKind::F64` exists to match it) — it exists solely to
+/// carry [`AggregateFn::Avg`]'s computed result on the wire.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ScanValue {
     U32(u32),
     I64(i64),
     Bool(bool),
     Str(String),
+    F64(f64),
 }
 
 /// One write within a [`Request::Transaction`] batch — the same three
@@ -218,6 +223,42 @@ pub struct Predicate {
     pub field: FieldRef,
     pub op: CompareOp,
     pub value: ScanValue,
+}
+
+/// One [`Request::Aggregate`] reduction function. `Count` is always
+/// `COUNT(*)` — this schema has no `NULL` concept, so `COUNT(field)`
+/// would be unconditionally identical to `COUNT(*)`; a deliberate
+/// simplification (`AGG-FR-008`), not an oversight. `Sum`/`Avg`/`Min`/
+/// `Max` each need an [`AggregateSpec::field`], the same "orderable
+/// kind" rule [`CompareOp::is_ordering`] already established
+/// (`U32`/`I64` only). Protocol 9, ADR-0035.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AggregateFn {
+    Count,
+    Sum,
+    Avg,
+    Min,
+    Max,
+}
+
+/// One column of a [`Request::Aggregate`]'s `aggregates` list — `field`
+/// is `None` only for [`AggregateFn::Count`] (`COUNT(*)`), `Some(_)`
+/// for every other function. Protocol 9, ADR-0035.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AggregateSpec {
+    pub func: AggregateFn,
+    pub field: Option<FieldRef>,
+}
+
+/// One row of a [`Response::Groups`] result: `key` echoes back each
+/// `group_by` field's value for this group (empty when `group_by` was
+/// empty — the implicit single-group case, `AGG-FR-007`); `values`
+/// carries one result per `Request::Aggregate::aggregates` entry, same
+/// order. Protocol 9, ADR-0035.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AggregateGroup {
+    pub key: Vec<(FieldRef, ScanValue)>,
+    pub values: Vec<ScanValue>,
 }
 
 /// The outcome of a `Parent` lookup — kept as a three-way enum, not a
@@ -471,6 +512,34 @@ pub enum Request {
         filter: Vec<Predicate>,
         limit: Option<usize>,
     },
+    /// Protocol 9 (`AGG-FR-004`, ADR-0035,
+    /// `docs/design/SERVER-SQL-AGGREGATE-DESIGN.md`): `GROUP BY` and
+    /// aggregate functions on top of [`Request::Query`]'s own machinery.
+    /// `filter` is applied first, identically to `Query`'s own `filter`
+    /// (reusing [`Predicate`]/[`CompareOp`] unchanged); the survivors are
+    /// bucketed by `group_by`'s field values (`group_by` empty means one
+    /// implicit whole-table bucket, the `SELECT COUNT(*) FROM t` case
+    /// with no `GROUP BY`); each bucket is reduced through every
+    /// `aggregates` entry in order. A bucket whose key matches zero rows
+    /// never appears in the result — no null/zero-valued group is
+    /// synthesized. `limit` truncates the number of *groups* returned,
+    /// the same role `Query`'s own `limit` plays over rows. Validated
+    /// against this domain's schema before any scan runs
+    /// (`ErrorCode::UnknownField`/`Malformed`, no new code) —
+    /// `AGG-FR-006`. Unconditionally a full scan
+    /// (`ConnectionStore::scan_all`), same as `Query` — no index, no
+    /// partial-aggregation pushdown. Read-only, gated exactly like
+    /// `Query`: authentication only, never overlaid by read-your-writes,
+    /// never tracked into a snapshot-isolation read set (`AGG-FR-009`).
+    /// `Malformed` on a connection negotiated below 9;
+    /// [`super::client::SchemaDrivenClient`] checks this locally and
+    /// sends no frame below it (`AGG-FR-010`).
+    Aggregate {
+        group_by: Vec<FieldRef>,
+        filter: Vec<Predicate>,
+        aggregates: Vec<AggregateSpec>,
+        limit: Option<usize>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -528,6 +597,13 @@ pub enum Response {
     /// a meaningful top-N (no `ORDER BY`).
     Rows {
         rows: Vec<(RecordId, Vec<(FieldRef, ScanValue)>)>,
+    },
+    /// Protocol 9. Answers [`Request::Aggregate`]: every group produced,
+    /// in whatever unspecified order the grouping computation produces
+    /// them in — the same "unspecified order" convention `Rows` already
+    /// carries. `limit` truncates this list, not a meaningful top-N.
+    Groups {
+        groups: Vec<AggregateGroup>,
     },
 }
 
@@ -724,6 +800,39 @@ mod tests {
                 &[0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], // 10usize
             ]),
         );
+        // Protocol 9 (`AGG-FR-004`, ADR-0035): `Aggregate` at 16 —
+        // exercises `group_by`, `filter` (reusing `Predicate`), an
+        // `AggregateSpec` with `field: Some(_)`, and `limit: None`.
+        assert_golden(
+            "Aggregate",
+            &Request::Aggregate {
+                group_by: vec![1],
+                filter: vec![Predicate {
+                    field: 1,
+                    op: CompareOp::Eq,
+                    value: ScanValue::U32(5),
+                }],
+                aggregates: vec![AggregateSpec {
+                    func: AggregateFn::Sum,
+                    field: Some(2),
+                }],
+                limit: None,
+            },
+            &bytes(&[
+                &[0x10, 0x00, 0x00, 0x00], // Aggregate
+                &LEN1,                     // group_by: one field
+                &[0x01, 0x00],
+                &LEN1,                                             // filter: one predicate
+                &[0x01, 0x00],                                     // predicate.field
+                &[0x00, 0x00, 0x00, 0x00],                         // CompareOp::Eq
+                &[0x00, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00], // ScanValue::U32(5)
+                &LEN1,                                             // aggregates: one spec
+                &[0x01, 0x00, 0x00, 0x00],                         // AggregateFn::Sum
+                &[0x01],                                           // field: Some
+                &[0x02, 0x00],                                     // field 2
+                &[0x00],                                           // limit: None
+            ]),
+        );
     }
 
     /// `BINENC-FR-004`: every `Response` variant's wire bytes, pinned —
@@ -867,6 +976,32 @@ mod tests {
                 &[0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00], // ScanValue::U32(3)
             ]),
         );
+        // Protocol 9 (`AGG-FR-004`, ADR-0035): `Groups` at 13 — exercises
+        // one group's `key` and two `values`, including the new
+        // `ScanValue::F64` (`AGG-FR-005`).
+        assert_golden_eq(
+            "Groups",
+            &Response::Groups {
+                groups: vec![AggregateGroup {
+                    key: vec![(1, ScanValue::U32(3))],
+                    values: vec![ScanValue::I64(5), ScanValue::F64(2.5)],
+                }],
+            },
+            &bytes(&[
+                &[0x0d, 0x00, 0x00, 0x00], // Groups
+                &LEN1,                     // groups: one AggregateGroup
+                &LEN1,                     // key: one (tag, value) pair
+                &[0x01, 0x00],
+                &[0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00], // ScanValue::U32(3)
+                &[0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], // values: two entries
+                &[
+                    0x01, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                ], // ScanValue::I64(5)
+                &[
+                    0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x40,
+                ], // ScanValue::F64(2.5)
+            ]),
+        );
         for (code, index) in [
             (ErrorCode::NoSession, 0x06u8),
             (ErrorCode::SessionOpen, 0x07),
@@ -893,15 +1028,16 @@ mod tests {
     }
 
     /// `PROTO-FR-001`/`PROTO-FR-005` rule 2: the constant matches the
-    /// module docs' table — version 8 is the one that added
-    /// `Request::Query`/`Response::Rows` (7 added `ErrorCode::Conflict`
-    /// and `SESSION_SNAPSHOT_ISOLATION`, 6 `SESSION_VALIDATE_ON_STAGE`, 4
+    /// module docs' table — version 9 is the one that added
+    /// `Request::Aggregate`/`Response::Groups` (8 added `Request::Query`/
+    /// `Response::Rows`, 7 `ErrorCode::Conflict` and
+    /// `SESSION_SNAPSHOT_ISOLATION`, 6 `SESSION_VALIDATE_ON_STAGE`, 4
     /// `ErrorCode::Journal`, 3 the session variants, 2 `Hello`). A change
     /// that appends a variant bumps this by exactly one and extends the
     /// table; this test is the reminder.
     #[test]
     fn protocol_version_is_the_one_the_table_names() {
-        assert_eq!(PROTOCOL_VERSION, 8);
+        assert_eq!(PROTOCOL_VERSION, 9);
     }
 
     /// `SESS-FR-001`: the session shapes round-trip through the codec like

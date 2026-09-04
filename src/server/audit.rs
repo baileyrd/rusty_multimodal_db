@@ -66,6 +66,7 @@ pub enum RequestKind {
     Rollback,
     BeginWith,
     Query,
+    Aggregate,
 }
 
 impl RequestKind {
@@ -87,6 +88,7 @@ impl RequestKind {
             Request::Rollback => RequestKind::Rollback,
             Request::BeginWith { .. } => RequestKind::BeginWith,
             Request::Query { .. } => RequestKind::Query,
+            Request::Aggregate { .. } => RequestKind::Aggregate,
         }
     }
 }

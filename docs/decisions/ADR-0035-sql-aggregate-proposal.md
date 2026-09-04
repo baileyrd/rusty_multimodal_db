@@ -243,4 +243,22 @@ implementation:
   open, build nothing. Proposed in PR #178.
 - 2026-09-04: accepted as proposed (option (a); (b) and (c) declined).
   Implementation follows as `SERVER-001`'s next minor / FR, per
-  `docs/design/SERVER-SQL-AGGREGATE-DESIGN.md`. (This PR.)
+  `docs/design/SERVER-SQL-AGGREGATE-DESIGN.md`. (PR #179.)
+- 2026-09-04: implemented as `SERVER-001` v0.28.0 / FR-038 — exactly as
+  designed, option (a) in full: `Request::Aggregate`/`Response::Groups`
+  at protocol version 9, `AggregateFn::{Count,Sum,Avg,Min,Max}`,
+  `ScanValue::F64` for `AVG`, `validate_aggregate`/`evaluate_aggregate`
+  reusing `ConnectionStore::scan_all` (`ADR-0034`) unchanged — zero new
+  storage-adjacent primitives, confirmed rather than merely carried
+  over from the design. One real edge case this round's own
+  implementation surfaced beyond the design's worked examples: the
+  implicit whole-table bucket (`group_by` empty) must always exist,
+  even holding zero rows, so `SELECT COUNT(*) FROM t WHERE false`-
+  equivalent still returns one group whose `Count` is `0` (acceptance
+  criterion 4) — the first cut of `evaluate_aggregate` did not do this,
+  caught by this round's own new unit test; fixed by always seeding
+  that one bucket, and by giving `Min`/`Max` a `schema`-typed zero
+  fallback (rather than panicking on an empty iterator) for the one
+  case a real observed value doesn't exist, since `Sum`/`Avg` were
+  already well-defined there at `0`/`0.0`. Every acceptance criterion
+  1–8 holds; no other deviation from the design. (This PR.)
