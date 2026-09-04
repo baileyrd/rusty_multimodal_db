@@ -608,3 +608,16 @@ impl SchemaDrivenClient {
   one new `ScanValue::F64` variant.
 - 2026-09-04: Accepted as proposed. No content change. Implementation
   follows as `SERVER-001`'s next minor / FR.
+- 2026-09-04: Implemented as `SERVER-001` v0.28.0 / FR-038, exactly this
+  document's "Proposed shape" with one clarification found only during
+  implementation, not a deviation from it: acceptance criterion 4's
+  "exactly one group whose `Count` is `0`" case (the implicit
+  whole-table bucket, `group_by` empty, a filter matching zero rows)
+  needed the bucket to be seeded unconditionally rather than only when
+  a row survives filtering, and `Min`/`Max` needed a `schema`-typed
+  zero fallback for that same zero-row case, since no real observed
+  value exists there to pass through — both caught by this round's own
+  new unit tests, both consistent with, not contradicting, `AGG-FR-007`/
+  `AGG-FR-008` as written. Zero new storage-adjacent primitives, as
+  designed — `ConnectionStore::scan_all` (`ADR-0034`) reused entirely
+  unchanged. Every acceptance criterion 1–8 holds.

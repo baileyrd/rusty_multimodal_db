@@ -1,33 +1,44 @@
 //! A minimal, real SQL `SELECT` tokenizer and recursive-descent parser —
 //! client-side only (`SQL-FR-001`, ADR-0034,
-//! `docs/design/SERVER-SQL-SELECT-DESIGN.md`). Produces a domain-agnostic
-//! [`ParsedQuery`]: every name here is a plain [`String`], not yet
-//! resolved to a [`super::protocol::FieldRef`] — [`super::client::SchemaDrivenClient::query`]
-//! does that resolution against the schema it already fetched
-//! (`SQL-FR-002`). The server never sees SQL text at all; this module is
-//! used only by the client.
+//! `docs/design/SERVER-SQL-SELECT-DESIGN.md`; `AGG-FR-001`, ADR-0035,
+//! `docs/design/SERVER-SQL-AGGREGATE-DESIGN.md`). Produces a
+//! domain-agnostic [`ParsedQuery`]: every name here is a plain
+//! [`String`], not yet resolved to a [`super::protocol::FieldRef`] —
+//! [`super::client::SchemaDrivenClient::query`] does that resolution
+//! against the schema it already fetched (`SQL-FR-002`). The server
+//! never sees SQL text at all; this module is used only by the client.
 //!
 //! Grammar (keywords case-insensitive; column/table/condition names are
 //! plain identifiers, never quoted):
 //!
 //! ```text
-//! query         := "SELECT" columns "FROM" ident [where_clause] [limit_clause]
-//! columns       := "*" | ident ("," ident)*
+//! query         := "SELECT" columns "FROM" ident [where_clause] [group_by_clause] [limit_clause]
+//! columns       := "*" | column_item ("," column_item)*
+//! column_item   := ident | agg_call
+//! agg_call      := agg_fn "(" ( "*" | ident ) ")"
+//! agg_fn        := "COUNT" | "SUM" | "AVG" | "MIN" | "MAX"
 //! where_clause  := "WHERE" condition ("AND" condition)*
 //! condition     := ident comparator literal
 //! comparator    := "=" | "!=" | "<" | "<=" | ">" | ">="
 //! literal       := number | "'" ... "'" | "true" | "false"
+//! group_by_clause := "GROUP" "BY" ident ("," ident)*
 //! limit_clause  := "LIMIT" number
 //! ```
 //!
-//! The `FROM` identifier is required by the grammar but never looked up
-//! against anything — a connection serves exactly one domain, so there is
-//! nothing to validate it against (a deliberate simplification, named in
-//! the design rather than silently assumed). No `OR`, no parentheses, no
-//! `LIKE`/`IN`/`IS NULL`/`BETWEEN`, no `ORDER BY`, no subqueries, no
-//! `INSERT`/`UPDATE`/`DELETE` — see the design document's own "Non-goals".
+//! `*` is only ever valid as `COUNT`'s own argument (`COUNT(*)`); every
+//! other `agg_fn` requires a plain field `ident` — `SUM(*)` and
+//! `COUNT(age)` are both syntax errors here, not silently accepted then
+//! rejected later (`AGG-FR-008`'s own "`COUNT` is `COUNT(*)`-only"
+//! non-goal). The `FROM` identifier is required by the grammar but never
+//! looked up against anything — a connection serves exactly one domain,
+//! so there is nothing to validate it against (a deliberate
+//! simplification, named in the design rather than silently assumed). No
+//! `OR`, no `HAVING`, no `LIKE`/`IN`/`IS NULL`/`BETWEEN`, no `ORDER BY`,
+//! no nested/composite aggregate expressions, no subqueries, no
+//! `INSERT`/`UPDATE`/`DELETE` — see each design document's own
+//! "Non-goals".
 
-use super::protocol::CompareOp;
+use super::protocol::{AggregateFn, CompareOp};
 use std::fmt;
 
 /// One `WHERE`-clause literal, before it is resolved against a field's
@@ -49,11 +60,32 @@ pub(crate) struct ParsedCondition {
     pub value: Literal,
 }
 
+/// One `SELECT`-list item, before any name is resolved to a
+/// [`super::protocol::FieldRef`] — `AGG-FR-001`, ADR-0035.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum ParsedColumnItem {
+    Plain(String),
+    Aggregate {
+        func: AggregateFn,
+        arg: AggregateArg,
+    },
+}
+
+/// One `agg_call`'s argument — `Star` is valid only for
+/// [`AggregateFn::Count`] (`COUNT(*)`); every other function requires
+/// [`AggregateArg::Field`]. Enforced by the parser itself, not left for
+/// a later resolution step (`AGG-FR-008`).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum AggregateArg {
+    Star,
+    Field(String),
+}
+
 /// The parsed `SELECT` column list.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum ParsedColumns {
     All,
-    Named(Vec<String>),
+    Named(Vec<ParsedColumnItem>),
 }
 
 /// The full parsed shape of one `SELECT` string.
@@ -65,18 +97,34 @@ pub(crate) struct ParsedQuery {
     #[allow(dead_code)]
     pub table: String,
     pub conditions: Vec<ParsedCondition>,
+    /// `GROUP BY`'s field list — empty when the clause was omitted.
+    /// `AGG-FR-001`, ADR-0035.
+    pub group_by: Vec<String>,
     pub limit: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum SqlParseError {
-    Expected { what: String, found: String },
+    Expected {
+        what: String,
+        found: String,
+    },
     UnexpectedEnd,
     InvalidNumber(String),
     NegativeLimit(i64),
     TrailingInput(String),
     UnterminatedString,
     UnexpectedCharacter(char),
+    /// `agg_fn(...)` where `agg_fn` isn't one of `COUNT`/`SUM`/`AVG`/
+    /// `MIN`/`MAX` (case-insensitively). `AGG-FR-001`, ADR-0035.
+    UnknownAggregateFunction(String),
+    /// `COUNT` given a field argument instead of `*` — this schema has
+    /// no `NULL` concept, so `COUNT(field)` would be unconditionally
+    /// identical to `COUNT(*)` (`AGG-FR-008`'s own non-goal).
+    CountRequiresStar,
+    /// `SUM`/`AVG`/`MIN`/`MAX` given `*` instead of a field — only
+    /// `COUNT` accepts `*`.
+    AggregateRequiresField(String),
 }
 
 impl fmt::Display for SqlParseError {
@@ -93,6 +141,18 @@ impl fmt::Display for SqlParseError {
             }
             SqlParseError::UnterminatedString => write!(f, "unterminated string literal"),
             SqlParseError::UnexpectedCharacter(c) => write!(f, "unexpected character {c:?}"),
+            SqlParseError::UnknownAggregateFunction(name) => {
+                write!(
+                    f,
+                    "{name:?} is not a known aggregate function (COUNT, SUM, AVG, MIN, MAX)"
+                )
+            }
+            SqlParseError::CountRequiresStar => {
+                write!(f, "COUNT requires * as its argument, e.g. COUNT(*)")
+            }
+            SqlParseError::AggregateRequiresField(func) => {
+                write!(f, "{func} requires a field name as its argument, not *")
+            }
         }
     }
 }
@@ -110,6 +170,11 @@ enum Token {
     Le,
     Gt,
     Ge,
+    /// `AGG-FR-001`, ADR-0035 — an aggregate call's argument list, e.g.
+    /// `COUNT(*)`/`SUM(field)`. No other grammar production uses
+    /// parentheses (`WHERE` stays a flat `AND`-list, unparenthesized).
+    LParen,
+    RParen,
 }
 
 impl fmt::Display for Token {
@@ -126,6 +191,8 @@ impl fmt::Display for Token {
             Token::Le => write!(f, "<="),
             Token::Gt => write!(f, ">"),
             Token::Ge => write!(f, ">="),
+            Token::LParen => write!(f, "("),
+            Token::RParen => write!(f, ")"),
         }
     }
 }
@@ -147,6 +214,14 @@ fn tokenize(input: &str) -> Result<Vec<Token>, SqlParseError> {
             }
             ',' => {
                 tokens.push(Token::Comma);
+                i += 1;
+            }
+            '(' => {
+                tokens.push(Token::LParen);
+                i += 1;
+            }
+            ')' => {
+                tokens.push(Token::RParen);
                 i += 1;
             }
             '=' => {
@@ -321,12 +396,52 @@ impl<'a> Parser<'a> {
             self.advance();
             return Ok(ParsedColumns::All);
         }
-        let mut names = vec![self.ident()?];
+        let mut items = vec![self.column_item()?];
         while matches!(self.peek(), Some(Token::Comma)) {
             self.advance();
-            names.push(self.ident()?);
+            items.push(self.column_item()?);
         }
-        Ok(ParsedColumns::Named(names))
+        Ok(ParsedColumns::Named(items))
+    }
+
+    /// `AGG-FR-001`, ADR-0035: `ident`, or `agg_fn "(" ("*" | ident) ")"`.
+    /// An aggregate call's argument shape is enforced right here, not
+    /// left for a later resolution step — `COUNT(*)` is the only valid
+    /// `Star` argument; every other function needs a plain field.
+    fn column_item(&mut self) -> Result<ParsedColumnItem, SqlParseError> {
+        let name = self.ident()?;
+        if !matches!(self.peek(), Some(Token::LParen)) {
+            return Ok(ParsedColumnItem::Plain(name));
+        }
+        self.advance();
+        let func = agg_fn(&name)?;
+        let arg = if matches!(self.peek(), Some(Token::Star)) {
+            self.advance();
+            AggregateArg::Star
+        } else {
+            AggregateArg::Field(self.ident()?)
+        };
+        self.expect_rparen()?;
+        match (func, &arg) {
+            (AggregateFn::Count, AggregateArg::Star) => {}
+            (AggregateFn::Count, AggregateArg::Field(_)) => {
+                return Err(SqlParseError::CountRequiresStar)
+            }
+            (_, AggregateArg::Star) => return Err(SqlParseError::AggregateRequiresField(name)),
+            (_, AggregateArg::Field(_)) => {}
+        }
+        Ok(ParsedColumnItem::Aggregate { func, arg })
+    }
+
+    fn expect_rparen(&mut self) -> Result<(), SqlParseError> {
+        match self.advance() {
+            Some(Token::RParen) => Ok(()),
+            Some(other) => Err(SqlParseError::Expected {
+                what: "')'".into(),
+                found: other.to_string(),
+            }),
+            None => Err(SqlParseError::UnexpectedEnd),
+        }
     }
 
     fn limit_number(&mut self) -> Result<usize, SqlParseError> {
@@ -342,8 +457,22 @@ impl<'a> Parser<'a> {
     }
 }
 
-/// Parse one `SELECT` string end to end — `SQL-FR-001`. Never touches
-/// the network; a syntax error is reported entirely client-side.
+/// Maps a `column_item`'s call-site identifier to the aggregate function
+/// it names, case-insensitively — `AGG-FR-001`, ADR-0035.
+fn agg_fn(name: &str) -> Result<AggregateFn, SqlParseError> {
+    match name.to_ascii_uppercase().as_str() {
+        "COUNT" => Ok(AggregateFn::Count),
+        "SUM" => Ok(AggregateFn::Sum),
+        "AVG" => Ok(AggregateFn::Avg),
+        "MIN" => Ok(AggregateFn::Min),
+        "MAX" => Ok(AggregateFn::Max),
+        _ => Err(SqlParseError::UnknownAggregateFunction(name.to_string())),
+    }
+}
+
+/// Parse one `SELECT` string end to end — `SQL-FR-001`, `AGG-FR-001`.
+/// Never touches the network; a syntax error is reported entirely
+/// client-side.
 pub(crate) fn parse(sql: &str) -> Result<ParsedQuery, SqlParseError> {
     let tokens = tokenize(sql)?;
     let mut parser = Parser::new(&tokens);
@@ -363,6 +492,17 @@ pub(crate) fn parse(sql: &str) -> Result<ParsedQuery, SqlParseError> {
         }
     }
 
+    let mut group_by = Vec::new();
+    if parser.peek_keyword("GROUP") {
+        parser.advance();
+        parser.expect_keyword("BY")?;
+        group_by.push(parser.ident()?);
+        while matches!(parser.peek(), Some(Token::Comma)) {
+            parser.advance();
+            group_by.push(parser.ident()?);
+        }
+    }
+
     let mut limit = None;
     if parser.peek_keyword("LIMIT") {
         parser.advance();
@@ -377,6 +517,7 @@ pub(crate) fn parse(sql: &str) -> Result<ParsedQuery, SqlParseError> {
         columns,
         table,
         conditions,
+        group_by,
         limit,
     })
 }
@@ -399,7 +540,10 @@ mod tests {
         let q = parse("select age, breed from dog").unwrap();
         assert_eq!(
             q.columns,
-            ParsedColumns::Named(vec!["age".into(), "breed".into()])
+            ParsedColumns::Named(vec![
+                ParsedColumnItem::Plain("age".into()),
+                ParsedColumnItem::Plain("breed".into()),
+            ])
         );
     }
 
@@ -499,5 +643,123 @@ mod tests {
         // a syntax error, not silently accepted as a second condition.
         assert!(parse("SELECT * FROM dog WHERE age = 3 OR age = 4").is_err());
         assert!(parse("SELECT * FROM dog WHERE (age = 3)").is_err());
+    }
+
+    // `AGG-FR-001`, ADR-0035.
+
+    #[test]
+    fn parses_count_star() {
+        let q = parse("SELECT COUNT(*) FROM dog").unwrap();
+        assert_eq!(
+            q.columns,
+            ParsedColumns::Named(vec![ParsedColumnItem::Aggregate {
+                func: AggregateFn::Count,
+                arg: AggregateArg::Star,
+            }])
+        );
+        assert!(q.group_by.is_empty());
+    }
+
+    #[test]
+    fn parses_every_aggregate_function_with_a_field_argument() {
+        for (text, func) in [
+            ("SUM", AggregateFn::Sum),
+            ("AVG", AggregateFn::Avg),
+            ("MIN", AggregateFn::Min),
+            ("MAX", AggregateFn::Max),
+        ] {
+            let sql = format!("SELECT {text}(age) FROM dog");
+            let q = parse(&sql).unwrap();
+            assert_eq!(
+                q.columns,
+                ParsedColumns::Named(vec![ParsedColumnItem::Aggregate {
+                    func,
+                    arg: AggregateArg::Field("age".into()),
+                }]),
+                "for {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn parses_a_mixed_plain_and_aggregate_column_list() {
+        let q = parse("SELECT breed, COUNT(*), SUM(age) FROM dog GROUP BY breed").unwrap();
+        assert_eq!(
+            q.columns,
+            ParsedColumns::Named(vec![
+                ParsedColumnItem::Plain("breed".into()),
+                ParsedColumnItem::Aggregate {
+                    func: AggregateFn::Count,
+                    arg: AggregateArg::Star,
+                },
+                ParsedColumnItem::Aggregate {
+                    func: AggregateFn::Sum,
+                    arg: AggregateArg::Field("age".into()),
+                },
+            ])
+        );
+        assert_eq!(q.group_by, vec!["breed".to_string()]);
+    }
+
+    #[test]
+    fn parses_group_by_with_one_and_with_several_fields() {
+        let q = parse("SELECT breed, COUNT(*) FROM dog GROUP BY breed").unwrap();
+        assert_eq!(q.group_by, vec!["breed".to_string()]);
+
+        let q = parse("SELECT breed, age, COUNT(*) FROM dog GROUP BY breed, age").unwrap();
+        assert_eq!(q.group_by, vec!["breed".to_string(), "age".to_string()]);
+    }
+
+    #[test]
+    fn group_by_composes_with_where_and_limit() {
+        let q =
+            parse("SELECT breed, COUNT(*) FROM dog WHERE age > 1 GROUP BY breed LIMIT 5").unwrap();
+        assert_eq!(q.conditions.len(), 1);
+        assert_eq!(q.group_by, vec!["breed".to_string()]);
+        assert_eq!(q.limit, Some(5));
+    }
+
+    #[test]
+    fn an_unknown_aggregate_function_is_a_syntax_error() {
+        assert_eq!(
+            parse("SELECT NOPE(age) FROM dog"),
+            Err(SqlParseError::UnknownAggregateFunction("NOPE".into()))
+        );
+    }
+
+    #[test]
+    fn count_given_a_field_instead_of_star_is_a_syntax_error() {
+        assert_eq!(
+            parse("SELECT COUNT(age) FROM dog"),
+            Err(SqlParseError::CountRequiresStar)
+        );
+    }
+
+    #[test]
+    fn sum_avg_min_max_given_a_bare_star_are_syntax_errors() {
+        for text in ["SUM", "AVG", "MIN", "MAX"] {
+            let sql = format!("SELECT {text}(*) FROM dog");
+            assert_eq!(
+                parse(&sql),
+                Err(SqlParseError::AggregateRequiresField(text.into())),
+                "for {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_missing_by_after_group_is_a_syntax_error() {
+        assert!(matches!(
+            parse("SELECT breed, COUNT(*) FROM dog GROUP breed"),
+            Err(SqlParseError::Expected { .. })
+        ));
+    }
+
+    #[test]
+    fn an_aggregate_call_with_no_closing_paren_is_a_syntax_error() {
+        assert!(matches!(
+            parse("SELECT COUNT(* FROM dog"),
+            Err(SqlParseError::Expected { .. })
+        ));
     }
 }
