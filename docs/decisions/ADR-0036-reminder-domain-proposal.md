@@ -1,6 +1,12 @@
 # ADR-0036: `Reminder` domain — the generic schema library's first front-door domain
 
-- Status: **Proposed**
+- Status: **Accepted** (promoted from Proposed on 2026-09-04 — the
+  owner approved the design as proposed, option (a): the front-door
+  `Reminder` domain, `status` as the durably-mutable `ScannableField`,
+  no relations, a real `reminder_server` binary; (b) keeping it behind
+  `research` and (c) closing as not warranted both declined; no
+  changes requested). Acceptance authorizes the design; implementation
+  follows as its own unit — see "Acceptance and implementation" below.
 - Date: 2026-09-04
 - Deciders: baileyrd
 - Related: `docs/design/SERVER-REMINDER-DOMAIN-DESIGN.md` (the full
@@ -116,4 +122,7 @@ revisit only if a concrete need resurfaces.
   `Reminder` domain, inverted index/scan assignment, no relations, a
   real `reminder_server` binary; (b) accept but keep it `research`-
   gated like `Order`/`Employee`; (c) close as not warranted. Proposed
-  in this PR.
+  in PR #181.
+- 2026-09-04: accepted as proposed (option (a); (b) and (c) declined).
+  Implementation follows as `SERVER-001`'s next minor / FR, per
+  `docs/design/SERVER-REMINDER-DOMAIN-DESIGN.md`. (This PR.)

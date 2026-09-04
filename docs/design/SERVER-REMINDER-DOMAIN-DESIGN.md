@@ -1,6 +1,11 @@
-# Server Reminder Domain Design (Proposed)
+# Server Reminder Domain Design (Accepted)
 
-- Status: **Proposed**
+- Status: **Accepted** (promoted from Proposed on 2026-09-04 — the
+  owner approved the design as proposed, `ADR-0036` option (a); (b)
+  keeping `Reminder` behind `research` and (c) closing as not
+  warranted both declined; no changes requested). Acceptance
+  authorizes the design; implementation follows as its own unit — see
+  `ADR-0036`'s "Acceptance and implementation" section.
 - Date: 2026-09-04
 - Related: `ADR-0009`/`docs/design/GENERIC-SCHEMA-DESIGN.md` (the generic
   schema library, `crate::generic`, this design's engine), `ADR-0018`/
@@ -461,3 +466,5 @@ changes anywhere in this proposal.
   the one slice that fits this crate's existing architecture without
   new engine capability: a `Reminder` domain on the already-accepted
   generic schema library, made front-door for the first time.
+- 2026-09-04: Accepted as proposed. No content change. Implementation
+  follows as `SERVER-001`'s next minor / FR.
