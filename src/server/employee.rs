@@ -230,6 +230,24 @@ impl ConnectionStore for EmployeeConnectionStore {
         Ok(self.store.neighbors::<Employee, CollaboratesWith>(id))
     }
 
+    /// `ENT2-FR-004`: `Employee` has exactly one relation label,
+    /// `collaborates_with`.
+    fn neighbors_by_relation(
+        &self,
+        id: RecordId,
+        relation: &str,
+    ) -> Result<Vec<RecordId>, ErrorCode> {
+        if relation == "collaborates_with" {
+            Ok(self.store.neighbors::<Employee, CollaboratesWith>(id))
+        } else {
+            Err(ErrorCode::Malformed)
+        }
+    }
+
+    fn list_relation_kinds(&self) -> Vec<String> {
+        vec!["collaborates_with".to_string()]
+    }
+
     /// `STV-FR-002`: `validate_batch` on this one operation, with the
     /// same per-call existence read the journaled path uses.
     fn validate_op(&self, op: &TransactionOp) -> Result<(), ErrorCode> {

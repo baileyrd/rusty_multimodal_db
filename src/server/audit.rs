@@ -67,6 +67,10 @@ pub enum RequestKind {
     BeginWith,
     Query,
     Aggregate,
+    /// Protocol 10, ADR-0039.
+    NeighborsByRelation,
+    /// Protocol 10, ADR-0039.
+    ListRelationKinds,
 }
 
 impl RequestKind {
@@ -89,6 +93,8 @@ impl RequestKind {
             Request::BeginWith { .. } => RequestKind::BeginWith,
             Request::Query { .. } => RequestKind::Query,
             Request::Aggregate { .. } => RequestKind::Aggregate,
+            Request::NeighborsByRelation { .. } => RequestKind::NeighborsByRelation,
+            Request::ListRelationKinds => RequestKind::ListRelationKinds,
         }
     }
 }

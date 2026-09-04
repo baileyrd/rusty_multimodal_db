@@ -36,7 +36,7 @@
 //! — see ADR-0010's Consequences. Usage: `entity_server [host:port]`
 //! (defaults to `127.0.0.1:7880`).
 
-use rusty_multimodal_db::generic::entity::{create_entity_production_stack, Entity, EntityKind};
+use rusty_multimodal_db::generic::entity::{create_entity_production_stack, Entity};
 use rusty_multimodal_db::generic::production::GenericProductionStore;
 use rusty_multimodal_db::server::access::{AccessSink, FileAccessLog, StderrAccessLog};
 use rusty_multimodal_db::server::audit::{AuditSink, FileAudit, StderrAudit};
@@ -52,29 +52,30 @@ fn sample_entities() -> Vec<Entity> {
         Entity {
             id: Uuid::from_u128(1),
             label: "Ada Lovelace".into(),
-            kind: EntityKind::Person,
+            kind: "person".into(),
             mention_count: 3,
         },
         Entity {
             id: Uuid::from_u128(2),
             label: "Analytical Engine".into(),
-            kind: EntityKind::Concept,
+            kind: "concept".into(),
             mention_count: 5,
         },
         Entity {
             id: Uuid::from_u128(3),
             label: "London".into(),
-            kind: EntityKind::Place,
+            kind: "place".into(),
             mention_count: 1,
         },
     ]
 }
 
-fn sample_edges() -> Vec<(Uuid, Uuid)> {
-    vec![
-        (Uuid::from_u128(1), Uuid::from_u128(2)),
-        (Uuid::from_u128(1), Uuid::from_u128(3)),
-    ]
+fn sample_relates_to_edges() -> Vec<(Uuid, Uuid)> {
+    vec![(Uuid::from_u128(1), Uuid::from_u128(2))]
+}
+
+fn sample_mentioned_with_edges() -> Vec<(Uuid, Uuid)> {
+    vec![(Uuid::from_u128(1), Uuid::from_u128(3))]
 }
 
 fn main() {
@@ -86,8 +87,13 @@ fn main() {
     std::fs::create_dir_all(&dir).expect("creating a scratch directory for the mmap-backed store");
     let path = dir.join("entities.mmap");
 
-    let store = create_entity_production_stack(sample_entities(), &sample_edges(), &path)
-        .expect("creating the sample EntityProductionStack");
+    let store = create_entity_production_stack(
+        sample_entities(),
+        &sample_relates_to_edges(),
+        &sample_mentioned_with_edges(),
+        &path,
+    )
+    .expect("creating the sample EntityProductionStack");
     // `SERVER_TXN_JOURNAL_PATH` (ADR-0025): with it, every transaction
     // batch is crash-atomic — journaled and fsync'd before its first
     // write, replayed on the next start. Set it the same way every start:

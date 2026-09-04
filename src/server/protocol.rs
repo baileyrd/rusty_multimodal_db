@@ -64,6 +64,7 @@
 //! | 7 | `SERVER-001` v0.26.0 | + `ErrorCode::Conflict` (10) — a snapshot-isolated session's read set was invalidated by a commit from another connection before its own `Commit` landed; carried by `Response::TransactionFailed { index: 0, .. }`, the same sentinel-index shape `ErrorCode::Journal` established, and downgraded to `Unsupported` on a connection negotiated below 7 (rule 3). `BeginWith` learns a third flag bit, [`SESSION_SNAPSHOT_ISOLATION`] — every session `GetById` records the committed value it returned into a read set re-checked atomically at `Commit` (`ISO-FR-001`–`003`). Unknown below 7 (rule 3), sent only after negotiating ≥ 7 (rule 4). ADR-0033 |
 //! | 8 | `SERVER-001` v0.27.0 | + [`Request::Query`] (15) and [`Response::Rows`] (12) — a read-only `SELECT`-shaped query (`Selection`/`Predicate`/`CompareOp`), parsed client-side from real SQL text and compiled to a new unconditional full-scan-then-filter, never an index — see `src/server/sql.rs`/[`super::client::SchemaDrivenClient::query`]. `Malformed` below 8 is not reachable (the client never sends one below 8, `SQL-FR-010`); no new `ErrorCode` — `UnknownField`/`Malformed` cover every rejection, reused. Not overlaid by a read-your-writes session and never tracked into a snapshot-isolated session's read set — the same "only `GetById`" line `RYW-FR`/`ISO-FR-002` already draw (`SQL-FR-009`). ADR-0034 |
 //! | 9 | `SERVER-001` v0.28.0 | + [`Request::Aggregate`] (16) and [`Response::Groups`] (13) — `GROUP BY`/`COUNT`/`SUM`/`AVG`/`MIN`/`MAX` on top of [`Request::Query`]'s own machinery: `group_by` buckets `ConnectionStore::scan_all`'s already-filtered rows (empty `group_by` is one implicit whole-table group), `aggregates` reduces each bucket (`AggregateFn`/`AggregateSpec`), `filter` reuses [`Predicate`]/[`CompareOp`] unchanged. [`ScanValue`] gains `F64(f64)` — [`AggregateFn::Avg`]'s result, the wire's first fractional value; never a stored field's `ValueKind`. No new `ErrorCode`. Not overlaid, not read-set-tracked — the identical line `SQL-FR-009` already draws. `Malformed` below 9 is not reachable (`AGG-FR-010`); `Request::Query`/`Response::Rows` and every byte at version 8 and below are unchanged — a plain `SELECT` still only needs version 8. ADR-0035 |
+//! | 10 | `SERVER-001` v0.31.0 | + [`Request::NeighborsByRelation`] (17), [`Request::ListRelationKinds`] (18), and [`Response::RelationKinds`] (14) — `ENT2-FR-004`/`005`, ADR-0039: a one-hop neighbor lookup filtered to one named relation label (`NeighborsByRelation`, answered by the existing [`Response::RecordList`] unchanged), and relation-label discovery (`ListRelationKinds`/`RelationKinds`) for a domain with more than one named `SymmetricRelation` — [`crate::generic::entity::Entity`], the first. No field added to any pre-existing `Request`/`Response` variant or to `DomainSchema`/`RelationCapabilities` — `bincode`'s positional struct encoding makes that unsafe (rule 1); both are brand-new, appended variants instead. No new `ErrorCode` — an unknown relation label reuses `Malformed`. Gated entirely client-side, the same posture `Query`/`Aggregate` already established: `dispatch` itself performs no version check (as it never has for `Query`/`Aggregate` either), relying on `SchemaDrivenClient` never sending either request below version 10. Not overlaid, not read-set-tracked. ADR-0039 |
 //!
 //! ## Compatibility rules (`PROTO-FR-005`)
 //!
@@ -98,7 +99,7 @@ use uuid::Uuid;
 /// versions" table. Bumped by exactly one in any change that appends a
 /// variant (rule 2). Version 1 is retroactively the `SERVER-001` v0.9.1
 /// shape: what a client that never sends [`Request::Hello`] speaks.
-pub const PROTOCOL_VERSION: u32 = 9;
+pub const PROTOCOL_VERSION: u32 = 10;
 
 /// `Request::BeginWith` flag bit 0 (protocol 5, `RYW-FR-001`, ADR-0027):
 /// the session's own point reads (`GetById`) see its staged writes —
@@ -540,6 +541,26 @@ pub enum Request {
         aggregates: Vec<AggregateSpec>,
         limit: Option<usize>,
     },
+    /// Protocol 10 (`ENT2-FR-004`, ADR-0039): [`Request::Neighbors`],
+    /// filtered to one named relation label — for a domain with more
+    /// than one `SymmetricRelation`. `relation` naming a label this
+    /// domain doesn't have is `ErrorCode::Malformed`, the same code an
+    /// unknown field already uses (no new code for a bounded slice, the
+    /// `FR-037`/`FR-038` posture). Answered by the already-existing
+    /// [`Response::RecordList`], unchanged — no new response shape
+    /// needed for the result itself. Gated entirely client-side (see
+    /// this module's own "Protocol versions" row 10) — never overlaid
+    /// by a read-your-writes session, never read-set-tracked.
+    NeighborsByRelation {
+        id: RecordId,
+        relation: String,
+    },
+    /// Protocol 10 (`ENT2-FR-005`, ADR-0039): every relation label this
+    /// domain knows — `[]` for a domain with no symmetric relation at
+    /// all, one label for a single-relation domain (`Dog`), more than
+    /// one for `Entity`. Lets a client discover the real label set
+    /// without hardcoding one. Answered by [`Response::RelationKinds`].
+    ListRelationKinds,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -604,6 +625,11 @@ pub enum Response {
     /// carries. `limit` truncates this list, not a meaningful top-N.
     Groups {
         groups: Vec<AggregateGroup>,
+    },
+    /// Protocol 10. Answers [`Request::ListRelationKinds`]: every
+    /// relation label this domain knows, unspecified order.
+    RelationKinds {
+        kinds: Vec<String>,
     },
 }
 
@@ -833,6 +859,27 @@ mod tests {
                 &[0x00],                                           // limit: None
             ]),
         );
+        // Protocol 10 (`ENT2-FR-004`/`005`, ADR-0039): `NeighborsByRelation`
+        // at 17, `ListRelationKinds` at 18 (no fields, same shape as
+        // `DescribeSchema`).
+        assert_golden(
+            "NeighborsByRelation",
+            &Request::NeighborsByRelation {
+                id,
+                relation: "relates_to".into(),
+            },
+            &bytes(&[
+                &[0x11, 0x00, 0x00, 0x00], // NeighborsByRelation
+                &ID1,
+                &[0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], // relation len
+                b"relates_to",
+            ]),
+        );
+        assert_golden(
+            "ListRelationKinds",
+            &Request::ListRelationKinds,
+            &[0x12, 0x00, 0x00, 0x00],
+        );
     }
 
     /// `BINENC-FR-004`: every `Response` variant's wire bytes, pinned —
@@ -1002,6 +1049,20 @@ mod tests {
                 ], // ScanValue::F64(2.5)
             ]),
         );
+        // Protocol 10 (`ENT2-FR-005`, ADR-0039): `RelationKinds` at 14 —
+        // answers `Request::ListRelationKinds`.
+        assert_golden_eq(
+            "RelationKinds",
+            &Response::RelationKinds {
+                kinds: vec!["relates_to".into()],
+            },
+            &bytes(&[
+                &[0x0e, 0x00, 0x00, 0x00], // RelationKinds
+                &LEN1,                     // kinds: one label
+                &[0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+                b"relates_to",
+            ]),
+        );
         for (code, index) in [
             (ErrorCode::NoSession, 0x06u8),
             (ErrorCode::SessionOpen, 0x07),
@@ -1037,7 +1098,7 @@ mod tests {
     /// table; this test is the reminder.
     #[test]
     fn protocol_version_is_the_one_the_table_names() {
-        assert_eq!(PROTOCOL_VERSION, 9);
+        assert_eq!(PROTOCOL_VERSION, 10);
     }
 
     /// `SESS-FR-001`: the session shapes round-trip through the codec like
