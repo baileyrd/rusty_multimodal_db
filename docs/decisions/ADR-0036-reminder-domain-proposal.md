@@ -125,4 +125,13 @@ revisit only if a concrete need resurfaces.
   in PR #181.
 - 2026-09-04: accepted as proposed (option (a); (b) and (c) declined).
   Implementation follows as `SERVER-001`'s next minor / FR, per
-  `docs/design/SERVER-REMINDER-DOMAIN-DESIGN.md`. (This PR.)
+  `docs/design/SERVER-REMINDER-DOMAIN-DESIGN.md`. (PR #181.)
+- 2026-09-04: implemented as `SERVER-001` v0.29.0 / FR-039 — exactly
+  as designed, option (a) in full: `Reminder` (`src/generic/
+  reminder.rs`, front-door), `status` as the durably-mutable
+  `ScannableField`, `due_at_unix_ms` as the `IndexedField`, no
+  relation of either kind, `ReminderConnectionStore`
+  (`src/server/reminder.rs`, `server`-gated alone), a real
+  `reminder_server` binary confirmed by an actual smoke run, not just
+  a build. Every acceptance criterion 1–8 holds; no deviation from
+  the design. (This PR.)

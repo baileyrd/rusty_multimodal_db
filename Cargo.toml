@@ -118,6 +118,10 @@ name = "server_dog_integration"
 required-features = ["server"]
 
 [[test]]
+name = "server_reminder_integration"
+required-features = ["server"]
+
+[[test]]
 name = "server_order_integration"
 required-features = ["server", "research"]
 
@@ -183,6 +187,13 @@ required-features = ["research"]
 # for what this binary does and does not provide before running it.
 [[bin]]
 name = "dog_server"
+required-features = ["server"]
+
+# A minimal, real server binary for the `Reminder` domain — mirrors
+# `dog_server`'s own shape exactly (RMD-FR-008, ADR-0036); `server` alone
+# is sufficient, since `Reminder` is front-door, not `research`-gated.
+[[bin]]
+name = "reminder_server"
 required-features = ["server"]
 
 [dependencies]

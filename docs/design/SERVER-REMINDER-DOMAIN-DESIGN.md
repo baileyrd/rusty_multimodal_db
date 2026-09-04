@@ -468,3 +468,19 @@ changes anywhere in this proposal.
   generic schema library, made front-door for the first time.
 - 2026-09-04: Accepted as proposed. No content change. Implementation
   follows as `SERVER-001`'s next minor / FR.
+- 2026-09-04: Implemented as `SERVER-001` v0.29.0 / FR-039, exactly
+  this document's "Proposed shape" with no deviation. `Reminder`/
+  `ReminderStatus`/`DueAtField`/`StatusField`/`ReminderProductionStack`
+  landed front-door in `src/generic/reminder.rs`, not behind
+  `research`; `ReminderConnectionStore` landed in `src/server/
+  reminder.rs`, gated by `server` alone; `reminder_server` mirrors
+  `dog_server`'s shape exactly, confirmed listening by a real smoke
+  run. `CheckpointFlush` needed one small addition beyond the design's
+  own worked examples, not a deviation from them: `Reminder`'s
+  crash-atomic journal path (`RMD-FR-007`) requires
+  `ReminderProductionStack` to implement `CheckpointFlush`
+  (`src/server/journal.rs`), the same trait `OrderProductionStack`/
+  `EmployeeProductionStack` already implement — added directly,
+  delegating to `GenericMmapStore`'s already-generic `Flush`, since
+  `Reminder` needs no wrapping `Symmetric`/`Reversed` layer to forward
+  through. Every acceptance criterion 1–8 holds.
