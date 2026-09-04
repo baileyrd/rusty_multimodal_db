@@ -1,6 +1,16 @@
 # ADR-0038: `Entity`/`traverse` vs. `rusty_remind_me`'s real shape — verification findings
 
-- Status: **Proposed**
+- Status: **Accepted** (promoted from Proposed on 2026-09-04 — the
+  owner approved option (a): revise `Entity`/`traverse` to match the
+  real shape now, including the `Symmetric`-forwarding fix; (b)
+  accepting the findings as informational with no change and (c)
+  deprecating `Entity` both declined). Acceptance authorizes the
+  redesign's *direction*; the concrete mechanism (exact schema,
+  identity model, the `Symmetric`-forwarding fix's shape, migration
+  posture for the already-shipped `Entity` domain) is real,
+  additional design work, out of proportion to fold into this
+  acceptance — see "Acceptance and implementation" below for the
+  follow-up design round this authorizes.
 - Date: 2026-09-04
 - Deciders: baileyrd
 - Related: `docs/design/SERVER-ENTITY-INTEGRATION-VERIFICATION-DESIGN.md`
@@ -104,3 +114,10 @@ terms, only mismatched to one external system's real shape.
   the real shape now, including the `Symmetric`-forwarding fix; (b)
   accept as informational, no schema/engine change this round; (c)
   deprecate/remove `Entity`. Proposed in this PR.
+- 2026-09-04: accepted, option (a) — revise `Entity`/`traverse` to
+  match the real shape, including the `Symmetric`-forwarding fix; (b)
+  and (c) declined. The concrete redesign (schema, identity model, the
+  `Symmetric` fix's mechanism, migration posture) is real, additional
+  design work this acceptance authorizes but does not itself specify
+  — follows as its own design round, `SERVER-ENTITY-V2-REDESIGN` (or
+  equivalently named), before any implementation.

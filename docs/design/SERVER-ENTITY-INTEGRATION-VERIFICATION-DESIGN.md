@@ -1,6 +1,12 @@
-# Server Entity/Entity-Traverse Integration Verification (Proposed)
+# Server Entity/Entity-Traverse Integration Verification (Accepted)
 
-- Status: **Proposed**
+- Status: **Accepted** (promoted from Proposed on 2026-09-04 — the
+  owner approved option (a), `ADR-0038`: revise `Entity`/`traverse` to
+  match the real shape found here, including the `Symmetric`-
+  forwarding fix; (b) accepting as informational and (c) deprecating
+  `Entity` both declined). Acceptance authorizes the redesign's
+  direction; the concrete mechanism follows as its own design round —
+  see `ADR-0038`'s "Acceptance and implementation" section.
 - Date: 2026-09-04
 - Related: `ADR-0036`/`docs/design/SERVER-REMINDER-DOMAIN-DESIGN.md`,
   `ADR-0037`/`docs/design/SERVER-ENTITY-DOMAIN-DESIGN.md` (both
@@ -299,3 +305,7 @@ which option is chosen (a future option-(a) round would need its own
   closing the open question `ADR-0036`/`ADR-0037` each named. Option
   (b) proposed: accept as informational, no schema/engine change this
   round.
+- 2026-09-04: Accepted, option (a) — revise `Entity`/`traverse` to
+  match the real shape, including the `Symmetric`-forwarding fix; (b)
+  and (c) declined. A follow-up design round specifies the concrete
+  redesign before any implementation.
