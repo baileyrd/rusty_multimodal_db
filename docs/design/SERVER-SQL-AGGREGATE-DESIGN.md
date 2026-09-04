@@ -1,6 +1,11 @@
-# Server SQL Aggregation / GROUP BY Design (Proposed)
+# Server SQL Aggregation / GROUP BY Design (Accepted)
 
-- Status: **Proposed**
+- Status: **Accepted** (promoted from Proposed on 2026-09-04 — the owner
+  approved the design as proposed, `ADR-0035` option (a); accepting
+  without `AVG`/`ScanValue::F64` and closing as not warranted both
+  declined; no changes requested). Acceptance authorizes the design;
+  implementation follows as its own unit — see `ADR-0035`'s
+  "Acceptance and implementation" section.
 - Date: 2026-09-04
 - Related: `ADR-0034`/`docs/design/SERVER-SQL-SELECT-DESIGN.md` (the
   `Request::Query`/`Response::Rows` read-only `SELECT` subset this
@@ -601,3 +606,5 @@ impl SchemaDrivenClient {
   aggregation alone, extending `Request::Query`/`ADR-0034` with a new
   `Request::Aggregate`/`Response::Groups` pair at protocol version 9 and
   one new `ScanValue::F64` variant.
+- 2026-09-04: Accepted as proposed. No content change. Implementation
+  follows as `SERVER-001`'s next minor / FR.

@@ -1,6 +1,13 @@
 # ADR-0035: `GROUP BY` and aggregate functions on top of `Request::Query`
 
-- Status: **Proposed**
+- Status: **Accepted** (promoted from Proposed on 2026-09-04 — the owner
+  approved the design as proposed, option (a): `GROUP BY` and `COUNT`/
+  `SUM`/`AVG`/`MIN`/`MAX` on top of `Request::Query`, a new
+  `Request::Aggregate`/`Response::Groups` pair at protocol version 9,
+  `ScanValue::F64` for `AVG`; (b) accepting without `AVG`/`F64` and
+  (c) closing as not warranted both declined; no changes requested).
+  Acceptance authorizes the design; implementation follows as its own
+  unit — see "Acceptance and implementation" below.
 - Date: 2026-09-04
 - Deciders: baileyrd
 - Related: `docs/design/SERVER-SQL-AGGREGATE-DESIGN.md` (the full design
@@ -234,3 +241,6 @@ implementation:
   `SUM`/`MIN`/`MAX` only this round, deferring `AVG` and the new value
   kind; **(c)** close as not warranted — restate aggregation as still
   open, build nothing. Proposed in PR #178.
+- 2026-09-04: accepted as proposed (option (a); (b) and (c) declined).
+  Implementation follows as `SERVER-001`'s next minor / FR, per
+  `docs/design/SERVER-SQL-AGGREGATE-DESIGN.md`. (This PR.)
