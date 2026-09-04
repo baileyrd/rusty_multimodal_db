@@ -122,6 +122,10 @@ name = "server_reminder_integration"
 required-features = ["server"]
 
 [[test]]
+name = "server_entity_integration"
+required-features = ["server"]
+
+[[test]]
 name = "server_order_integration"
 required-features = ["server", "research"]
 
@@ -194,6 +198,13 @@ required-features = ["server"]
 # is sufficient, since `Reminder` is front-door, not `research`-gated.
 [[bin]]
 name = "reminder_server"
+required-features = ["server"]
+
+# A minimal, real server binary for the `Entity` domain — mirrors
+# `reminder_server`'s own shape exactly (ENT-FR-006, ADR-0037); `server`
+# alone is sufficient, since `Entity` is front-door, not `research`-gated.
+[[bin]]
+name = "entity_server"
 required-features = ["server"]
 
 [dependencies]

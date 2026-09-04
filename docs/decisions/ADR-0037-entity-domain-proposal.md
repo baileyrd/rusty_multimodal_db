@@ -117,3 +117,25 @@ slice; revisit only if a concrete need resurfaces.
 - 2026-09-04: accepted as proposed (option (a); (b) and (c) declined).
   Implementation follows as `SERVER-001`'s next minor / FR, per
   `docs/design/SERVER-ENTITY-DOMAIN-DESIGN.md`. (PR #183.)
+- 2026-09-04: implemented as `SERVER-001` v0.30.0 / FR-040 — exactly
+  as designed, option (a) in full: `Entity` (`src/generic/entity.rs`,
+  front-door, this library's first `SymmetricRelation` outside
+  `research`-gated reference material), `kind` as the equality-
+  filterable `IndexedField` (not inverted, unlike `Reminder::status`),
+  `mention_count` as the durably-mutable `ScannableField`, one
+  self-referential `RelatesTo` relation (`Dog::littermate_of`'s own
+  shape), `EntityConnectionStore` (`src/server/entity.rs`,
+  `server`-gated alone), a real `entity_server` binary, and
+  `SchemaDrivenClient::traverse` (`src/server/client.rs`) — bounded
+  client-side breadth-first walking over the existing
+  `Request::Neighbors`, no new wire primitive of any kind. The
+  `Symmetric`-forwarding gap this document named precisely stays
+  unfixed, exactly as accepted under option (a). Four new unit tests
+  in `src/generic/entity.rs` (run even under default, zero-feature
+  builds), five in `src/server/entity.rs`, nine in
+  `tests/server_entity_integration.rs` (new); every acceptance
+  criterion 1–8 holds; no deviation. Full sweep green: `cargo fmt`,
+  `cargo clippy -- -D warnings`, `cargo test --all-features`,
+  `cargo test` (default features, 143 lib tests confirming front-door
+  status), `cargo doc --all-features --no-deps` (64-warning baseline
+  held). (This PR.)

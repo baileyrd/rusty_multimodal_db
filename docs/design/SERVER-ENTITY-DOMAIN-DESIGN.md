@@ -493,3 +493,10 @@ changes anywhere in this proposal.
   independent marker the way `Reversed` does) that would have been
   needed for multiple named relation types, and deliberately not
   fixed this round.
+- 2026-09-04: Accepted as proposed, `ADR-0037` option (a); (b) also
+  fixing `Symmetric`'s forwarding gap this round and (c) closing as
+  not warranted both declined.
+- 2026-09-04: Implemented as `SERVER-001` v0.30.0 / FR-040, exactly as
+  designed — see `ADR-0037`'s own implementation log entry for the
+  full account. The `Symmetric`-forwarding gap stays named but
+  unfixed, exactly as accepted.
