@@ -85,6 +85,9 @@ server-side SQL parser.
   call); there is no second table on the same connection to join
   against. Cross-connection federation is a different, larger,
   unaddressed problem.
+  *Revisited by `ADR-0044` / `SERVER-001-FR-045` (v0.35.0): a `JOIN` over
+  a declared relation *within* the one table is real at protocol 12; a
+  second table per connection is `ADR-0045`, accepted as gated direction.*
 - **Aggregation and `GROUP BY`.** `docs/FUTURE-GROWTH.md` names this
   explicitly as DuckDB's own "core identity," not a small extension.
 - **`ORDER BY`.** `Response::Rows` carries rows in whatever unspecified

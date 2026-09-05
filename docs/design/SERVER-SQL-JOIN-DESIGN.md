@@ -680,3 +680,10 @@ other => dispatch_in(&tables, table, other),   // today's `dispatch(store, other
   (a), `ADR-0045` option (a) — gated direction). Stays design-only;
   Part A's implementation follows as `SERVER-001`'s next minor / FR
   (protocol 12), Part B's is gated on a second table.
+- 2026-09-05: **Part A implemented** (`SERVER-001-FR-045`, v0.35.0),
+  landed as this document's "Proposed shape" sketched it — see
+  `ADR-0044`'s implementation log for the two consequences recorded
+  (the `QueryResult` third-variant cost this document named; four
+  unplanned version pins in the previous unit's tests). Acceptance
+  criteria 1–7 (Part A) hold; the verification plan ran as written in
+  every suite it named. Part B stays gated per `ADR-0045`.

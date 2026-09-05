@@ -144,6 +144,7 @@ fn rows(result: QueryResult) -> Vec<(Uuid, Vec<(String, ScanValue)>)> {
         QueryResult::Groups(groups) => {
             panic!("expected QueryResult::Rows, got Groups: {groups:?}")
         }
+        QueryResult::Joined(joined) => panic!("expected Rows or Groups, got Joined: {joined:?}"),
     }
 }
 
@@ -490,6 +491,7 @@ fn groups(result: QueryResult) -> Vec<Vec<(String, ScanValue)>> {
     match result {
         QueryResult::Groups(groups) => groups,
         QueryResult::Rows(rows) => panic!("expected QueryResult::Groups, got Rows: {rows:?}"),
+        QueryResult::Joined(joined) => panic!("expected Rows or Groups, got Joined: {joined:?}"),
     }
 }
 

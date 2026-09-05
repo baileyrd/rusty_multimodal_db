@@ -10,11 +10,14 @@ use rusty_multimodal_db::generic::order_customer::{
     create_order_production_stack, Order, OrderStatus,
 };
 use rusty_multimodal_db::generic::production::GenericProductionStore;
+use rusty_multimodal_db::server::client::{ClientError, SchemaDrivenClient};
 use rusty_multimodal_db::server::framing::{read_message, write_message};
 use rusty_multimodal_db::server::order::{
     OrderConnectionStore, FIELD_AMOUNT, FIELD_CREATED_AT, FIELD_DISCOUNT, FIELD_STATUS,
 };
-use rusty_multimodal_db::server::protocol::{Request, Response, ScanValue};
+use rusty_multimodal_db::server::protocol::{
+    ErrorCode, JoinRelation, JoinSpec, Request, Response, ScanValue, Selection,
+};
 use rusty_multimodal_db::server::{serve, ServeOptions};
 use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
@@ -240,5 +243,62 @@ fn a_schema_driven_client_discovers_and_uses_the_status_field() {
         Response::RecordList {
             records: vec![Uuid::from_u128(1)]
         }
+    );
+}
+
+/// `JOIN` acceptance criterion 4 (ADR-0044): `Order`'s parent is a
+/// `Customer` — a type no store holds and this table cannot read — so the
+/// conservative `describe_relations()` default lists nothing for it
+/// (`Order` has no symmetric relation either). `SELECT … JOIN order b ON
+/// parent` is `ClientError::Sql` client-side; a raw `Request::Join` with
+/// `Parent` is `Malformed` server-side. The cross-table join this wants
+/// is ADR-0045's, gated on a `Customer` store.
+#[test]
+fn join_on_parent_is_refused_because_the_parent_is_another_table() {
+    let addr = start_server();
+    let mut client = SchemaDrivenClient::connect(addr).unwrap();
+    assert!(client.relations().is_empty());
+    assert!(matches!(
+        client.query("SELECT a.amount, b.amount FROM order a JOIN order b ON parent"),
+        Err(ClientError::Sql(_))
+    ));
+    assert!(matches!(
+        client.query("SELECT a.amount, b.amount FROM order a JOIN order b ON children"),
+        Err(ClientError::Sql(_))
+    ));
+
+    let mut wire = connect(addr);
+    assert_eq!(
+        roundtrip(
+            &mut wire,
+            Request::Hello {
+                protocol_version: 12
+            }
+        ),
+        Response::Hello {
+            protocol_version: 12
+        }
+    );
+    assert!(matches!(
+        roundtrip(
+            &mut wire,
+            Request::Join(JoinSpec {
+                relation: JoinRelation::Parent,
+                right_table: None,
+                left: Selection::All,
+                right: Selection::All,
+                left_filter: vec![],
+                right_filter: vec![],
+                limit: None,
+            })
+        ),
+        Response::Err {
+            code: ErrorCode::Malformed,
+            ..
+        }
+    ));
+    assert_eq!(
+        roundtrip(&mut wire, Request::DescribeRelations),
+        Response::Relations { relations: vec![] }
     );
 }

@@ -149,9 +149,10 @@ mod sql;
 
 use protocol::{
     AggregateFn, AggregateGroup, AggregateSpec, CompareOp, DomainSchema, ErrorCode, FieldRef,
-    ParentLookup, Predicate, RecordId, Request, Response, ScanValue, Selection, TransactionOp,
-    MAX_STAGED_OPS, MAX_TRACKED_READS, PROTOCOL_VERSION, SESSION_READ_YOUR_WRITES,
-    SESSION_SNAPSHOT_ISOLATION, SESSION_VALIDATE_ON_STAGE,
+    JoinRelation, JoinSpec, JoinedRow, ParentLookup, Predicate, RecordId, RelationDescriptor,
+    Request, Response, ScanValue, Selection, TransactionOp, MAX_STAGED_OPS, MAX_TRACKED_READS,
+    PROTOCOL_VERSION, SESSION_READ_YOUR_WRITES, SESSION_SNAPSHOT_ISOLATION,
+    SESSION_VALIDATE_ON_STAGE,
 };
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -240,6 +241,23 @@ pub trait ConnectionStore: Send + Sync {
     /// for a single-relation domain, more than one for `Entity`.
     /// Infallible, the same shape `describe` already has.
     fn list_relation_kinds(&self) -> Vec<String>;
+
+    /// `JOIN-FR-002` (ADR-0044, protocol 12): every relation a
+    /// [`Request::Join`] on this table may name. The default is derived
+    /// from [`ConnectionStore::describe`] and
+    /// [`ConnectionStore::list_relation_kinds`] by [`default_relation_
+    /// descriptors`] and is deliberately **conservative**: symmetric
+    /// relations are listed (`neighbors` plus one entry per label — they
+    /// are self-referential by construction), `parent`/`children` are
+    /// **omitted**, because the default cannot know whether the parent
+    /// type is this same table (`Employee`: yes; `Order`: no, its parent
+    /// is a `Customer` no store holds). An adapter whose directed relation
+    /// is self-referential overrides this to add them with `target_table:
+    /// None`. A wrong claim here returns wrong rows silently — the same
+    /// trust `describe()` already carries (`FR-010`).
+    fn describe_relations(&self) -> Vec<RelationDescriptor> {
+        default_relation_descriptors(&self.describe(), self.list_relation_kinds())
+    }
 
     /// This domain's schema, for a client that doesn't know it at compile
     /// time — ADR-0011. Infallible: every `ConnectionStore` implementor
@@ -495,6 +513,120 @@ fn select_fields(
             .filter(|(field, _)| wanted.contains(field))
             .collect(),
     }
+}
+
+/// The conservative [`ConnectionStore::describe_relations`] default —
+/// `JOIN-FR-002` (ADR-0044): `neighbors` and one entry per symmetric
+/// label when the schema reports `relations.neighbors`; nothing for
+/// `parent`/`children`, which an adapter must claim explicitly (see the
+/// trait method's own doc for why). Every entry is `target_table: None`.
+/// Public so an adapter's override can extend it rather than restate it.
+pub fn default_relation_descriptors(
+    schema: &DomainSchema,
+    labels: Vec<String>,
+) -> Vec<RelationDescriptor> {
+    let mut out = Vec::new();
+    if schema.relations.neighbors {
+        out.push(RelationDescriptor {
+            name: "neighbors".to_string(),
+            kind: JoinRelation::Neighbors(None),
+            target_table: None,
+        });
+        for label in labels {
+            out.push(RelationDescriptor {
+                kind: JoinRelation::Neighbors(Some(label.clone())),
+                name: label,
+                target_table: None,
+            });
+        }
+    }
+    out
+}
+
+/// `JOIN-FR-003` (ADR-0044): every rejection `Request::Join` can produce,
+/// checked against `schema` and `relations` alone — before `scan_all`
+/// ever runs. Both sides are validated exactly as `validate_query` does
+/// (`UnknownField`/`Malformed`); `right_table: Some(_)` is `Malformed`
+/// until ADR-0045 lands; a relation the adapter does not list is
+/// `Malformed`; one it lists with a `target_table` (another table's
+/// rows) is `Unsupported` while `right_table` is `None`. No new
+/// `ErrorCode`.
+fn validate_join(
+    schema: &DomainSchema,
+    relations: &[RelationDescriptor],
+    spec: &JoinSpec,
+) -> Result<(), ErrorCode> {
+    if spec.right_table.is_some() {
+        return Err(ErrorCode::Malformed);
+    }
+    validate_query(schema, &spec.left, &spec.left_filter)?;
+    validate_query(schema, &spec.right, &spec.right_filter)?;
+    match relations.iter().find(|r| r.kind == spec.relation) {
+        None => Err(ErrorCode::Malformed),
+        Some(r) if r.target_table.is_some() => Err(ErrorCode::Unsupported),
+        Some(_) => Ok(()),
+    }
+}
+
+/// `JOIN-FR-003` (ADR-0044): the index nested loop — for each `scan_all`
+/// row passing `left_filter`, the related ids through the adapter's own
+/// relation method, one `get` per id, `right_filter`, both projections,
+/// one [`JoinedRow`]. `limit` truncates the pair count *and* stops the
+/// loop — the one place a join bounds work as well as response,
+/// deliberate because the pair count is not knowable up front. A
+/// symmetric relation yields both orientations of an edge (SQL
+/// semantics, `JOIN-FR-004`). The `Err` arms of the relation calls are
+/// unreachable through `dispatch` (`validate_join` refused any relation
+/// the adapter does not list) and fall back to "no related rows" rather
+/// than panicking — the `compare` precedent.
+fn evaluate_join<S: ConnectionStore + ?Sized>(store: &S, spec: &JoinSpec) -> Vec<JoinedRow> {
+    let mut out = Vec::new();
+    let limit = spec.limit.unwrap_or(usize::MAX);
+    if limit == 0 {
+        return out;
+    }
+    for (left_id, left_fields) in store.scan_all() {
+        if !spec
+            .left_filter
+            .iter()
+            .all(|p| predicate_matches(&left_fields, p))
+        {
+            continue;
+        }
+        let right_ids: Vec<RecordId> = match &spec.relation {
+            JoinRelation::Neighbors(None) => store.neighbors(left_id).unwrap_or_default(),
+            JoinRelation::Neighbors(Some(label)) => store
+                .neighbors_by_relation(left_id, label)
+                .unwrap_or_default(),
+            JoinRelation::Parent => match store.parent(left_id) {
+                Ok(ParentLookup::Parent(parent_id)) => vec![parent_id],
+                _ => vec![],
+            },
+            JoinRelation::Children => store.children(left_id).unwrap_or_default(),
+        };
+        for right_id in right_ids {
+            let Some(right_fields) = store.get(right_id) else {
+                continue;
+            };
+            if !spec
+                .right_filter
+                .iter()
+                .all(|p| predicate_matches(&right_fields, p))
+            {
+                continue;
+            }
+            out.push(JoinedRow {
+                left_id,
+                left: select_fields(left_fields.clone(), &spec.left),
+                right_id,
+                right: select_fields(right_fields, &spec.right),
+            });
+            if out.len() >= limit {
+                return out;
+            }
+        }
+    }
+    out
 }
 
 /// `AGG-FR-006` (ADR-0035): every rejection `Request::Aggregate` can
@@ -822,7 +954,9 @@ fn outcome_of(resp: &Response) -> access::Outcome {
         | Response::Staged { .. }
         | Response::Rows { .. }
         | Response::Groups { .. }
-        | Response::RelationKinds { .. } => access::Outcome::Ok,
+        | Response::RelationKinds { .. }
+        | Response::JoinedRows { .. }
+        | Response::Relations { .. } => access::Outcome::Ok,
     }
 }
 
@@ -1624,6 +1758,21 @@ pub fn dispatch<S: ConnectionStore + ?Sized>(store: &S, req: Request) -> Respons
         Request::ListRelationKinds => Response::RelationKinds {
             kinds: store.list_relation_kinds(),
         },
+        // `JOIN-FR-001`–`003` (ADR-0044): validate against the schema and
+        // the adapter's own relation list, then the index nested loop.
+        // Gated server-side in `handle_connection` (`Malformed` below 12)
+        // — unlike `Query`/`Aggregate`, per the accepted design text.
+        Request::Join(spec) => {
+            match validate_join(&store.describe(), &store.describe_relations(), &spec) {
+                Ok(()) => Response::JoinedRows {
+                    rows: evaluate_join(store, &spec),
+                },
+                Err(code) => err_response(code),
+            }
+        }
+        Request::DescribeRelations => Response::Relations {
+            relations: store.describe_relations(),
+        },
         Request::DescribeSchema => Response::Schema(store.describe()),
         // `Authenticate` is intercepted directly by `handle_connection`,
         // which has the per-connection state (and `ServeOptions`) this
@@ -2160,6 +2309,13 @@ fn handle_connection<S: ConnectionStore + ?Sized>(
             }
             Request::Transaction { .. } if session.is_some() => {
                 err_response(ErrorCode::SessionOpen)
+            }
+            // `JOIN-FR-001`/`002` (ADR-0044), compatibility rule 3: the two
+            // protocol-12 requests are unknown to a connection negotiated
+            // below 12 — the session precedent, not `Query`'s client-only
+            // gate, per the accepted design text.
+            Request::Join(_) | Request::DescribeRelations if negotiated < 12 => {
+                err_response(ErrorCode::Malformed)
             }
             other => dispatch(store, other),
         };
@@ -3854,5 +4010,308 @@ mod tests {
              range (first-byte-diff: {start_elapsed:?}, last-byte-diff: {end_elapsed:?}) \
              — investigate for an early-exit comparison"
         );
+    }
+
+    /// `JOIN-FR-002`/`003` (ADR-0044): a fixture with every relation kind
+    /// real and self-referential — three records; symmetric edges 1–2
+    /// (label `r`) and 2–3 (label `q`); 2 and 3 report to 1.
+    struct JoinFixture;
+
+    impl JoinFixture {
+        fn value(id: RecordId) -> Option<u32> {
+            [1u128, 2, 3]
+                .into_iter()
+                .find(|n| RecordId::from_u128(*n) == id)
+                .map(|n| n as u32)
+        }
+    }
+
+    impl ConnectionStore for JoinFixture {
+        fn get(&self, id: RecordId) -> Option<Vec<(FieldRef, ScanValue)>> {
+            Self::value(id).map(|v| vec![(FIELD_A, ScanValue::U32(v))])
+        }
+        fn scan_all(&self) -> Vec<(RecordId, Vec<(FieldRef, ScanValue)>)> {
+            [1u128, 2, 3]
+                .into_iter()
+                .map(|n| {
+                    (
+                        RecordId::from_u128(n),
+                        vec![(FIELD_A, ScanValue::U32(n as u32))],
+                    )
+                })
+                .collect()
+        }
+        fn filter_eq(&self, _f: FieldRef, _v: &ScanValue) -> Result<Vec<RecordId>, ErrorCode> {
+            Err(ErrorCode::Unsupported)
+        }
+        fn scan_field(&self, _f: FieldRef) -> Result<Vec<ScanValue>, ErrorCode> {
+            Err(ErrorCode::Unsupported)
+        }
+        fn update_field(&self, _: RecordId, _: FieldRef, _: ScanValue) -> Result<bool, ErrorCode> {
+            Err(ErrorCode::Unsupported)
+        }
+        fn parent(&self, id: RecordId) -> Result<ParentLookup, ErrorCode> {
+            Ok(match Self::value(id) {
+                Some(1) => ParentLookup::NoParent,
+                Some(_) => ParentLookup::Parent(RecordId::from_u128(1)),
+                None => ParentLookup::ChildNotFound,
+            })
+        }
+        fn children(&self, id: RecordId) -> Result<Vec<RecordId>, ErrorCode> {
+            Ok(if id == RecordId::from_u128(1) {
+                vec![RecordId::from_u128(2), RecordId::from_u128(3)]
+            } else {
+                vec![]
+            })
+        }
+        fn neighbors(&self, id: RecordId) -> Result<Vec<RecordId>, ErrorCode> {
+            let mut all = self.neighbors_by_relation(id, "r")?;
+            all.extend(self.neighbors_by_relation(id, "q")?);
+            Ok(all)
+        }
+        fn neighbors_by_relation(
+            &self,
+            id: RecordId,
+            relation: &str,
+        ) -> Result<Vec<RecordId>, ErrorCode> {
+            let edge = match relation {
+                "r" => (1u128, 2u128),
+                "q" => (2, 3),
+                _ => return Err(ErrorCode::Malformed),
+            };
+            Ok(if id == RecordId::from_u128(edge.0) {
+                vec![RecordId::from_u128(edge.1)]
+            } else if id == RecordId::from_u128(edge.1) {
+                vec![RecordId::from_u128(edge.0)]
+            } else {
+                vec![]
+            })
+        }
+        fn list_relation_kinds(&self) -> Vec<String> {
+            vec!["r".into(), "q".into()]
+        }
+        fn describe_relations(&self) -> Vec<RelationDescriptor> {
+            let mut out =
+                default_relation_descriptors(&self.describe(), self.list_relation_kinds());
+            out.push(RelationDescriptor {
+                name: "parent".into(),
+                kind: JoinRelation::Parent,
+                target_table: None,
+            });
+            out.push(RelationDescriptor {
+                name: "children".into(),
+                kind: JoinRelation::Children,
+                target_table: None,
+            });
+            out
+        }
+        fn validate_op(&self, _op: &TransactionOp) -> Result<(), ErrorCode> {
+            Ok(())
+        }
+        fn describe(&self) -> DomainSchema {
+            let mut schema = FixtureStore.describe();
+            schema.relations.neighbors = true;
+            schema
+        }
+        fn apply_transaction(
+            &self,
+            _updates: &[TransactionOp],
+            _read_set: &[(RecordId, FieldRef, ScanValue)],
+        ) -> Result<(), (usize, ErrorCode)> {
+            Ok(())
+        }
+    }
+
+    fn join_spec(relation: JoinRelation) -> JoinSpec {
+        JoinSpec {
+            relation,
+            right_table: None,
+            left: Selection::All,
+            right: Selection::All,
+            left_filter: vec![],
+            right_filter: vec![],
+            limit: None,
+        }
+    }
+
+    fn pairs(rows: &[JoinedRow]) -> Vec<(u128, u128)> {
+        rows.iter()
+            .map(|r| (r.left_id.as_u128(), r.right_id.as_u128()))
+            .collect()
+    }
+
+    /// `JOIN-FR-002`: the default lists `neighbors` plus one entry per
+    /// label when the schema has a symmetric relation, and never
+    /// `parent`/`children` — an adapter must claim those itself. A domain
+    /// with no symmetric relation (`FixtureStore`) lists nothing.
+    #[test]
+    fn default_relation_descriptors_list_symmetric_labels_only() {
+        assert!(FixtureStore.describe_relations().is_empty());
+        let listed = default_relation_descriptors(
+            &JoinFixture.describe(),
+            JoinFixture.list_relation_kinds(),
+        );
+        assert_eq!(
+            listed,
+            vec![
+                RelationDescriptor {
+                    name: "neighbors".into(),
+                    kind: JoinRelation::Neighbors(None),
+                    target_table: None,
+                },
+                RelationDescriptor {
+                    name: "r".into(),
+                    kind: JoinRelation::Neighbors(Some("r".into())),
+                    target_table: None,
+                },
+                RelationDescriptor {
+                    name: "q".into(),
+                    kind: JoinRelation::Neighbors(Some("q".into())),
+                    target_table: None,
+                },
+            ]
+        );
+        // The override adds the directed pair.
+        assert_eq!(JoinFixture.describe_relations().len(), 5);
+    }
+
+    /// `JOIN-FR-003`: every rejection, with existing codes only.
+    #[test]
+    fn validate_join_refuses_other_tables_unknown_fields_and_unlisted_relations() {
+        let schema = JoinFixture.describe();
+        let relations = JoinFixture.describe_relations();
+        let mut other_table = join_spec(JoinRelation::Parent);
+        other_table.right_table = Some("customer".into());
+        assert_eq!(
+            validate_join(&schema, &relations, &other_table),
+            Err(ErrorCode::Malformed),
+            "right_table is ADR-0045's, Malformed until then"
+        );
+        let mut bad_left = join_spec(JoinRelation::Parent);
+        bad_left.left = Selection::Fields(vec![99]);
+        assert_eq!(
+            validate_join(&schema, &relations, &bad_left),
+            Err(ErrorCode::UnknownField)
+        );
+        let mut bad_right_filter = join_spec(JoinRelation::Parent);
+        bad_right_filter.right_filter = vec![Predicate {
+            field: FIELD_A,
+            op: CompareOp::Eq,
+            value: ScanValue::Str("x".into()),
+        }];
+        assert_eq!(
+            validate_join(&schema, &relations, &bad_right_filter),
+            Err(ErrorCode::Malformed)
+        );
+        // `FixtureStore` lists no relation at all: any join is Malformed.
+        assert_eq!(
+            validate_join(
+                &FixtureStore.describe(),
+                &FixtureStore.describe_relations(),
+                &join_spec(JoinRelation::Parent)
+            ),
+            Err(ErrorCode::Malformed)
+        );
+        assert_eq!(
+            validate_join(
+                &schema,
+                &relations,
+                &join_spec(JoinRelation::Neighbors(Some("zzz".into())))
+            ),
+            Err(ErrorCode::Malformed)
+        );
+        // Listed, but its rows live in another table: Unsupported.
+        let cross = vec![RelationDescriptor {
+            name: "parent".into(),
+            kind: JoinRelation::Parent,
+            target_table: Some("customer".into()),
+        }];
+        assert_eq!(
+            validate_join(&schema, &cross, &join_spec(JoinRelation::Parent)),
+            Err(ErrorCode::Unsupported)
+        );
+        assert_eq!(
+            validate_join(&schema, &relations, &join_spec(JoinRelation::Children)),
+            Ok(())
+        );
+    }
+
+    /// `JOIN-FR-003`/`004`: the index nested loop over every relation
+    /// kind — both orientations of a symmetric edge, a parentless left
+    /// row producing nothing, both filters, both projections, `limit`.
+    #[test]
+    fn evaluate_join_walks_every_relation_kind_and_applies_filters_projections_and_limit() {
+        let store = JoinFixture;
+        assert_eq!(
+            pairs(&evaluate_join(
+                &store,
+                &join_spec(JoinRelation::Neighbors(None))
+            )),
+            vec![(1, 2), (2, 1), (2, 3), (3, 2)]
+        );
+        assert_eq!(
+            pairs(&evaluate_join(
+                &store,
+                &join_spec(JoinRelation::Neighbors(Some("r".into())))
+            )),
+            vec![(1, 2), (2, 1)]
+        );
+        assert_eq!(
+            pairs(&evaluate_join(&store, &join_spec(JoinRelation::Parent))),
+            vec![(2, 1), (3, 1)],
+            "1 has no parent: no row for it"
+        );
+        assert_eq!(
+            pairs(&evaluate_join(&store, &join_spec(JoinRelation::Children))),
+            vec![(1, 2), (1, 3)]
+        );
+        let mut filtered = join_spec(JoinRelation::Children);
+        filtered.right_filter = vec![Predicate {
+            field: FIELD_A,
+            op: CompareOp::Gt,
+            value: ScanValue::U32(2),
+        }];
+        filtered.left = Selection::Fields(vec![]);
+        let rows = evaluate_join(&store, &filtered);
+        assert_eq!(pairs(&rows), vec![(1, 3)]);
+        assert!(rows[0].left.is_empty(), "left projection applied");
+        assert_eq!(rows[0].right, vec![(FIELD_A, ScanValue::U32(3))]);
+        let mut left_filtered = join_spec(JoinRelation::Neighbors(None));
+        left_filtered.left_filter = vec![Predicate {
+            field: FIELD_A,
+            op: CompareOp::Eq,
+            value: ScanValue::U32(2),
+        }];
+        assert_eq!(
+            pairs(&evaluate_join(&store, &left_filtered)),
+            vec![(2, 1), (2, 3)]
+        );
+        let mut limited = join_spec(JoinRelation::Neighbors(None));
+        limited.limit = Some(1);
+        assert_eq!(pairs(&evaluate_join(&store, &limited)), vec![(1, 2)]);
+        limited.limit = Some(0);
+        assert!(evaluate_join(&store, &limited).is_empty());
+    }
+
+    /// `JOIN-FR-001`/`002`: `dispatch` routes both protocol-12 requests to
+    /// the store, validating first.
+    #[test]
+    fn dispatch_answers_join_and_describe_relations() {
+        match dispatch(&JoinFixture, Request::Join(join_spec(JoinRelation::Parent))) {
+            Response::JoinedRows { rows } => assert_eq!(pairs(&rows), vec![(2, 1), (3, 1)]),
+            other => panic!("expected JoinedRows, got {other:?}"),
+        }
+        assert_eq!(
+            dispatch(
+                &FixtureStore,
+                Request::Join(join_spec(JoinRelation::Parent))
+            ),
+            err_response(ErrorCode::Malformed),
+            "FixtureStore lists no relation"
+        );
+        match dispatch(&JoinFixture, Request::DescribeRelations) {
+            Response::Relations { relations } => assert_eq!(relations.len(), 5),
+            other => panic!("expected Relations, got {other:?}"),
+        }
     }
 }
