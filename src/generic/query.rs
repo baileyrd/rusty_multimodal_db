@@ -87,6 +87,34 @@ pub trait MultiNeighbors<R: Record> {
     fn relation_kinds(&self) -> Vec<String>;
 }
 
+/// A record that resolves under more than one string key — a primary
+/// name plus zero or more aliases — `ENT3-FR-002`/`004` (ADR-0040). The
+/// runtime-keyed analogue of [`super::traits::IndexedField`] for a
+/// caller who doesn't yet have a record's id, only one of the strings it
+/// might be called by. **Not** a second `IndexedField`: `GenericMmapStore`
+/// structurally admits exactly one `IndexedField` marker per record
+/// type, and a domain whose one index slot is already taken (`Entity`'s
+/// `kind`) needs a separate mechanism, not a second marker — the same
+/// "new wrapper primitive, not a rework of the structural constraint"
+/// call [`MultiNeighbors`] made for relations one round earlier.
+///
+/// Keys are returned **un-normalized**; the [`super::store::NameIndex`]
+/// layer normalizes every key identically at build time and at query
+/// time (`ENT3-FR-003`), so normalization lives in exactly one place.
+pub trait NameIndexed: Record {
+    /// Every string this record should resolve under.
+    fn index_keys(&self) -> Vec<String>;
+}
+
+/// Resolve every record id registered under `name`, normalized —
+/// `ENT3-FR-005`'s in-process half. Zero, one, or many ids: two records
+/// sharing a normalized key both come back, collision handling is the
+/// caller's (see `docs/design/SERVER-ENTITY-ALIASES-DESIGN.md`'s own
+/// Non-goals).
+pub trait FindByName<R: NameIndexed> {
+    fn find_by_name(&self, name: &str) -> Vec<R::Id>;
+}
+
 /// The "one hop up" side of a *directed* relation. Has a blanket impl
 /// (`store.rs`) over anything providing `GetById<C>` — no new index
 /// needed, the foreign key already lives on the child.

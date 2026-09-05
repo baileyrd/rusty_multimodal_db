@@ -140,3 +140,34 @@ disproportionate primitive].
 - 2026-09-05: accepted as proposed (option (a); (b) and (c) declined).
   Implementation follows as `SERVER-001`'s next minor / FR, per
   `docs/design/SERVER-ENTITY-ALIASES-DESIGN.md`. (This PR.)
+- 2026-09-05: **implemented** as `SERVER-001-FR-042` (v0.32.0). Landed
+  as proposed — **no deviation from this ADR's accepted text**, unlike
+  `ADR-0039`'s own implementation one round earlier, which needed two
+  owner course-corrections mid-flight. The difference is where the
+  investigation happened: this round's design doc read the real merged
+  shape directly (`GenericMmapStore`'s single-`IndexedField`-marker
+  constraint, its full-struct `records: HashMap`, the whole-`Vec<R>`
+  record blob, `ScanValue`'s five variants) *before* proposing, so every
+  constraint that would otherwise have surprised implementation was
+  already named and designed around. Everything in "Decision" is real:
+  `aliases: Vec<String>` (durable, no `FieldRef`, no wire representation);
+  `NameIndex`/`NameIndexed`/`FindByName` in `crate::generic`, rebuilt from
+  records at every open with no file of its own (pinned by a test that
+  enumerates the directory and finds exactly the four pre-existing
+  files — the asymmetry from `MultiSymmetric`'s edge blobs holding
+  exactly as predicted); trim+lowercase normalization in one private
+  function at build and query; `EntityProductionStack` rewrapped;
+  `GenericProductionStore::find_by_name`; `EntityConnectionStore::
+  filter_eq` on `label` real against `label` or any alias; `DomainSchema`
+  reporting `label` `filter_eq: true`. **`src/server/protocol.rs` is
+  untouched** — no `PROTOCOL_VERSION` change, no new variant, no golden
+  vector edited, exactly as this ADR predicted from `ADR-0022`'s own
+  rules. One observation this ADR and its design left implicit, now
+  pinned by an integration test rather than assumed: `Request::Query`'s
+  SQL `WHERE label = '..'` stays `FR-037`'s exact-match full scan and
+  is deliberately *not* routed through `NameIndex` — a case-varied
+  literal returns no rows while `FilterEq` on the same field is
+  normalized; the two mechanisms are distinct on purpose (`SQL-FR-004`'s
+  "never an index" contract unchanged). Full sweep green — see
+  `docs/PROJECT-STATUS.md` item 120 and `SERVER-001-FR-042` for the
+  complete test/tooling account.

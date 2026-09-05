@@ -19,6 +19,20 @@
 //! see `crate::generic::entity`'s own module doc for why (`ScannableField::
 //! ScanValue: Copy`, and `String` is neither `Copy` nor mmap-fixed-width).
 //! `mention_count` fills that role instead, kept unchanged from v1.
+//!
+//! # `label` is equality-filterable too — through a different index
+//!
+//! `ENT3-FR-005`/`006` (ADR-0040): `filter_eq` on `label` resolves the
+//! query against the stack's `NameIndex` layer, not `GenericMmapStore`'s
+//! own `IndexedField` slot (`kind` holds that). It matches `label` *or
+//! any alias*, case- and whitespace-insensitively — normalization is the
+//! store's, so the raw wire string is passed straight through. Zero, one,
+//! or many ids; a miss is `Ok(vec![])`, never an error. Reuses
+//! `Request::FilterEq`/`ScanValue::Str`/`Response::RecordList` exactly as
+//! they are — **no `PROTOCOL_VERSION` change**; the only thing a client
+//! sees differently is `DomainSchema` now reporting `filter_eq: true` for
+//! `label`, a data value, not a shape. `aliases` itself has no `FieldRef`
+//! and appears in no response (`ScanValue` has no list variant).
 
 use super::journal::{CheckpointFlush, CommitError, CommitGroup, JournalError};
 use super::protocol::{
@@ -156,7 +170,10 @@ impl ConnectionStore for EntityConnectionStore {
                 Ok(self.store.filter_eq::<Entity, KindField>(kind))
             }
             (FIELD_KIND, _) => Err(ErrorCode::Malformed),
-            (FIELD_LABEL | FIELD_MENTION_COUNT, _) => Err(ErrorCode::Unsupported),
+            // `ENT3-FR-005`: `label` or any alias, normalized by the store.
+            (FIELD_LABEL, ScanValue::Str(name)) => Ok(self.store.find_by_name::<Entity>(name)),
+            (FIELD_LABEL, _) => Err(ErrorCode::Malformed),
+            (FIELD_MENTION_COUNT, _) => Err(ErrorCode::Unsupported),
             _ => Err(ErrorCode::UnknownField),
         }
     }
@@ -240,8 +257,10 @@ impl ConnectionStore for EntityConnectionStore {
                     tag: FIELD_LABEL,
                     name: "label".into(),
                     value_kind: ValueKind::Str,
+                    // `ENT3-FR-006`: `filter_eq` real since ADR-0040 (via
+                    // `NameIndex`, matching aliases too); still read-only.
                     capabilities: FieldCapabilities {
-                        filter_eq: false,
+                        filter_eq: true,
                         scan: false,
                         update: false,
                     },
@@ -324,18 +343,21 @@ mod tests {
                 label: "Ada Lovelace".into(),
                 kind: "person".into(),
                 mention_count: 3,
+                aliases: vec!["Ada".into(), "Countess of Lovelace".into()],
             },
             Entity {
                 id: Uuid::from_u128(2),
                 label: "Analytical Engine".into(),
                 kind: "concept".into(),
                 mention_count: 5,
+                aliases: vec![],
             },
             Entity {
                 id: Uuid::from_u128(3),
                 label: "London".into(),
                 kind: "place".into(),
                 mention_count: 1,
+                aliases: vec!["Londinium".into()],
             },
         ];
         let relates_to = vec![(Uuid::from_u128(1), Uuid::from_u128(2))];
@@ -375,9 +397,38 @@ mod tests {
             adapter.filter_eq(FIELD_MENTION_COUNT, &ScanValue::I64(0)),
             Err(ErrorCode::Unsupported)
         );
+    }
+
+    /// `ENT3-FR-005`: `label` or any alias, case/whitespace-insensitive,
+    /// through the raw wire string; a miss is empty; a non-`Str` is
+    /// `Malformed` (the same shape `kind`'s own non-`Str` case has).
+    #[test]
+    fn filter_eq_by_label_matches_label_and_aliases_normalized() {
+        let adapter = sample_adapter();
+        let ada = Ok(vec![Uuid::from_u128(1)]);
         assert_eq!(
-            adapter.filter_eq(FIELD_LABEL, &ScanValue::Str("x".into())),
-            Err(ErrorCode::Unsupported)
+            adapter.filter_eq(FIELD_LABEL, &ScanValue::Str("Ada Lovelace".into())),
+            ada
+        );
+        assert_eq!(
+            adapter.filter_eq(FIELD_LABEL, &ScanValue::Str("  ada LOVELACE ".into())),
+            ada
+        );
+        assert_eq!(
+            adapter.filter_eq(FIELD_LABEL, &ScanValue::Str("countess of lovelace".into())),
+            ada
+        );
+        assert_eq!(
+            adapter.filter_eq(FIELD_LABEL, &ScanValue::Str("LONDINIUM".into())),
+            Ok(vec![Uuid::from_u128(3)])
+        );
+        assert_eq!(
+            adapter.filter_eq(FIELD_LABEL, &ScanValue::Str("nobody".into())),
+            Ok(vec![])
+        );
+        assert_eq!(
+            adapter.filter_eq(FIELD_LABEL, &ScanValue::I64(1)),
+            Err(ErrorCode::Malformed)
         );
     }
 
@@ -443,7 +494,12 @@ mod tests {
     fn describe_names_all_three_fields_and_reports_neighbors_only() {
         let adapter = sample_adapter();
         let schema = adapter.describe();
+        // Three wire fields — `aliases` has no `FieldRef` (`ENT3-FR-001`).
         assert_eq!(schema.fields.len(), 3);
+        let label = schema.fields.iter().find(|f| f.name == "label").unwrap();
+        assert!(
+            label.capabilities.filter_eq && !label.capabilities.scan && !label.capabilities.update
+        );
         let kind = schema.fields.iter().find(|f| f.name == "kind").unwrap();
         assert!(
             kind.capabilities.filter_eq && !kind.capabilities.scan && !kind.capabilities.update
