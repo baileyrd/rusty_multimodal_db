@@ -86,6 +86,9 @@ from every doc that carries it.
   (`Dog`, `Employee`) — it is simply not `rusty_remind_me`'s shape.
 - Named, not hidden: `ENT5-FR-002` adds `sha2`, the first new
   `Cargo.toml` dependency since `rusty_tls`. Option (b) below avoids it.
+  *Corrected at implementation — see the log below: the first new
+  **unconditional** dependency since `subtle` (ADR-0012); `rusty_tls`
+  and the ADR-0015 bench crates that followed it are all optional.*
 - Named, not hidden: `mention_count` stays synthetic (F9); `kind` stays
   a required `String` (F6); `FilterEq` on `label` keeps returning every
   match rather than one (F7) — each a deliberate, now-informed keep.
@@ -120,3 +123,38 @@ gain].
   Implementation of `ENT5-FR-001`/`002` follows as `SERVER-001`'s next
   minor / FR, per `docs/design/SERVER-ENTITY-SOURCE-VERIFICATION-
   DESIGN.md`. F3/F4/F5 remain named, not built. (PR #189.)
+- 2026-09-05: **implemented** as `SERVER-001-FR-043` (v0.33.0). Both
+  follow-ups landed as proposed. `ENT5-FR-001`: `NameIndex::normalize`
+  is now `split_whitespace().collect().join(" ").to_lowercase()`,
+  matching `rusty_remind_me`'s `normalize_entity_name` exactly; made
+  `pub(crate)` so `entity_id` shares the one rule. `ENT5-FR-002`:
+  `pub fn entity_id(name: &str) -> Uuid` in `src/generic/entity.rs` —
+  `Uuid::from_bytes` over the first 16 bytes of `sha256(normalize(
+  name))`, full width per this ADR's own second fork; a convention, not
+  a store-enforced constraint (every hand-picked `Uuid::from_u128` id in
+  the existing fixtures still works, pinned by a test). One real
+  correction to this ADR's own text, recorded rather than quietly
+  edited: "the first new `Cargo.toml` dependency since `rusty_tls`" was
+  wrong — the three external-database bench crates (ADR-0015) were added
+  after `rusty_tls`. The accurate statement: `sha2` is the first new
+  **unconditional** dependency since `subtle` (ADR-0012); `rusty_tls`
+  and the bench crates are all `optional = true`. The design doc,
+  PROJECT-STATUS item 124, and the `Cargo.toml` comment carry the same
+  correction. The "source unread" caveat is retired everywhere it
+  appeared — `src/generic/entity.rs`'s module doc (rewritten: the
+  fixed-set `RELATION_LABELS` model is now a *known* divergence, not a
+  placeholder awaiting a value), the V2-redesign and aliases design
+  docs' open questions, and `SERVER-001`'s FR-040/041/042 entries — each
+  with a pointer to the findings, historical text left in place. Tests:
+  one new in `src/generic/store.rs` (`normalize` — the three whitespace
+  cases `entity_id_test.rs` pins plus this crate's own), two new in
+  `src/generic/entity.rs` (`entity_id` determinism/distinctness/nil;
+  mint-with-`entity_id`, fetch by re-deriving from another spelling,
+  alias resolves via the index not the id, hand-picked ids untouched),
+  one new in `tests/server_entity_integration.rs` (its own one-entity
+  server: `GetById(entity_id("  grace   HOPPER\t"))` in one round trip,
+  a different name is a miss, `FilterEq` on `label` collapses internal
+  whitespace for label and alias), plus one assertion each added to the
+  existing `find_by_name` tests in `entity.rs` and `server/entity.rs`.
+  Full sweep green — see `docs/PROJECT-STATUS.md` item 125 and
+  `SERVER-001-FR-043` for the counts.

@@ -94,7 +94,11 @@ expose over the wire this round.
   case-folding implementation (`ß`/`İ`-shaped edge cases are out of
   scope). Named plainly; no evidence this round has that it matters
   for real `rusty_remind_me` data, since that repository's own source
-  is still unread (Unit 41's own standing open question).
+  is still unread (Unit 41's own standing open question). *Since read —
+  `ADR-0042`, Finding F1: its `normalize_entity_name` is
+  `split_whitespace().join(" ").to_lowercase()`, also not Unicode case
+  folding; this Non-goal holds, but the trim-only whitespace rule this
+  document proposed did not — corrected at `ENT5-FR-001`.*
 
 ## Context and terminology
 
@@ -479,7 +483,10 @@ fn filter_eq(&self, field: FieldRef, value: &ScanValue) -> Result<Vec<RecordId>,
   named, not decided (see Non-goals).
 - Whether Unicode-aware case folding ever matters for real
   `rusty_remind_me` data — no evidence yet either way, that
-  repository's own source still unread.
+  repository's own source still unread. *Source since read (`ADR-0042`,
+  F1): it uses plain `to_lowercase` too, so the two systems agree; still
+  no evidence either way that folding matters — open on the merits, no
+  longer for lack of information.*
 - Whether a combined "resolve name, then fetch full record" single
   round trip is ever worth a server-side primitive, rather than the
   two separate calls (`FilterEq` then `GetById`) this round leaves a

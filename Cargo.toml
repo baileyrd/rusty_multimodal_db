@@ -290,6 +290,19 @@ duckdb = { version = "1", features = ["bundled"], optional = true }
 # oversight. `with-uuid-1` implements `ToSql`/`FromSql` for `uuid::Uuid` directly (this crate's
 # own record identity type) rather than round-tripping through a string column.
 postgres = { version = "0.19", features = ["with-uuid-1"], optional = true }
+# New as of `Entity`'s source-verification follow-ups (ADR-0042, `ENT5-FR-002`,
+# `docs/design/SERVER-ENTITY-SOURCE-VERIFICATION-DESIGN.md`): `crate::generic::entity::entity_id`
+# derives a deterministic `Uuid` from an entity's normalized name — SHA-256 over the normalized
+# string, first 16 bytes — so two callers minting the same name converge on one id and a
+# canonical-name lookup is a single indexed `GetById`. Mirrors `rusty_remind_me`'s own
+# `entity_id` (sha256 of the normalized name), read directly from its source, without inheriting
+# its 48-bit truncation. Pure Rust (RustCrypto), no build script; unconditional like `subtle`
+# above since `crate::generic::entity` is front-door, not `research`- or `server`-gated. The
+# first new *unconditional* dependency since `subtle` (ADR-0012) — every addition between them
+# (`rusty_tls`, the three external-database bench crates) is `optional = true`. Named as a real
+# cost in ADR-0042's own Consequences (which overstated it as "first since `rusty_tls`"; the
+# correction is recorded in that ADR's implementation log).
+sha2 = "0.10"
 
 [dependencies.rand]
 # Seeded, reproducible RNG for dataset generation (StdRng::seed_from_u64) and for benchmark

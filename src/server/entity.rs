@@ -414,6 +414,11 @@ mod tests {
             adapter.filter_eq(FIELD_LABEL, &ScanValue::Str("  ada LOVELACE ".into())),
             ada
         );
+        // `ENT5-FR-001`: an internal whitespace run is the same name.
+        assert_eq!(
+            adapter.filter_eq(FIELD_LABEL, &ScanValue::Str("ada   lovelace".into())),
+            ada
+        );
         assert_eq!(
             adapter.filter_eq(FIELD_LABEL, &ScanValue::Str("countess of lovelace".into())),
             ada

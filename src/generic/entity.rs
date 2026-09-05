@@ -51,15 +51,32 @@
 //! that type's own doc comment for the real, `rustc`-confirmed reason
 //! the originally-proposed generic-forwarding-impl mechanism doesn't
 //! compile. `MentionedWith` is an honest mechanism-validation label, not
-//! a claimed real `rusty_remind_me` relation name (still unverified,
-//! that repository's own source never having been read this session).
+//! a claimed real `rusty_remind_me` relation name — and, since ADR-0042
+//! read that repository's source directly (`docs/design/
+//! SERVER-ENTITY-SOURCE-VERIFICATION-DESIGN.md`, Finding F3), a real
+//! one could not exist: its `entity_relations.relation` is free-form
+//! text per triple, with no vocabulary at all. The fixed, compile-time
+//! label set `RELATION_LABELS` models is therefore a known divergence,
+//! named for a future design round, not a placeholder awaiting a value.
+//!
+//! # Identity: `entity_id`, a convention borrowed from the source
+//!
+//! `rusty_remind_me` keys entities by `sha256(normalized name)` so two
+//! machines recording the same name converge on one row (F2/F10 there).
+//! `entity_id` (below) offers the same convention here — a `Uuid` from the
+//! first 16 bytes of that digest — so `GetById(entity_id(name))` resolves
+//! a canonical name in one indexed round trip instead of `FilterEq` then
+//! `GetById`. A convention, not a store-enforced constraint: any `Uuid`
+//! remains a valid id, and every pre-existing test's hand-picked ids
+//! keep working. `ENT5-FR-002`.
 
 use super::mmap_store::GenericMmapStore;
 use super::query::NameIndexed;
-use super::store::{MultiSymmetric, NameIndex};
+use super::store::{normalize, MultiSymmetric, NameIndex};
 use super::traits::{IndexedField, Record, ScannableField, SchemaTag, SymmetricRelation};
 use crate::durability::DurabilityError;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::path::Path;
 use uuid::Uuid;
 
@@ -67,6 +84,30 @@ use uuid::Uuid;
 /// used by every `create`/`open`/`open_portable` call site so the label
 /// set is written once, not re-typed at each one.
 pub const RELATION_LABELS: [&str; 2] = ["relates_to", "mentioned_with"];
+
+/// The deterministic id for an entity name — `ENT5-FR-002` (ADR-0042).
+///
+/// A `Uuid` over the first 16 bytes of `sha256(normalize(name))`, where
+/// `normalize` is exactly the rule [`NameIndex`] keys on (collapse
+/// whitespace, lowercase). So `"Ada Lovelace"`, `"  ada   LOVELACE "`,
+/// and `"ada\tlovelace"` all derive the same id, and an entity minted
+/// with `id: entity_id(&label)` is found by `GetById(entity_id(query))`
+/// for any spelling of its canonical name — one indexed round trip, no
+/// `FilterEq`. Aliases are *not* part of the derivation (they resolve
+/// through the index, not the id), matching `rusty_remind_me`.
+///
+/// Full 128 bits of the digest, deliberately not the source's 12-hex
+/// (48-bit) truncation — see the design doc's own Non-goals: byte
+/// interop with its ids is impossible regardless (`Uuid` vs. a hex
+/// `String`), and the narrower domain is one its own author calls
+/// "inherited from the reference rather than chosen." A convention for
+/// callers, not a constraint the store checks.
+pub fn entity_id(name: &str) -> Uuid {
+    let digest = Sha256::digest(normalize(name).as_bytes());
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    Uuid::from_bytes(bytes)
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Entity {
@@ -295,6 +336,53 @@ mod tests {
         vec![(Uuid::from_u128(1), Uuid::from_u128(3))]
     }
 
+    /// `ENT5-FR-002`: every spelling of one canonical name derives one
+    /// id; a different name derives a different one; the derivation is
+    /// stable across calls (no randomness, no timestamp).
+    #[test]
+    fn entity_id_is_deterministic_over_the_normalized_name() {
+        let canonical = entity_id("Bailey Robertson");
+        assert_eq!(entity_id("  Bailey   Robertson  "), canonical);
+        assert_eq!(entity_id("bailey robertson"), canonical);
+        assert_eq!(entity_id("BAILEY\tROBERTSON\n"), canonical);
+        assert_eq!(entity_id("Bailey Robertson"), canonical, "stable");
+        assert_ne!(entity_id("Bailey Robertson II"), canonical);
+        assert_ne!(entity_id("BaileyRobertson"), canonical);
+        assert_ne!(entity_id(""), canonical);
+        // Never the nil UUID for a real name — the digest is never zero.
+        assert_ne!(canonical, Uuid::nil());
+    }
+
+    /// `ENT5-FR-002` as a caller would use it: mint with `entity_id`,
+    /// fetch by re-deriving from a differently-spelled query — one
+    /// `GetById`, no `FilterEq`. Hand-picked ids in the other fixtures
+    /// keep working alongside it (a convention, not a constraint).
+    #[test]
+    fn get_by_id_resolves_a_derived_id_from_any_spelling() {
+        let dir = fresh_temp_dir("generic_entity_v5_derived_id").unwrap();
+        let path = dir.join("entities.mmap");
+        let mut entities = sample_entities();
+        entities.push(Entity {
+            id: entity_id("Grace Hopper"),
+            label: "Grace Hopper".into(),
+            kind: "person".into(),
+            mention_count: 0,
+            aliases: vec!["Amazing Grace".into()],
+        });
+        let store = create_entity_production_stack(entities, &[], &[], &path).unwrap();
+
+        let got = GetById::<Entity>::get(&store, entity_id("  grace   HOPPER ")).unwrap();
+        assert_eq!(got.label, "Grace Hopper");
+        // The alias resolves through the index, not the id.
+        assert!(GetById::<Entity>::get(&store, entity_id("Amazing Grace")).is_none());
+        assert_eq!(
+            FindByName::<Entity>::find_by_name(&store, "amazing   grace"),
+            vec![entity_id("Grace Hopper")]
+        );
+        // Hand-picked ids from the shared fixture are untouched.
+        assert!(GetById::<Entity>::get(&store, Uuid::from_u128(1)).is_some());
+    }
+
     #[test]
     fn create_then_get_filter_eq_and_multi_relation_neighbors() {
         let dir = fresh_temp_dir("generic_entity_v2").unwrap();
@@ -372,6 +460,15 @@ mod tests {
         );
         assert_eq!(
             FindByName::<Entity>::find_by_name(&store, "  ADA LOVELACE\t"),
+            ada
+        );
+        // `ENT5-FR-001`: internal whitespace runs collapse too.
+        assert_eq!(
+            FindByName::<Entity>::find_by_name(&store, "Ada   Lovelace"),
+            ada
+        );
+        assert_eq!(
+            FindByName::<Entity>::find_by_name(&store, "Ada\tLovelace"),
             ada
         );
         assert_eq!(FindByName::<Entity>::find_by_name(&store, "Ada"), ada);
