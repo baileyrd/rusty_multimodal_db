@@ -11,6 +11,7 @@
 //! "research"]` — the precedent `tests/server_schema_driven_client.rs`
 //! set for a target that needs every domain adapter.
 
+use rusty_multimodal_db::generic::entity::{create_entity_production_stack, Entity};
 use rusty_multimodal_db::generic::order_customer::{
     create_order_production_stack, Order, OrderStatus,
 };
@@ -24,10 +25,11 @@ use rusty_multimodal_db::server::client::{
 };
 use rusty_multimodal_db::server::dog::DogConnectionStore;
 use rusty_multimodal_db::server::employee::EmployeeConnectionStore;
+use rusty_multimodal_db::server::entity::EntityConnectionStore;
 use rusty_multimodal_db::server::framing::{read_message, write_message};
 use rusty_multimodal_db::server::order::OrderConnectionStore;
 use rusty_multimodal_db::server::protocol::{
-    ErrorCode, Request, Response, ScanValue, PROTOCOL_VERSION,
+    ErrorCode, Request, Response, ScanValue, ValueKind, PROTOCOL_VERSION,
 };
 use rusty_multimodal_db::server::{dispatch, serve, ServeOptions};
 use rusty_multimodal_db::ProductionStore;
@@ -98,6 +100,29 @@ fn start_employee_server() -> SocketAddr {
     let edges = vec![];
     let stack = create_employee_production_stack(employees, &edges, &path).unwrap();
     let connection_store = Arc::new(EmployeeConnectionStore::new(GenericProductionStore::new(
+        stack,
+    )));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    thread::spawn(move || serve(listener, connection_store, ServeOptions::default()));
+    addr
+}
+
+/// `ENT4-FR-003` (ADR-0041): the one domain with a protocol-11 field
+/// (`aliases`, `StrList`) — for the rule-3 content-strip proof below.
+fn start_entity_server() -> SocketAddr {
+    let dir = unique_dir("proto_version_entity");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("entities.mmap");
+    let entities = vec![Entity {
+        id: Uuid::from_u128(1),
+        label: "Ada Lovelace".into(),
+        kind: "person".into(),
+        mention_count: 3,
+        aliases: vec!["Ada".into()],
+    }];
+    let stack = create_entity_production_stack(entities, &[], &[], &path).unwrap();
+    let connection_store = Arc::new(EntityConnectionStore::new(GenericProductionStore::new(
         stack,
     )));
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -257,7 +282,7 @@ fn hello_zero_and_a_late_hello_are_malformed_and_a_silent_client_is_served() {
 fn schema_driven_client_negotiates_the_current_version_on_every_domain() {
     let mut dog = SchemaDrivenClient::connect(start_dog_server(ServeOptions::default())).unwrap();
     assert_eq!(dog.server_protocol_version(), PROTOCOL_VERSION);
-    assert_eq!(dog.server_protocol_version(), 10);
+    assert_eq!(dog.server_protocol_version(), 11);
     let fields = dog.get(Uuid::from_u128(1)).unwrap().unwrap();
     assert!(fields
         .iter()
@@ -270,6 +295,93 @@ fn schema_driven_client_negotiates_the_current_version_on_every_domain() {
     let mut employee = SchemaDrivenClient::connect(start_employee_server()).unwrap();
     assert_eq!(employee.server_protocol_version(), PROTOCOL_VERSION);
     assert!(employee.get(Uuid::from_u128(1)).unwrap().is_some());
+}
+
+/// `ENT4-FR-003` (ADR-0041), design criterion 3 in the cross-domain
+/// suite: rule 3's first *content* rewrite. A `Hello { 10 }` client's
+/// `DescribeSchema` against `entity_server` lacks `aliases` (and every
+/// `StrList` descriptor) and its `GetById` lacks the pair; the same
+/// connection kind at this build's version sees both. Every other domain
+/// has no `StrList` field, so nothing is stripped for it at any version
+/// (`schema_driven_client_negotiates_the_current_version_on_every_domain`
+/// above, unchanged, is that half).
+#[test]
+fn a_version_10_client_never_sees_entity_aliases() {
+    let addr = start_entity_server();
+
+    let (mut reader, mut writer) = connect(addr);
+    assert_eq!(
+        roundtrip(
+            &mut reader,
+            &mut writer,
+            &Request::Hello {
+                protocol_version: 10
+            }
+        ),
+        Response::Hello {
+            protocol_version: 10
+        }
+    );
+    match roundtrip(&mut reader, &mut writer, &Request::DescribeSchema) {
+        Response::Schema(schema) => {
+            assert_eq!(schema.fields.len(), 3);
+            assert!(!schema.fields.iter().any(|f| f.name == "aliases"));
+            assert!(!schema
+                .fields
+                .iter()
+                .any(|f| f.value_kind == ValueKind::StrList));
+        }
+        other => panic!("expected Schema, got {other:?}"),
+    }
+    match roundtrip(
+        &mut reader,
+        &mut writer,
+        &Request::GetById {
+            id: Uuid::from_u128(1),
+        },
+    ) {
+        Response::Record { fields, .. } => {
+            assert_eq!(fields.len(), 3);
+            assert!(!fields
+                .iter()
+                .any(|(_, v)| matches!(v, ScanValue::StrList(_))));
+        }
+        other => panic!("expected Record, got {other:?}"),
+    }
+
+    let (mut reader, mut writer) = connect(addr);
+    assert_eq!(
+        roundtrip(
+            &mut reader,
+            &mut writer,
+            &Request::Hello {
+                protocol_version: PROTOCOL_VERSION
+            }
+        ),
+        Response::Hello {
+            protocol_version: 11
+        }
+    );
+    match roundtrip(&mut reader, &mut writer, &Request::DescribeSchema) {
+        Response::Schema(schema) => {
+            assert_eq!(schema.fields.len(), 4);
+            let aliases = schema.fields.iter().find(|f| f.name == "aliases").unwrap();
+            assert_eq!(aliases.value_kind, ValueKind::StrList);
+        }
+        other => panic!("expected Schema, got {other:?}"),
+    }
+    match roundtrip(
+        &mut reader,
+        &mut writer,
+        &Request::GetById {
+            id: Uuid::from_u128(1),
+        },
+    ) {
+        Response::Record { fields, .. } => {
+            assert_eq!(fields[3], (3, ScanValue::StrList(vec!["Ada".into()])));
+        }
+        other => panic!("expected Record, got {other:?}"),
+    }
 }
 
 /// Criterion 8: a request index this build does not know (the one just

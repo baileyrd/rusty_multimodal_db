@@ -65,6 +65,7 @@
 //! | 8 | `SERVER-001` v0.27.0 | + [`Request::Query`] (15) and [`Response::Rows`] (12) — a read-only `SELECT`-shaped query (`Selection`/`Predicate`/`CompareOp`), parsed client-side from real SQL text and compiled to a new unconditional full-scan-then-filter, never an index — see `src/server/sql.rs`/[`super::client::SchemaDrivenClient::query`]. `Malformed` below 8 is not reachable (the client never sends one below 8, `SQL-FR-010`); no new `ErrorCode` — `UnknownField`/`Malformed` cover every rejection, reused. Not overlaid by a read-your-writes session and never tracked into a snapshot-isolated session's read set — the same "only `GetById`" line `RYW-FR`/`ISO-FR-002` already draw (`SQL-FR-009`). ADR-0034 |
 //! | 9 | `SERVER-001` v0.28.0 | + [`Request::Aggregate`] (16) and [`Response::Groups`] (13) — `GROUP BY`/`COUNT`/`SUM`/`AVG`/`MIN`/`MAX` on top of [`Request::Query`]'s own machinery: `group_by` buckets `ConnectionStore::scan_all`'s already-filtered rows (empty `group_by` is one implicit whole-table group), `aggregates` reduces each bucket (`AggregateFn`/`AggregateSpec`), `filter` reuses [`Predicate`]/[`CompareOp`] unchanged. [`ScanValue`] gains `F64(f64)` — [`AggregateFn::Avg`]'s result, the wire's first fractional value; never a stored field's `ValueKind`. No new `ErrorCode`. Not overlaid, not read-set-tracked — the identical line `SQL-FR-009` already draws. `Malformed` below 9 is not reachable (`AGG-FR-010`); `Request::Query`/`Response::Rows` and every byte at version 8 and below are unchanged — a plain `SELECT` still only needs version 8. ADR-0035 |
 //! | 10 | `SERVER-001` v0.31.0 | + [`Request::NeighborsByRelation`] (17), [`Request::ListRelationKinds`] (18), and [`Response::RelationKinds`] (14) — `ENT2-FR-004`/`005`, ADR-0039: a one-hop neighbor lookup filtered to one named relation label (`NeighborsByRelation`, answered by the existing [`Response::RecordList`] unchanged), and relation-label discovery (`ListRelationKinds`/`RelationKinds`) for a domain with more than one named `SymmetricRelation` — [`crate::generic::entity::Entity`], the first. No field added to any pre-existing `Request`/`Response` variant or to `DomainSchema`/`RelationCapabilities` — `bincode`'s positional struct encoding makes that unsafe (rule 1); both are brand-new, appended variants instead. No new `ErrorCode` — an unknown relation label reuses `Malformed`. Gated entirely client-side, the same posture `Query`/`Aggregate` already established: `dispatch` itself performs no version check (as it never has for `Query`/`Aggregate` either), relying on `SchemaDrivenClient` never sending either request below version 10. Not overlaid, not read-set-tracked. ADR-0039 |
+//! | 11 | `SERVER-001` v0.34.0 | + [`ScanValue::StrList`] (5) and [`ValueKind::StrList`] (4) — `ENT4-FR-001`, ADR-0041: a stored list-of-strings field, [`crate::generic::entity::Entity`]'s `aliases` the first (`FIELD_ALIASES = 3`, every capability flag `false`, read-only). Unlike `F64`, `StrList` describes a stored field's real type, so its `ValueKind` exists. **The first appended value variant that reaches an ungated response** — `GetById`/`Query`/`DescribeSchema` are protocol-1/8/1 requests a silent client can send — so rule 3 rewrites *content* for the first time: `downgrade_for_version` strips every `StrList` pair from `Response::Record`/`Rows` and every `StrList` descriptor from `Response::Schema` on a connection negotiated below 11, leaving exactly the three-field `Entity` of `FR-042`. No new `Request`/`ErrorCode`. ADR-0041 |
 //!
 //! ## Compatibility rules (`PROTO-FR-005`)
 //!
@@ -99,7 +100,7 @@ use uuid::Uuid;
 /// versions" table. Bumped by exactly one in any change that appends a
 /// variant (rule 2). Version 1 is retroactively the `SERVER-001` v0.9.1
 /// shape: what a client that never sends [`Request::Hello`] speaks.
-pub const PROTOCOL_VERSION: u32 = 10;
+pub const PROTOCOL_VERSION: u32 = 11;
 
 /// `Request::BeginWith` flag bit 0 (protocol 5, `RYW-FR-001`, ADR-0027):
 /// the session's own point reads (`GetById`) see its staged writes —
@@ -157,7 +158,10 @@ pub type FieldRef = u16;
 /// `U32`/`I64`/`Bool`. `F64` (protocol 9, `AGG-FR-005`, ADR-0035) is a
 /// later, narrower addition: it never describes a stored field's real
 /// type (no `ValueKind::F64` exists to match it) — it exists solely to
-/// carry [`AggregateFn::Avg`]'s computed result on the wire.
+/// carry [`AggregateFn::Avg`]'s computed result on the wire. `StrList`
+/// (protocol 11, `ENT4-FR-001`, ADR-0041) is the opposite case: a stored
+/// field's real type (`Entity::aliases`), so [`ValueKind::StrList`] exists
+/// to match it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ScanValue {
     U32(u32),
@@ -165,6 +169,14 @@ pub enum ScanValue {
     Bool(bool),
     Str(String),
     F64(f64),
+    /// Protocol 11, `ENT4-FR-001` (ADR-0041): a stored list-of-strings
+    /// field — `Entity::aliases`, the first — carried raw, in stored
+    /// order, un-normalized. Read-only over the wire: every write/filter/
+    /// scan/aggregate path on such a field is `Unsupported`/`Malformed`.
+    /// Stripped from every response by `downgrade_for_version` on a
+    /// connection negotiated below 11 (rule 3, the protocol's first
+    /// content-rewriting downgrade).
+    StrList(Vec<String>),
 }
 
 /// One write within a [`Request::Transaction`] batch — the same three
@@ -279,14 +291,19 @@ pub enum ParentLookup {
     ChildNotFound,
 }
 
-/// A field's wire value type — mirrors [`ScanValue`]'s variants without
-/// carrying a value, for [`FieldDescriptor`].
+/// A field's wire value type — mirrors [`ScanValue`]'s *stored-field*
+/// variants without carrying a value, for [`FieldDescriptor`]. `F64` has
+/// no kind (it is never a stored field's type); `StrList` (protocol 11,
+/// `ENT4-FR-001`, ADR-0041) does, because `Entity::aliases` is one. A
+/// `StrList` descriptor is omitted from `DomainSchema` for a connection
+/// negotiated below 11 (rule 3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ValueKind {
     U32,
     I64,
     Bool,
     Str,
+    StrList,
 }
 
 /// Which operations a field supports over this protocol — not every
@@ -1063,6 +1080,75 @@ mod tests {
                 b"relates_to",
             ]),
         );
+        // Protocol 11 (`ENT4-FR-001`/`006`, ADR-0041): `ScanValue::StrList`
+        // at 5 and `ValueKind::StrList` at 4, each pinned inside the one
+        // ungated response shape that can carry it — `Record`, `Rows`,
+        // `Schema`. Every vector above is byte-for-byte unchanged (rule 1).
+        assert_golden_eq(
+            "Record(StrList)",
+            &Response::Record {
+                id,
+                fields: vec![(3, ScanValue::StrList(vec!["Ada".into(), "Countess".into()]))],
+            },
+            &bytes(&[
+                &[0x00, 0x00, 0x00, 0x00], // Record
+                &ID1,
+                &LEN1,                     // fields: one (tag, value) pair
+                &[0x03, 0x00],             // field tag
+                &[0x05, 0x00, 0x00, 0x00], // ScanValue::StrList
+                &[0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], // two strings
+                &[0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+                b"Ada",
+                &[0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+                b"Countess",
+            ]),
+        );
+        assert_golden_eq(
+            "Rows(StrList)",
+            &Response::Rows {
+                rows: vec![(id, vec![(3, ScanValue::StrList(vec!["Ada".into()]))])],
+            },
+            &bytes(&[
+                &[0x0c, 0x00, 0x00, 0x00], // Rows
+                &LEN1,                     // rows: one (id, fields) pair
+                &ID1,
+                &LEN1,                     // fields: one (tag, value) pair
+                &[0x03, 0x00],             // field tag
+                &[0x05, 0x00, 0x00, 0x00], // ScanValue::StrList
+                &LEN1,                     // one string
+                &[0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+                b"Ada",
+            ]),
+        );
+        assert_golden_eq(
+            "Schema(StrList)",
+            &Response::Schema(DomainSchema {
+                fields: vec![FieldDescriptor {
+                    tag: 3,
+                    name: "aliases".into(),
+                    value_kind: ValueKind::StrList,
+                    capabilities: FieldCapabilities {
+                        filter_eq: false,
+                        scan: false,
+                        update: false,
+                    },
+                }],
+                relations: RelationCapabilities {
+                    parent_children: false,
+                    neighbors: true,
+                },
+            }),
+            &bytes(&[
+                &[0x04, 0x00, 0x00, 0x00], // Schema
+                &LEN1,                     // fields: one descriptor
+                &[0x03, 0x00],             // tag
+                &[0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+                b"aliases",
+                &[0x04, 0x00, 0x00, 0x00], // ValueKind::StrList
+                &[0x00, 0x00, 0x00],       // capabilities: all false
+                &[0x00, 0x01],             // relations
+            ]),
+        );
         for (code, index) in [
             (ErrorCode::NoSession, 0x06u8),
             (ErrorCode::SessionOpen, 0x07),
@@ -1089,8 +1175,10 @@ mod tests {
     }
 
     /// `PROTO-FR-001`/`PROTO-FR-005` rule 2: the constant matches the
-    /// module docs' table — version 9 is the one that added
-    /// `Request::Aggregate`/`Response::Groups` (8 added `Request::Query`/
+    /// module docs' table — version 11 is the one that added
+    /// `ScanValue::StrList`/`ValueKind::StrList` (10 added
+    /// `NeighborsByRelation`/`ListRelationKinds`/`RelationKinds`, 9
+    /// `Request::Aggregate`/`Response::Groups`, 8 `Request::Query`/
     /// `Response::Rows`, 7 `ErrorCode::Conflict` and
     /// `SESSION_SNAPSHOT_ISOLATION`, 6 `SESSION_VALIDATE_ON_STAGE`, 4
     /// `ErrorCode::Journal`, 3 the session variants, 2 `Hello`). A change
@@ -1098,7 +1186,7 @@ mod tests {
     /// table; this test is the reminder.
     #[test]
     fn protocol_version_is_the_one_the_table_names() {
-        assert_eq!(PROTOCOL_VERSION, 10);
+        assert_eq!(PROTOCOL_VERSION, 11);
     }
 
     /// `SESS-FR-001`: the session shapes round-trip through the codec like

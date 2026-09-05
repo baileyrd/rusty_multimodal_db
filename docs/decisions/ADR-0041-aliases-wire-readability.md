@@ -125,3 +125,39 @@ the list itself is demonstrated].
 - 2026-09-05: accepted as proposed (option (a); (b) and (c) declined).
   Implementation follows as `SERVER-001`'s next minor / FR (protocol
   11), per `docs/design/SERVER-ENTITY-ALIASES-WIRE-DESIGN.md`. (PR #188.)
+- 2026-09-05: **implemented** as `SERVER-001-FR-044` (v0.34.0). Landed
+  as proposed: `ScanValue::StrList` (5) and `ValueKind::StrList` (4)
+  appended, `PROTOCOL_VERSION` 11, table row 11, three golden vectors;
+  `FIELD_ALIASES = 3` in `src/server/entity.rs` with every capability
+  flag `false`, the raw stored list in `get`/`scan_all`, the matching
+  `check_read_set` arm, and `Unsupported` from every write/filter/scan
+  path (tag 3 was `UnknownField`; tag 4 still is); `downgrade_for_
+  version`'s three rule-3 content arms for `negotiated < 11` (`Record`/
+  `Rows` pairs, `Schema` descriptors) plus the debug assertion that
+  `ScanValues`/`Groups` never carry one — proven over a real socket in
+  `tests/server_entity_integration.rs` and `tests/server_protocol_
+  version.rs` against a hand-negotiated `Hello { 10 }` client and a
+  silent client, each seeing exactly the `FR-042` three-field shape.
+  **One implementation-time completion this ADR did not name, recorded
+  here rather than folded in silently**: the invariant "a `StrList`
+  never appears inside `Response::Groups`" had one unguarded path —
+  `GROUP BY aliases`. `validate_aggregate` checked only that a
+  `group_by` tag exists, not its kind, and `Vec<String>` is `PartialEq`,
+  so bucketing would have succeeded and the debug assertion fired.
+  Closed on both sides with existing codes, in the spirit of the
+  design's own "not aggregatable" Non-goal: `validate_aggregate`
+  answers `Malformed` for a `StrList`-kinded group key (server side),
+  and `SchemaDrivenClient::query_aggregate` refuses `GROUP BY` on a
+  `StrList` field as `ClientError::Sql` with no round trip (client
+  side, the posture `SUM`/`AVG`/`MIN`/`MAX` already take). Additive,
+  reusing existing codes; no other deviation. The design round's claim
+  that every other `ScanValue`/`ValueKind` match site already had a
+  safe fallthrough held on implementation. Wire-only: `NameIndex`,
+  normalization, `Entity`'s struct, every blob and every on-disk byte
+  untouched; no `Cargo.toml` change. Tests: two new unit tests in
+  `src/server/mod.rs`, one new in `src/server/entity.rs` (two
+  extended), three new in `tests/server_entity_integration.rs`
+  (criteria 2, 3, 4), one new in `tests/server_protocol_version.rs`,
+  the three hardcoded version pins moved to 11. Full sweep green — see
+  `docs/PROJECT-STATUS.md` item 126 and `SERVER-001-FR-044` for the
+  counts.

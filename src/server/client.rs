@@ -659,9 +659,10 @@ fn aggregate_fn_name(func: AggregateFn) -> &'static str {
 /// [`SchemaDrivenClient::query`]'s own resolution step (`SQL-FR-002`):
 /// turn one parsed `WHERE`-clause literal into the [`ScanValue`] its
 /// field's real [`ValueKind`] demands — `U32`/`I64`/`Bool`/`Str` each
-/// accept exactly one [`sql::Literal`] shape; anything else, including a
-/// `U32` literal too large to fit, is a client-side `ClientError::Sql`,
-/// never a round trip.
+/// accept exactly one [`sql::Literal`] shape; `StrList` accepts none (a
+/// list-kinded field is read-only, `ENT4-FR-004`); anything else,
+/// including a `U32` literal too large to fit, is a client-side
+/// `ClientError::Sql`, never a round trip.
 fn resolve_literal(
     field_name: &str,
     kind: ValueKind,
@@ -1120,7 +1121,15 @@ impl SchemaDrivenClient {
 
         let mut group_by = Vec::with_capacity(parsed.group_by.len());
         for name in &parsed.group_by {
-            group_by.push(self.field(name)?.tag);
+            let descriptor = self.field(name)?;
+            // `ENT4-FR-004` (ADR-0041): a list is never a group key — the
+            // server would answer `Malformed`; refuse here, no round trip.
+            if descriptor.value_kind == ValueKind::StrList {
+                return Err(ClientError::Sql(format!(
+                    "{name}: GROUP BY needs a scalar field, not StrList"
+                )));
+            }
+            group_by.push(descriptor.tag);
         }
 
         enum OutputColumn {

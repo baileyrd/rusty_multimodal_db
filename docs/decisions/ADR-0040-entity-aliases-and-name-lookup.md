@@ -90,6 +90,9 @@ variant or a relation-based remodeling) stays explicitly deferred.
   category for this crate, distinct from `label`'s own prior
   "wire-representable, every capability flag `false`" shape. A caller
   cannot yet read an entity's alias list back over the protocol.
+  *Resolved at `SERVER-001` v0.34.0 (`FR-044`, `ADR-0041`): readable as
+  `ScanValue::StrList` at protocol 11, stripped for older clients by
+  rule 3.*
 - Named, not hidden: normalization is ASCII-oriented
   (`to_lowercase`/`trim`), not full Unicode case folding — real,
   scoped narrowing, not silently glossed over.
