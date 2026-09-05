@@ -1,9 +1,13 @@
 # ADR-0045: More than one table on one connection — `Request::Use`, `serve_tables`, cross-table `Join`
 
-- Status: **Proposed** — awaiting the owner's decision; options (a)–(c)
-  below. Part B of `docs/design/SERVER-SQL-JOIN-DESIGN.md`; independent
-  of `ADR-0044`'s acceptance, but its cross-table half presupposes
-  `Request::Join`.
+- Status: **Accepted as gated direction** (promoted from Proposed on
+  2026-09-05 — the owner approved option (a): the shape below is the
+  plan, `ADR-0044` carries `right_table`/`target_table` from day one,
+  and **no implementation unit is scheduled** until a second table
+  someone needs exists; (b) scheduling the `Order → Customer` instance
+  now and (c) declining both declined). Part B of `docs/design/SERVER-
+  SQL-JOIN-DESIGN.md`; its cross-table half presupposes `Request::Join`
+  (`ADR-0044`, accepted the same day).
 - Date: 2026-09-05
 - Deciders: baileyrd
 - Related: `docs/design/SERVER-SQL-JOIN-DESIGN.md` (the full design),
@@ -119,3 +123,8 @@ domain is the obvious candidate and a domain round of its own).
   as the design.
 - Sizing: (a) none now; (b) about three days including the store and
   the two-table fixture.
+- 2026-09-05: accepted as gated direction (option (a); (b) and (c)
+  declined). Nothing scheduled; the gate is stated in "Decision." The
+  first instance — a `Customer` store (research) or a front-door second
+  domain — reopens this ADR's implementation when it appears. Proposed
+  and accepted in PR #193.

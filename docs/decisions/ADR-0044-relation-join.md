@@ -1,8 +1,17 @@
 # ADR-0044: `JOIN` over a declared relation within one table — `Request::Join` at protocol 12
 
-- Status: **Proposed** — awaiting the owner's decision; options (a)–(d)
-  below. Part A of `docs/design/SERVER-SQL-JOIN-DESIGN.md`; Part B is
-  `ADR-0045`, acceptable independently.
+- Status: **Accepted** (promoted from Proposed on 2026-09-05 — the
+  owner approved option (a): the design as proposed — `Request::Join`/
+  `DescribeRelations`, `Response::JoinedRows`/`Relations` at protocol
+  12, the server-side index nested loop, `describe_relations()` with
+  `Employee`'s override, the SQL `JOIN … ON <relation>` grammar with
+  alias-qualified names, and `QueryResult::Joined`; (b) wire and server
+  half only, (c) adding indexed equi-joins, and (d) closing as not
+  warranted all declined). Acceptance authorizes the design;
+  implementation follows as its own unit — see "Acceptance and
+  implementation" below. Part A of `docs/design/SERVER-SQL-JOIN-
+  DESIGN.md`; Part B is `ADR-0045`, accepted the same day as gated
+  direction.
 - Date: 2026-09-05
 - Deciders: baileyrd
 - Related: `docs/design/SERVER-SQL-JOIN-DESIGN.md` (the full design),
@@ -151,3 +160,7 @@ from a dangling id]; (c) grow `RelationCapabilities` [a format change].
   no consumer of this crate exists yet.
 - Sizing: (b) about a day; (a) about two days (the grammar, aliases,
   and `QueryResult::Joined` are the other half); (c) about three.
+- 2026-09-05: accepted as proposed (option (a); (b), (c), and (d)
+  declined). Implementation follows as `SERVER-001`'s next minor / FR
+  (protocol 12), per Part A of `docs/design/SERVER-SQL-JOIN-DESIGN.md`.
+  Proposed and accepted in PR #193.

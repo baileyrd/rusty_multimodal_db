@@ -1,9 +1,18 @@
-# Server SQL JOIN: Relation Joins First, Tables Second (Proposed)
+# Server SQL JOIN: Relation Joins First, Tables Second (Accepted)
 
-- Status: **Proposed** — two decisions, each acceptable on its own:
-  **Part A**, a `JOIN` over a *declared relation* within one table
-  (`ADR-0044`); **Part B**, more than one table on one connection
-  (`ADR-0045`). Design-only: no code changes in this round.
+- Status: **Accepted** (both parts promoted from Proposed on 2026-09-05 —
+  the owner approved each as proposed, option (a) of both `ADR-0044`
+  and `ADR-0045`: **Part A**, a `JOIN` over a *declared relation*
+  within one table, server-side at protocol 12, with the SQL grammar,
+  `QueryResult::Joined`, and `describe_relations()`; **Part B**, more
+  than one table on one connection, as gated direction — the shape is
+  the plan, `right_table`/`target_table` ride in Part A's wire from day
+  one, and no implementation unit is scheduled until a second table
+  someone needs exists. `ADR-0044` (b)/(c)/(d) and `ADR-0045` (b)/(c)
+  declined.) Acceptance authorizes each design; Part A's implementation
+  follows as its own unit — see each ADR's "Acceptance and
+  implementation" section. Design-only here: no code changes in this
+  round.
 - Date: 2026-09-05
 - Related: `docs/FUTURE-GROWTH.md` ("Arbitrary joins," one of the three
   "different tier of project" items — this document deliberately does
@@ -667,3 +676,7 @@ other => dispatch_in(&tables, table, other),   // today's `dispatch(store, other
   stored, so a second table needs a store, not just a wire variant).
   Two parts, two ADRs, the `SERVER-TRANSACTION-SESSION-DESIGN`
   precedent; theta joins declined with reasons.
+- 2026-09-05: **Accepted**, both parts as proposed (`ADR-0044` option
+  (a), `ADR-0045` option (a) — gated direction). Stays design-only;
+  Part A's implementation follows as `SERVER-001`'s next minor / FR
+  (protocol 12), Part B's is gated on a second table.
