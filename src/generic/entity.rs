@@ -1,12 +1,14 @@
 //! `Entity` v2 — `ENT2-FR-001`–`003`, ADR-0039, `docs/design/
-//! SERVER-ENTITY-V2-REDESIGN-DESIGN.md`. Revises `ADR-0037`'s own
-//! `Entity` in place (no real deployed instance exists, so this is a
+//! SERVER-ENTITY-V2-REDESIGN-DESIGN.md`; plus `aliases` and normalized
+//! name lookup — `ENT3-FR-001`–`004`, ADR-0040, `docs/design/
+//! SERVER-ENTITY-ALIASES-DESIGN.md`. Revises `ADR-0037`'s own `Entity`
+//! in place (no real deployed instance exists, so each change is a
 //! straight revision, not a migration) to match `rusty_remind_me`'s real
-//! shape found by Unit 41's verification: `name` (a new, plain field —
-//! present in every `GetById`/`Query` result, no independent capability,
-//! the closest a `Uuid`-keyed domain can get to real name-based lookup
-//! without breaking `RecordId`'s crate-wide invariant), `kind` as an open
-//! `String` (not a fixed enum) rather than `EntityKind`.
+//! shape found by Unit 41's verification: `name` (a plain field — present
+//! in every `GetById`/`Query` result, the closest a `Uuid`-keyed domain
+//! can get to real name-based identity without breaking `RecordId`'s
+//! crate-wide invariant), `kind` as an open `String` (not a fixed enum)
+//! rather than `EntityKind`, and (ADR-0040) real `aliases`.
 //!
 //! # `kind` stays the `IndexedField`; `mention_count` stays the
 //! `ScannableField` — `kind` could not become both
@@ -26,6 +28,20 @@
 //! has — `Order::status`, `Employee::department`) — a real, named
 //! narrowing from `ADR-0039`'s own original text, not hidden.
 //!
+//! # `label` and `aliases` resolve through a *second* index, not the first
+//!
+//! `kind` occupies the one `IndexedField` slot `GenericMmapStore`
+//! structurally admits, so `label` could never be a second one. ADR-0040
+//! adds `NameIndex` (see that struct's own doc comment, linked from
+//! `EntityProductionStack`'s below) — a separate, runtime-keyed secondary
+//! index rebuilt from each record's own `NameIndexed::index_keys` at every
+//! `create`/`open`/`open_portable`, normalized (trim + lowercase) at
+//! build and query alike. `label` plus every alias all resolve to the
+//! entity's id; `aliases` itself has **no wire representation** this
+//! round (`ScanValue` has no list variant — a genuinely new "durable but
+//! not wire-representable" category, not `label`'s prior "every
+//! capability flag `false` but still returned" shape).
+//!
 //! # Two relations: `RelatesTo` and `MentionedWith`
 //!
 //! `RelatesTo` (kept, unchanged meaning) and `MentionedWith` (new) prove
@@ -39,7 +55,8 @@
 //! that repository's own source never having been read this session).
 
 use super::mmap_store::GenericMmapStore;
-use super::store::MultiSymmetric;
+use super::query::NameIndexed;
+use super::store::{MultiSymmetric, NameIndex};
 use super::traits::{IndexedField, Record, ScannableField, SchemaTag, SymmetricRelation};
 use crate::durability::DurabilityError;
 use serde::{Deserialize, Serialize};
@@ -54,13 +71,12 @@ pub const RELATION_LABELS: [&str; 2] = ["relates_to", "mentioned_with"];
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Entity {
     pub id: Uuid,
-    /// `ENT2-FR-001`: new — the closest a `Uuid`-keyed domain gets to
-    /// `rusty_remind_me`'s real `name`-based identity. Plain field, no
-    /// independent wire capability (every capability flag `false`, the
-    /// same shape `Reminder::title`/`Order::created_at_unix_ms` already
-    /// have) — `FilterEq` could not also be given to `name` without a
-    /// second `GenericMmapStore`-native index slot, which `kind` already
-    /// occupies (see module docs).
+    /// `ENT2-FR-001`: the closest a `Uuid`-keyed domain gets to
+    /// `rusty_remind_me`'s real `name`-based identity. Since ADR-0040
+    /// (`ENT3-FR-005`) it is equality-filterable over the wire — case-
+    /// and whitespace-insensitively, via [`NameIndex`], not via
+    /// `GenericMmapStore`'s one `IndexedField` slot, which `kind` holds.
+    /// Still not scannable or updatable.
     pub label: String,
     /// `ENT2-FR-001`: was `EntityKind` (a fixed 5-variant enum), now an
     /// open `String` — matching Unit 41 Finding 2 directly. Stays the
@@ -72,6 +88,12 @@ pub struct Entity {
     /// `ScannableField` and neither `label` nor `kind` (both `String`)
     /// can satisfy it.
     pub mention_count: i64,
+    /// `ENT3-FR-001` (ADR-0040): alternate names this entity also
+    /// resolves under, each normalized into the same [`NameIndex`] as
+    /// `label`. Durable for free — the record blob is `Vec<Entity>`
+    /// serialized whole. No `FieldRef`, no `GetById`/`Query` exposure
+    /// this round: `ScanValue` has no list variant (see module docs).
+    pub aliases: Vec<String>,
 }
 
 impl Record for Entity {
@@ -107,6 +129,18 @@ impl ScannableField<MentionCountField> for Entity {
     }
 }
 
+/// `ENT3-FR-004`: `label` first, then every alias, all un-normalized —
+/// [`NameIndex`] owns normalization (`ENT3-FR-003`), so this stays a
+/// plain enumeration of the record's own fields.
+impl NameIndexed for Entity {
+    fn index_keys(&self) -> Vec<String> {
+        let mut keys = Vec::with_capacity(1 + self.aliases.len());
+        keys.push(self.label.clone());
+        keys.extend(self.aliases.iter().cloned());
+        keys
+    }
+}
+
 /// `ENT2-FR-002`: kept, unchanged meaning — `Dog::littermate_of`'s own
 /// shape.
 pub struct RelatesTo;
@@ -118,18 +152,23 @@ impl SymmetricRelation<RelatesTo> for Entity {}
 pub struct MentionedWith;
 impl SymmetricRelation<MentionedWith> for Entity {}
 
-/// The durable production stack: [`GenericMmapStore`] (owns records, the
-/// `KindField` index, and `MentionCountField`) -> `MultiSymmetric<..>`
-/// (both `relates_to`/`mentioned_with` adjacency, each independently
-/// durable at `<path>.<label>.edges`). No `Reversed` layer — `Entity`
-/// has no `ChildOf` relation.
-pub type EntityProductionStack =
-    MultiSymmetric<GenericMmapStore<Entity, KindField, MentionCountField>, Entity>;
+/// The durable production stack, innermost first: [`GenericMmapStore`]
+/// (owns records, the `KindField` index, and `MentionCountField`) ->
+/// [`MultiSymmetric`] (both `relates_to`/`mentioned_with` adjacency,
+/// each independently durable at `<path>.<label>.edges`) ->
+/// [`NameIndex`] (the normalized `label`/`aliases` map, rebuilt from the
+/// records beneath it, no file of its own — ADR-0040). No `Reversed`
+/// layer — `Entity` has no `ChildOf` relation.
+pub type EntityProductionStack = NameIndex<
+    MultiSymmetric<GenericMmapStore<Entity, KindField, MentionCountField>, Entity>,
+    Entity,
+>;
 
 /// Build a fresh, durable production store for `Entity` at `path` — the
 /// generic analogue of `create_reminder_production_stack`. Writes four
 /// files: `path` (the mmap file), `<path>.records` (the record blob),
-/// `<path>.relates_to.edges`, `<path>.mentioned_with.edges`.
+/// `<path>.relates_to.edges`, `<path>.mentioned_with.edges`. The
+/// `NameIndex` layer writes nothing — it is derived from `<path>.records`.
 ///
 /// # Errors
 ///
@@ -151,7 +190,9 @@ pub fn create_entity_production_stack(
             mentioned_with_edges.to_vec(),
         ),
     ];
-    MultiSymmetric::create(core, &relations, path)
+    Ok(NameIndex::new(MultiSymmetric::create(
+        core, &relations, path,
+    )?))
 }
 
 /// Reopen an existing durable production store for `Entity` at `path` —
@@ -179,7 +220,9 @@ pub fn open_entity_production_stack(
             mentioned_with_edges.to_vec(),
         ),
     ];
-    MultiSymmetric::open(core, &relations, path)
+    Ok(NameIndex::new(MultiSymmetric::open(
+        core, &relations, path,
+    )?))
 }
 
 /// Reopen the whole stack from its files alone — `path`,
@@ -190,7 +233,8 @@ pub fn open_entity_production_stack(
 /// set from the path alone (see `MultiSymmetric::open_portable`'s own
 /// doc comment) — `Entity`'s own two labels are fixed and known here at
 /// compile time, so this is a real but narrow limitation, not one that
-/// blocks portability in practice.
+/// blocks portability in practice. The `NameIndex` layer needs nothing
+/// from the path at all — it is rebuilt from the records just read.
 ///
 /// # Errors
 ///
@@ -204,13 +248,17 @@ pub fn open_entity_production_stack_portable(
         GenericMmapStore::<Entity, KindField, MentionCountField>::read_portable_records(path)?;
     let core =
         GenericMmapStore::<Entity, KindField, MentionCountField>::open(entities.clone(), path)?;
-    MultiSymmetric::open_portable(core, path, &RELATION_LABELS)
+    Ok(NameIndex::new(MultiSymmetric::open_portable(
+        core,
+        path,
+        &RELATION_LABELS,
+    )?))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::generic::query::{FilterEq, GetById, MultiNeighbors, UpdateField};
+    use crate::generic::query::{FilterEq, FindByName, GetById, MultiNeighbors, UpdateField};
     use crate::test_support::fresh_temp_dir;
 
     fn sample_entities() -> Vec<Entity> {
@@ -220,18 +268,21 @@ mod tests {
                 label: "Ada Lovelace".into(),
                 kind: "person".into(),
                 mention_count: 3,
+                aliases: vec!["Ada".into(), "Countess of Lovelace".into()],
             },
             Entity {
                 id: Uuid::from_u128(2),
                 label: "Analytical Engine".into(),
                 kind: "concept".into(),
                 mention_count: 5,
+                aliases: vec![],
             },
             Entity {
                 id: Uuid::from_u128(3),
                 label: "London".into(),
                 kind: "place".into(),
                 mention_count: 1,
+                aliases: vec!["Londinium".into()],
             },
         ]
     }
@@ -259,6 +310,7 @@ mod tests {
         let got = GetById::<Entity>::get(&store, Uuid::from_u128(1)).unwrap();
         assert_eq!(got.label, "Ada Lovelace");
         assert_eq!(got.mention_count, 3);
+        assert_eq!(got.aliases, vec!["Ada", "Countess of Lovelace"]);
 
         let matches = FilterEq::<Entity, KindField>::filter_eq(&store, &"person".to_string());
         assert_eq!(matches, vec![Uuid::from_u128(1)]);
@@ -295,8 +347,70 @@ mod tests {
         );
     }
 
+    /// `ENT3-FR-003`/`004`/`005`: `label` and every alias resolve, case-
+    /// and whitespace-insensitively; a miss is empty, not an error.
     #[test]
-    fn update_mention_count_is_durable_across_reopen() {
+    fn find_by_name_resolves_label_and_aliases_normalized() {
+        let dir = fresh_temp_dir("generic_entity_v3_names").unwrap();
+        let path = dir.join("entities.mmap");
+        let store = create_entity_production_stack(
+            sample_entities(),
+            &sample_relates_to(),
+            &sample_mentioned_with(),
+            &path,
+        )
+        .unwrap();
+
+        let ada = vec![Uuid::from_u128(1)];
+        assert_eq!(
+            FindByName::<Entity>::find_by_name(&store, "Ada Lovelace"),
+            ada
+        );
+        assert_eq!(
+            FindByName::<Entity>::find_by_name(&store, "ada lovelace"),
+            ada
+        );
+        assert_eq!(
+            FindByName::<Entity>::find_by_name(&store, "  ADA LOVELACE\t"),
+            ada
+        );
+        assert_eq!(FindByName::<Entity>::find_by_name(&store, "Ada"), ada);
+        assert_eq!(
+            FindByName::<Entity>::find_by_name(&store, "countess of lovelace"),
+            ada
+        );
+        assert_eq!(
+            FindByName::<Entity>::find_by_name(&store, "LONDINIUM"),
+            vec![Uuid::from_u128(3)]
+        );
+        assert!(FindByName::<Entity>::find_by_name(&store, "Babbage").is_empty());
+        // No substring/prefix matching — exact after normalization only.
+        assert!(FindByName::<Entity>::find_by_name(&store, "Ada Love").is_empty());
+    }
+
+    /// Two entities sharing a normalized key both come back — collision
+    /// handling is the caller's (design doc Non-goals).
+    #[test]
+    fn find_by_name_returns_every_entity_sharing_a_key() {
+        let dir = fresh_temp_dir("generic_entity_v3_collision").unwrap();
+        let path = dir.join("entities.mmap");
+        let mut entities = sample_entities();
+        entities.push(Entity {
+            id: Uuid::from_u128(4),
+            label: "Ada".into(),
+            kind: "person".into(),
+            mention_count: 0,
+            aliases: vec!["ada".into(), " ADA ".into()],
+        });
+        let store = create_entity_production_stack(entities, &[], &[], &path).unwrap();
+        let mut hits = FindByName::<Entity>::find_by_name(&store, "Ada");
+        hits.sort();
+        // Entity 4 registers "Ada" three times; it appears once.
+        assert_eq!(hits, vec![Uuid::from_u128(1), Uuid::from_u128(4)]);
+    }
+
+    #[test]
+    fn update_mention_count_is_durable_across_reopen_and_names_survive() {
         let dir = fresh_temp_dir("generic_entity_v2_reopen").unwrap();
         let path = dir.join("entities.mmap");
         let entities = sample_entities();
@@ -312,11 +426,17 @@ mod tests {
             .unwrap();
             UpdateField::<Entity, MentionCountField>::update(&mut store, Uuid::from_u128(1), 4)
                 .unwrap();
+            // An update through the outer layer never touches the name map.
+            assert_eq!(
+                FindByName::<Entity>::find_by_name(&store, "ada"),
+                vec![Uuid::from_u128(1)]
+            );
         }
         let reopened =
             open_entity_production_stack(entities, &relates_to, &mentioned_with, &path).unwrap();
         let got = GetById::<Entity>::get(&reopened, Uuid::from_u128(1)).unwrap();
         assert_eq!(got.mention_count, 4);
+        assert_eq!(got.aliases, vec!["Ada", "Countess of Lovelace"]);
         assert_eq!(
             MultiNeighbors::<Entity>::neighbors_by_relation(
                 &reopened,
@@ -325,10 +445,16 @@ mod tests {
             ),
             Some(vec![Uuid::from_u128(2)])
         );
+        assert_eq!(
+            FindByName::<Entity>::find_by_name(&reopened, "Countess Of Lovelace"),
+            vec![Uuid::from_u128(1)]
+        );
     }
 
+    /// `ENT3-FR-002`: the name map needs no file of its own — it comes
+    /// back from `<path>.records` alone.
     #[test]
-    fn portable_reopen_matches_open_neighbors_and_fields() {
+    fn portable_reopen_matches_open_neighbors_fields_and_names() {
         let dir = fresh_temp_dir("generic_entity_v2_portable").unwrap();
         let path = dir.join("entities.mmap");
         create_entity_production_stack(
@@ -342,6 +468,7 @@ mod tests {
         let portable = open_entity_production_stack_portable(&path).unwrap();
         let got = GetById::<Entity>::get(&portable, Uuid::from_u128(1)).unwrap();
         assert_eq!(got.label, "Ada Lovelace");
+        assert_eq!(got.aliases, vec!["Ada", "Countess of Lovelace"]);
         assert_eq!(
             MultiNeighbors::<Entity>::neighbors_by_relation(
                 &portable,
@@ -349,6 +476,25 @@ mod tests {
                 Uuid::from_u128(1)
             ),
             Some(vec![Uuid::from_u128(3)])
+        );
+        assert_eq!(
+            FindByName::<Entity>::find_by_name(&portable, "londinium"),
+            vec![Uuid::from_u128(3)]
+        );
+        // Exactly the four files the docs name — no fifth for the index.
+        let mut names: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec![
+                "entities.mmap",
+                "entities.mmap.mentioned_with.edges",
+                "entities.mmap.records",
+                "entities.mmap.relates_to.edges",
+            ]
         );
     }
 }

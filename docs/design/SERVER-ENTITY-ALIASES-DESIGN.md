@@ -496,3 +496,13 @@ fn filter_eq(&self, field: FieldRef, value: &ScanValue) -> Result<Vec<RecordId>,
   no `PROTOCOL_VERSION` change for the headline lookup capability.
 - 2026-09-05: Accepted as proposed, `ADR-0040` option (a); (b) and (c)
   declined.
+- 2026-09-05: **Implemented** (`SERVER-001-FR-042`, v0.32.0). Landed
+  as proposed — no deviation. Every "Proposed shape" sketch is real
+  code with the same names (`NameIndexed::index_keys`, `FindByName::
+  find_by_name`, `NameIndex::new`, `normalize`, the `filter_eq` arm);
+  `src/server/protocol.rs` untouched, as predicted. The "no new file"
+  invariant in "Data/state and invariants" is pinned by a test that
+  lists the store directory. One thing this document left implicit is
+  now a pinned test: the SQL `WHERE label = '..'` path stays an
+  exact-match full scan, deliberately separate from the normalized
+  `FilterEq` — see `ADR-0040`'s own implementation-log entry.

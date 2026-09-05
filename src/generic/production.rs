@@ -325,6 +325,22 @@ impl<S> GenericProductionStore<S> {
         self.inner.read().expect(LOCK_POISONED).relation_kinds()
     }
 
+    /// Every id registered under `name` — a primary name or an alias,
+    /// matched case- and whitespace-insensitively (`ENT3-FR-005`/`007`,
+    /// ADR-0040). Normalization is [`super::store::NameIndex`]'s own;
+    /// pass raw text. Zero, one, or many ids.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the lock is poisoned — see `LOCK_POISONED`.
+    pub fn find_by_name<R>(&self, name: &str) -> Vec<R::Id>
+    where
+        R: super::query::NameIndexed,
+        S: super::query::FindByName<R>,
+    {
+        self.inner.read().expect(LOCK_POISONED).find_by_name(name)
+    }
+
     /// Force the durable layer(s) inside `S` to physical disk. Takes the
     /// write lock, same rationale as `ProductionStore::flush`: a
     /// checkpoint wants a quiescent snapshot, not a value racing an

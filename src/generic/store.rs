@@ -820,6 +820,180 @@ where
     }
 }
 
+/// A normalized secondary index over every string key a record resolves
+/// under — `ENT3-FR-002`/`003` (ADR-0040, `docs/design/
+/// SERVER-ENTITY-ALIASES-DESIGN.md`). See [`super::query::NameIndexed`]'s
+/// own doc comment for why this is a separate primitive and not a second
+/// `IndexedField` on [`super::mmap_store::GenericMmapStore`].
+///
+/// # Rebuilt from records, never separately persisted
+///
+/// Unlike [`MultiSymmetric`], whose per-label edge lists are their own
+/// durable `<path>.<label>.edges` blobs (edges aren't derivable from the
+/// records alone), this layer's map is fully derivable from each record's
+/// own [`NameIndexed::index_keys`](super::query::NameIndexed::index_keys)
+/// — so [`Self::new`] rebuilds it from the inner store's own `AllIds`/
+/// `GetById` every time, exactly as `GenericMmapStore`'s own primary
+/// `index` is rebuilt from its records at `create`/`open`. No new file,
+/// no `BLOB_VERSION` bump, no portability work: whatever brings the
+/// inner store back brings this index back with it. A real, named
+/// asymmetry between the two "Multi-" primitives this line has produced,
+/// not an oversight.
+///
+/// # Normalization lives here, in exactly one place
+///
+/// `normalize` (private) — `str::trim` then `str::to_lowercase` — is
+/// applied to every key at build time *and* to every query in
+/// [`FindByName::find_by_name`](super::query::FindByName::find_by_name),
+/// so a caller may pass raw text and a record's own `index_keys` may
+/// return raw text; neither side has to agree on a convention with the
+/// other. ASCII-oriented, not full Unicode case folding — see the design
+/// doc's own Non-goals.
+pub struct NameIndex<S, R: super::query::NameIndexed> {
+    inner: S,
+    index: HashMap<String, Vec<R::Id>>,
+}
+
+/// `ENT3-FR-003`: the one normalization rule, shared by build and query.
+fn normalize(key: &str) -> String {
+    key.trim().to_lowercase()
+}
+
+impl<S, R> NameIndex<S, R>
+where
+    R: super::query::NameIndexed,
+    S: GetById<R> + AllIds<R>,
+{
+    /// Wrap `inner`, building the normalized key map from its own records.
+    /// Reads every record once; writes nothing.
+    pub fn new(inner: S) -> Self {
+        let mut index: HashMap<String, Vec<R::Id>> = HashMap::new();
+        for id in inner.all_ids() {
+            let Some(record) = inner.get(id) else {
+                continue;
+            };
+            for key in record.index_keys() {
+                let bucket = index.entry(normalize(&key)).or_default();
+                if !bucket.contains(&id) {
+                    bucket.push(id);
+                }
+            }
+        }
+        Self { inner, index }
+    }
+}
+
+impl<S, R: super::query::NameIndexed> super::query::FindByName<R> for NameIndex<S, R> {
+    fn find_by_name(&self, name: &str) -> Vec<R::Id> {
+        self.index
+            .get(&normalize(name))
+            .cloned()
+            .unwrap_or_default()
+    }
+}
+
+// Forwarding impl: `NameIndex<S, ..>` re-exposing `GetById`.
+impl<S, R: super::query::NameIndexed> GetById<R> for NameIndex<S, R>
+where
+    S: GetById<R>,
+{
+    fn get(&self, id: R::Id) -> Option<R> {
+        self.inner.get(id)
+    }
+}
+
+// Forwarding impl: `NameIndex<S, ..>` re-exposing `AllIds`.
+impl<S, R: super::query::NameIndexed> AllIds<R> for NameIndex<S, R>
+where
+    S: AllIds<R>,
+{
+    fn all_ids(&self) -> Vec<R::Id> {
+        self.inner.all_ids()
+    }
+}
+
+impl<S, R: super::query::NameIndexed> Flush for NameIndex<S, R>
+where
+    S: Flush,
+{
+    fn flush(&self) -> Result<(), DurabilityError> {
+        self.inner.flush()
+    }
+}
+
+// Forwarding impl: `NameIndex<S, ..>` re-exposing `FilterEq` — the
+// compile-time `IndexedField` index beneath (`Entity`'s `kind`) stays
+// reachable through this layer, alongside this layer's own runtime-keyed
+// `FindByName`. Different traits, no coherence overlap.
+impl<S, R, IndexMarker> FilterEq<R, IndexMarker> for NameIndex<S, R>
+where
+    R: super::query::NameIndexed + IndexedField<IndexMarker>,
+    S: FilterEq<R, IndexMarker>,
+{
+    fn filter_eq(&self, value: &R::IndexValue) -> Vec<R::Id> {
+        self.inner.filter_eq(value)
+    }
+}
+
+// Forwarding impl: `NameIndex<S, ..>` re-exposing `ScanField`.
+impl<S, R, ScanMarker> ScanField<R, ScanMarker> for NameIndex<S, R>
+where
+    R: super::query::NameIndexed + ScannableField<ScanMarker>,
+    S: ScanField<R, ScanMarker>,
+{
+    fn scan(&self) -> Vec<R::ScanValue> {
+        self.inner.scan()
+    }
+}
+
+// Forwarding impl: `NameIndex<S, ..>` re-exposing `UpdateField`. The
+// scannable field is never one of a record's `index_keys` (it is `Copy`
+// and fixed-width by `GenericMmapStore`'s own contract — a number, not a
+// name), so an update through this layer never invalidates the map.
+impl<S, R, ScanMarker> UpdateField<R, ScanMarker> for NameIndex<S, R>
+where
+    R: super::query::NameIndexed + ScannableField<ScanMarker>,
+    S: UpdateField<R, ScanMarker>,
+{
+    fn update(&mut self, id: R::Id, value: R::ScanValue) -> Result<(), NotFound<R::Id>> {
+        self.inner.update(id, value)
+    }
+}
+
+// Forwarding impl: `NameIndex<S, ..>` re-exposing `MultiNeighbors` — the
+// layer `Entity`'s own stack puts directly beneath this one.
+impl<S, R: super::query::NameIndexed> super::query::MultiNeighbors<R> for NameIndex<S, R>
+where
+    S: super::query::MultiNeighbors<R>,
+{
+    fn neighbors_by_relation(&self, relation: &str, id: R::Id) -> Option<Vec<R::Id>> {
+        self.inner.neighbors_by_relation(relation, id)
+    }
+
+    fn all_neighbors(&self, id: R::Id) -> Vec<R::Id> {
+        self.inner.all_neighbors(id)
+    }
+
+    fn relation_kinds(&self) -> Vec<String> {
+        self.inner.relation_kinds()
+    }
+}
+
+// Forwarding impl: `NameIndex<S, ..>` re-exposing the marker-typed
+// `Neighbors` too, so it also wraps a single-relation `Symmetric` stack —
+// `Reversed`'s own forwarding shape (`FR-012`). No direct `Neighbors`
+// impl exists on this type to conflict with, unlike `Symmetric`.
+impl<S, R, R2, RelMarker> Neighbors<R2, RelMarker> for NameIndex<S, R>
+where
+    R: super::query::NameIndexed,
+    R2: SymmetricRelation<RelMarker>,
+    S: Neighbors<R2, RelMarker>,
+{
+    fn neighbors(&self, id: R2::Id) -> Vec<R2::Id> {
+        self.inner.neighbors(id)
+    }
+}
+
 /// `Parent` (the cheap direction of a directed relation) needs no new
 /// store state at all — a blanket impl over anything that already
 /// provides `GetById<C>`, per the design doc §2.

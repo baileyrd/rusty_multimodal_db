@@ -1,5 +1,7 @@
 //! Real end-to-end coverage of `Entity` v2 (`ENT2-FR-001`–`007`,
-//! ADR-0039, `docs/design/SERVER-ENTITY-V2-REDESIGN-DESIGN.md`) — a real
+//! ADR-0039, `docs/design/SERVER-ENTITY-V2-REDESIGN-DESIGN.md`) and its
+//! `aliases`/normalized-name-lookup extension (`ENT3-FR-001`–`007`,
+//! ADR-0040, `docs/design/SERVER-ENTITY-ALIASES-DESIGN.md`) — a real
 //! `TcpListener`, a real `SchemaDrivenClient`. `required-features =
 //! ["server"]` only, no `research` — `Entity` is front-door, matching
 //! `tests/server_reminder_integration.rs`'s own precedent.
@@ -38,30 +40,37 @@ fn sample_entities() -> Vec<Entity> {
             label: "Ada Lovelace".into(),
             kind: "person".into(),
             mention_count: 3,
+            aliases: vec!["Ada".into(), "Countess of Lovelace".into()],
         },
         Entity {
             id: Uuid::from_u128(2),
             label: "Analytical Engine".into(),
             kind: "concept".into(),
             mention_count: 5,
+            aliases: vec![],
         },
         Entity {
             id: Uuid::from_u128(3),
             label: "London".into(),
             kind: "place".into(),
             mention_count: 1,
+            aliases: vec!["Londinium".into()],
         },
         Entity {
             id: Uuid::from_u128(4),
             label: "Royal Society".into(),
             kind: "organization".into(),
             mention_count: 2,
+            // Deliberately collides with entity 5's own alias below
+            // (`ENT3` acceptance criterion 4): both must come back.
+            aliases: vec!["The Society".into(), "Babbage".into()],
         },
         Entity {
             id: Uuid::from_u128(5),
             label: "Charles Babbage".into(),
             kind: "person".into(),
             mention_count: 2,
+            aliases: vec!["Babbage".into()],
         },
     ]
 }
@@ -169,7 +178,8 @@ fn get_returns_every_field_and_group_by_kind_counts_correctly() {
 
 /// Acceptance criterion 3: `FilterEq` on `kind` is open-ended (any
 /// string, no discriminant) and returns exactly the matching ids;
-/// `FilterEq` on `label`/`mention_count` is client-side `Unsupported`.
+/// `FilterEq` on `mention_count` is client-side `Unsupported`. (`label`
+/// became filterable in ADR-0040 — see the next test.)
 #[test]
 fn filter_eq_by_kind_open_ended_and_unsupported_fields() {
     let addr = start_server();
@@ -189,10 +199,57 @@ fn filter_eq_by_kind_open_ended_and_unsupported_fields() {
         client.filter_eq("mention_count", ScanValue::I64(0)),
         Err(ClientError::Unsupported(_))
     ));
-    assert!(matches!(
-        client.filter_eq("label", ScanValue::Str("x".into())),
-        Err(ClientError::Unsupported(_))
-    ));
+}
+
+/// `ENT3` acceptance criteria 3–4 (ADR-0040): `FilterEq` on `label` over
+/// a real socket resolves the primary name and every alias, case- and
+/// whitespace-insensitively; a miss is empty; two entities sharing a
+/// normalized alias both come back. Through the existing `FilterEq`/
+/// `ScanValue::Str`/`RecordList` shapes — the same wire bytes any
+/// protocol-10 client already sends.
+#[test]
+fn filter_eq_by_label_resolves_label_and_aliases_case_insensitively() {
+    let addr = start_server();
+    let mut client = SchemaDrivenClient::connect(addr).unwrap();
+    let ada = vec![Uuid::from_u128(1)];
+
+    for query in [
+        "Ada Lovelace",
+        "ada lovelace",
+        "  ADA LOVELACE  ",
+        "Ada",
+        "countess OF lovelace",
+    ] {
+        assert_eq!(
+            client
+                .filter_eq("label", ScanValue::Str(query.into()))
+                .unwrap(),
+            ada,
+            "query {query:?}"
+        );
+    }
+    assert_eq!(
+        client
+            .filter_eq("label", ScanValue::Str("londinium".into()))
+            .unwrap(),
+        vec![Uuid::from_u128(3)]
+    );
+    assert!(client
+        .filter_eq("label", ScanValue::Str("nobody".into()))
+        .unwrap()
+        .is_empty());
+    // Exact-after-normalization only — no prefix/substring matching.
+    assert!(client
+        .filter_eq("label", ScanValue::Str("Ada Love".into()))
+        .unwrap()
+        .is_empty());
+
+    // Criterion 4: a shared alias returns both owners, no silent pick.
+    let mut babbage = client
+        .filter_eq("label", ScanValue::Str("BABBAGE".into()))
+        .unwrap();
+    babbage.sort();
+    assert_eq!(babbage, vec![Uuid::from_u128(4), Uuid::from_u128(5)]);
 }
 
 /// Acceptance criterion 4 (v2, narrowed — see `crate::generic::entity`'s
@@ -452,11 +509,23 @@ fn sessions_compose_with_entity_the_same_as_every_other_domain() {
 /// `label` has every capability flag `false` but is still fully
 /// selectable/filterable via `Query` — a full scan needs no index.
 #[test]
-fn label_has_every_capability_flag_false_but_is_still_queryable() {
+fn label_is_filterable_but_not_scannable_or_updatable_and_still_sql_queryable() {
     let addr = start_server();
     let mut client = SchemaDrivenClient::connect(addr).unwrap();
-    assert!(!client.schema().fields.iter().any(|f| f.name == "label"
-        && (f.capabilities.filter_eq || f.capabilities.scan || f.capabilities.update)));
+    // `ENT3-FR-006`: `filter_eq` flipped to `true` (ADR-0040); the other
+    // two flags are unchanged. `aliases` is not a schema field at all.
+    let label = client
+        .schema()
+        .fields
+        .iter()
+        .find(|f| f.name == "label")
+        .expect("label is a schema field");
+    assert!(label.capabilities.filter_eq);
+    assert!(!label.capabilities.scan && !label.capabilities.update);
+    assert!(!client.schema().fields.iter().any(|f| f.name == "aliases"));
+    // The SQL path is a full scan with exact-string equality, unchanged
+    // by the index: still one row for the exact label, none for a
+    // case-varied one — the two mechanisms are deliberately distinct.
     let result = client
         .query("SELECT label FROM entity WHERE label = 'Ada Lovelace'")
         .unwrap();

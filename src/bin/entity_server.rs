@@ -54,18 +54,21 @@ fn sample_entities() -> Vec<Entity> {
             label: "Ada Lovelace".into(),
             kind: "person".into(),
             mention_count: 3,
+            aliases: vec!["Ada".into(), "Countess of Lovelace".into()],
         },
         Entity {
             id: Uuid::from_u128(2),
             label: "Analytical Engine".into(),
             kind: "concept".into(),
             mention_count: 5,
+            aliases: vec![],
         },
         Entity {
             id: Uuid::from_u128(3),
             label: "London".into(),
             kind: "place".into(),
             mention_count: 1,
+            aliases: vec![],
         },
     ]
 }
