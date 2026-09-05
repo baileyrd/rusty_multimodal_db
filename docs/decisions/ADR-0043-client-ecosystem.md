@@ -1,7 +1,13 @@
 # ADR-0043: Client ecosystem — a specified, conformance-tested wire protocol and a separable client
 
-- Status: **Proposed** — awaiting the owner's decision; options (a)–(d)
-  below.
+- Status: **Accepted** (promoted from Proposed on 2026-09-05 — the
+  owner approved option (a): the design as proposed, all three parts —
+  the `client` Cargo feature, `SERVER-002` plus the enforced conformance
+  fixture, and the Python reference client with offline and live CI
+  verification; (b) specification and fixture only, (c) (b) plus the
+  feature split, and (d) closing as not warranted all declined).
+  Acceptance authorizes the design; implementation follows as its own
+  unit — see "Acceptance and implementation" below.
 - Date: 2026-09-05
 - Deciders: baileyrd
 - Related: `docs/design/SERVER-CLIENT-ECOSYSTEM-DESIGN.md` (the full
@@ -163,3 +169,7 @@ exist to prevent].
   about two days, the Python client and its two-layer verification
   being the other half. All as `SERVER-002` v0.1.0 plus a `SERVER-001`
   patch entry, no `SERVER-001` FR.
+- 2026-09-05: accepted as proposed (option (a); (b), (c), and (d)
+  declined). Implementation follows as `SERVER-002` v0.1.0 plus a
+  `SERVER-001` patch entry, per `docs/design/SERVER-CLIENT-ECOSYSTEM-
+  DESIGN.md`. Proposed and accepted in PR #192.

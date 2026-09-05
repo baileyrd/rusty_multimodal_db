@@ -1,7 +1,12 @@
-# Server Client Ecosystem: a Protocol Anyone Can Implement (Proposed)
+# Server Client Ecosystem: a Protocol Anyone Can Implement (Accepted)
 
-- Status: **Proposed** — awaiting the owner's decision on `ADR-0043`'s
-  options (a)/(b)/(c)/(d). Design-only: no code changes in this round.
+- Status: **Accepted** (promoted from Proposed on 2026-09-05 — the
+  owner approved the design as proposed, `ADR-0043` option (a): the
+  `client` Cargo feature, `SERVER-002` plus the enforced conformance
+  fixture, and the Python reference client with offline and live CI
+  verification; (b), (c), and (d) declined). Acceptance authorizes the
+  design; implementation follows as its own unit — see `ADR-0043`'s
+  "Acceptance and implementation" section.
 - Date: 2026-09-05
 - Related: `ADR-0010`/`docs/design/SERVER-QUERY-LAYER-DESIGN.md` (named
   "not a network protocol usable by non-Rust clients" as a Non-goal and
@@ -573,3 +578,6 @@ with no SQL front end simply builds those requests directly.
   reader; a reference client kept honest by a fixture), one proposed
   answer to each, `ADR-0010`'s gRPC/JSON revisit trigger reconsidered
   and declined with reasons.
+- 2026-09-05: **Accepted** as proposed, `ADR-0043` option (a) — all
+  three parts authorized as one implementation unit; (b), (c), and (d)
+  declined. No changes to the design text. (PR #192.)
