@@ -171,6 +171,8 @@ pub mod record;
 /// [`generic::production::GenericProductionStore`] — accepted design,
 /// `docs/design/SERVER-QUERY-LAYER-DESIGN.md`, ADR-0010 (Accepted). Off by
 /// default behind the `server` Cargo feature, distinct from `research`:
+/// the client half alone (`SchemaDrivenClient`, framing, protocol types,
+/// TLS) is the `client` feature, which `server` implies (ADR-0043);
 /// this is new, real, additive capability, not a benchmarked-alternative
 /// or historical-spike module, and it introduces a real
 /// network-listening binary surface. Authentication/authorization
@@ -181,7 +183,7 @@ pub mod record;
 /// Consequences before enabling it, and never expose a server built from
 /// it beyond a trusted, localhost/development network unless both are
 /// configured together.
-#[cfg(feature = "server")]
+#[cfg(feature = "client")]
 pub mod server;
 pub mod store;
 /// The crate's one shared scratch-directory helper — unconditionally

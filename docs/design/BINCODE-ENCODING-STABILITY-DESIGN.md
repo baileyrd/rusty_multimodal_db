@@ -106,7 +106,10 @@ not a silent format change.
   `ADR-0006` never promised them cross-build.
 - Cross-language interoperability (`PROJECT-STATUS` item 38). A pinned
   `bincode` configuration is a *documented* format, which is the
-  precondition for a non-Rust client, not the client.
+  precondition for a non-Rust client, not the client. *Taken up later
+  by `ADR-0043` / `SERVER-002`: the pinned configuration written down
+  byte-for-byte, the golden vectors exported to `tests/fixtures/wire-
+  vectors.txt`, and a Python client built from the document.*
 
 ## Non-goals
 

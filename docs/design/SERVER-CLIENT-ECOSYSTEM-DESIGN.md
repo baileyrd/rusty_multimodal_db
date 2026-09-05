@@ -581,3 +581,12 @@ with no SQL front end simply builds those requests directly.
 - 2026-09-05: **Accepted** as proposed, `ADR-0043` option (a) — all
   three parts authorized as one implementation unit; (b), (c), and (d)
   declined. No changes to the design text. (PR #192.)
+- 2026-09-05: **Implemented** as `SERVER-002` v0.1.0 plus `SERVER-001`
+  v0.35.1 (patch) — all three parts landed as proposed with no deviation
+  from the accepted text; see `ADR-0043`'s implementation log and
+  `docs/PROJECT-STATUS.md` item 132. Acceptance criteria met: the
+  `client` feature builds and tests alone (`tests/server_client_only.rs`,
+  a CI step); `SERVER-002` is bound to `tests/fixtures/wire-vectors.txt`
+  by every golden-vector test; the Python client passes every fixture
+  vector offline and the live `Entity` scenario at protocol 12 and at a
+  negotiated 10.

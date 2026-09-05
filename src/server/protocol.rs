@@ -750,7 +750,56 @@ pub enum Response {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{assert_golden, assert_golden_eq};
+    use crate::test_support::wire_fixture;
+
+    /// `ECO-FR-005`/`006` (ADR-0043): the protocol version that introduced
+    /// each pinned vector, by the label the two golden tests below use —
+    /// written into `tests/fixtures/wire-vectors.txt` so a foreign client
+    /// targeting version *N* knows which vectors apply to it. A label
+    /// missing here is a test failure, so a new vector cannot be pinned
+    /// without saying when it appeared.
+    fn introduced_at(label: &str) -> u32 {
+        match label {
+            "GetById" | "FilterEq" | "ScanField" | "UpdateField" | "Parent" | "Children"
+            | "Neighbors" | "DescribeSchema" | "Authenticate" | "Transaction" | "Record"
+            | "RecordList" | "ScanValues" | "Id" | "Schema" | "NotFound" | "NoParent" | "Ok"
+            | "Err" | "TransactionFailed" => 1,
+            "Hello" => 2,
+            "Begin" | "Commit" | "Rollback" | "Staged" | "Err(NoSession)" | "Err(SessionOpen)"
+            | "Err(SessionFull)" => 3,
+            "Err(Journal)" => 4,
+            "BeginWith" => 5,
+            "BeginWith(snapshot isolation)" | "BeginWith(all three bits)" | "Err(Conflict)" => 7,
+            "Query" | "Rows" => 8,
+            "Aggregate" | "Groups" => 9,
+            "NeighborsByRelation" | "ListRelationKinds" | "RelationKinds" => 10,
+            "Record(StrList)" | "Rows(StrList)" | "Schema(StrList)" => 11,
+            "Join" | "DescribeRelations" | "JoinedRows" | "Relations" => 12,
+            other => panic!("{other}: add this golden vector's protocol version to introduced_at"),
+        }
+    }
+
+    /// `BINENC-FR-004` + `ECO-FR-005`: the pin, then the fixture line
+    /// (`Request/<label>`).
+    #[track_caller]
+    fn assert_golden<T>(label: &str, value: &T, golden: &[u8])
+    where
+        T: serde::Serialize + serde::de::DeserializeOwned,
+    {
+        crate::test_support::assert_golden(label, value, golden);
+        wire_fixture::check(&format!("Request/{label}"), introduced_at(label), golden);
+    }
+
+    /// `BINENC-FR-004` + `ECO-FR-005`: the pin, then the fixture line
+    /// (`Response/<label>`).
+    #[track_caller]
+    fn assert_golden_eq<T>(label: &str, value: &T, golden: &[u8])
+    where
+        T: serde::Serialize + serde::de::DeserializeOwned + PartialEq + std::fmt::Debug,
+    {
+        crate::test_support::assert_golden_eq(label, value, golden);
+        wire_fixture::check(&format!("Response/{label}"), introduced_at(label), golden);
+    }
 
     /// `Uuid::from_u128(1)` on the wire: a `u64` length of 16, then the
     /// 16 big-endian bytes. Every id-carrying variant below pays this.
@@ -1337,7 +1386,7 @@ mod tests {
             (ErrorCode::Conflict, 0x0a),
         ] {
             assert_golden_eq(
-                "Err(session code)",
+                &format!("Err({code:?})"),
                 &Response::Err {
                     code,
                     message: "x".into(),

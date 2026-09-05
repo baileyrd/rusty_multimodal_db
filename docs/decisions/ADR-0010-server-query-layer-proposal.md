@@ -187,7 +187,11 @@ runtime, and field-addressing choices). Summarized:
   issues (a Nagle/delayed-ACK cost, a test-isolation bug) found and fixed
   along the way.
 - Revisit if: a non-Rust or cross-language client becomes a real
-  requirement (reconsider gRPC/JSON-HTTP); the thread-per-connection model
+  requirement (reconsider gRPC/JSON-HTTP) — *fired and answered without
+  changing the wire: `ADR-0043` (Accepted, Implemented) specifies the
+  existing `bincode` wire as `SERVER-002`, pins it with an enforced
+  fixture, and ships a stdlib-only Python client implemented from the
+  document*; the thread-per-connection model
   is measured and found to be the actual bottleneck under a real workload
   (reconsider `tokio` — still unmeasured, since this round built no
   throughput benchmark, see `SERVER-001`'s own "Open questions"); the

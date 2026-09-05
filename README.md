@@ -99,6 +99,22 @@ cargo test --features server,research       # + Order/Customer and Employee, the
 cargo run --features server --bin dog_server   # a minimal local server, Dog domain
 ```
 
+The client half stands alone behind the `client` feature (`server`
+implies it): `SchemaDrivenClient`, the framing, the protocol types, and
+TLS via `rusty_tls`, with no listener, no adapters, and no
+`ConnectionStore` compiled in — for a process that only talks to a
+server. The wire itself is specified byte-for-byte for non-Rust readers
+in `docs/specifications/server/SERVER-002-wire-format.md`, pinned by
+`tests/fixtures/wire-vectors.txt` (written by and checked against every
+golden-vector test), and implemented from that document by a stdlib-only
+Python reference client in `clients/python/` (ADR-0043):
+
+```sh
+cargo test --features client                  # the client half alone
+python3 -m unittest discover -s clients/python/tests -v   # Python client vs. the wire fixture, offline
+cargo test --features server --test server_python_client  # Python client vs. a live Entity server
+```
+
 A client that doesn't know a domain at compile time can send
 `Request::DescribeSchema` first — the `Response::Schema` it gets back
 names every field, its wire type, and which operations it supports (see

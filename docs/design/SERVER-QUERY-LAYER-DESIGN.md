@@ -292,7 +292,12 @@ document itself; implementation tracked by `STORAGE-012`, here by
   addressing scheme. Non-Rust clients remain unaddressed (schema
   discovery doesn't by itself solve serialization-format
   interoperability, only field naming/capability discovery) — still a
-  real, separate, unscoped question if it's ever pursued.
+  real, separate, unscoped question if it's ever pursued. **Resolved**
+  — pursued and implemented: `docs/design/SERVER-CLIENT-ECOSYSTEM-
+  DESIGN.md` / `ADR-0043` (Accepted, Implemented); `SERVER-002` v0.1.0
+  specifies the wire, `tests/fixtures/wire-vectors.txt` pins it, and a
+  stdlib-only Python client (`clients/python/`) implemented from the
+  document passes offline and live.
 
 ## Change history
 

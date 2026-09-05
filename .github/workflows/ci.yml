@@ -29,7 +29,18 @@ jobs:
         run: cargo fmt --all -- --check
       - name: cargo clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
+      # `ECO-FR-008` (ADR-0043): the Python reference client's offline conformance test —
+      # every line of tests/fixtures/wire-vectors.txt decodes and re-encodes byte-for-byte.
+      # Its own step so a failure is attributed to the client, not to Rust; `python3` is
+      # part of `ubuntu-latest`. The live half runs inside `cargo test --all-features`
+      # below (tests/server_python_client.rs).
+      - name: python reference client (offline conformance vectors)
+        run: python3 -m unittest discover -s clients/python/tests -v
       - name: cargo test
         run: cargo test --all-features
+      # `ECO-FR-003` (ADR-0043): the client-only feature set builds and tests with no
+      # server compiled — a consumer that only talks to a server depends on this.
+      - name: cargo test (client feature only)
+        run: cargo test --features client
       - name: cargo doc
         run: cargo doc --all-features --no-deps

@@ -180,7 +180,10 @@ Accepted: option 2. Concretely, at implementation:
 - A `bincode` 2.x migration, if ever wanted, has its acceptance test
   ready (`config::legacy()` must reproduce the vectors).
 - A documented, pinned format is the precondition for a non-Rust client
-  (`PROJECT-STATUS` item 38), though not the client.
+  (`PROJECT-STATUS` item 38), though not the client. *The client
+  followed: `ADR-0043` / `SERVER-002` v0.1.0 — the pinned codec written
+  down byte-for-byte, the golden vectors exported as an enforced fixture,
+  a Python client implemented from the document; item 38 closed.*
 
 ### Negative / tradeoffs
 

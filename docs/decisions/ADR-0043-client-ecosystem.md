@@ -173,3 +173,28 @@ exist to prevent].
   declined). Implementation follows as `SERVER-002` v0.1.0 plus a
   `SERVER-001` patch entry, per `docs/design/SERVER-CLIENT-ECOSYSTEM-
   DESIGN.md`. Proposed and accepted in PR #192.
+- 2026-09-05: **implemented** as `SERVER-002` v0.1.0 plus the
+  `SERVER-001` v0.35.1 patch entry (`ECO-FR-001`–`009`). Landed as
+  proposed, all three parts: the `client` feature (`client = ["dep:
+  rusty_tls"]`, `server = ["client"]`; the server body moved verbatim to
+  `src/server/serve.rs` behind `pub use serve::*`, so no public path
+  changed; `cargo test --features client` proves the client half alone
+  and is a CI step); `SERVER-002` — framing, the `bincode` legacy codec
+  rules, every variant index and field order at protocol 12, the
+  negotiation/downgrade rules, worked bytes — bound to `tests/fixtures/
+  wire-vectors.txt` (48 vectors) by `test_support::wire_fixture::check`
+  in every golden-vector test, regenerated only by `RMDB_REGENERATE_
+  VECTORS=1`; and the stdlib-only Python reference client written from
+  the document, verified offline against every fixture vector
+  (`unittest`, a CI step) and live over a real socket against the
+  `Entity` server at 12 and at a negotiated 10 (`tests/server_python_
+  client.rs`), including the `StrList` strip below 11 and the gated
+  `Join` refused client-side below 12. **No deviation from the accepted
+  text.** No wire byte, protocol version, golden vector, or on-disk byte
+  changed; no new Rust dependency. `ADR-0010`'s revisit trigger is
+  answered as this ADR proposed: the existing wire specified and
+  implemented from the document, gRPC/JSON declined. Tests: `tests/
+  server_client_only.rs` (2, `client`-only), `tests/server_python_
+  client.rs` (1, `server`), `clients/python/tests/test_vectors.py`
+  (5). Full sweep green — see `docs/PROJECT-STATUS.md` item 132 for the
+  counts. `PROJECT-STATUS` item 38 closes with a pointer.

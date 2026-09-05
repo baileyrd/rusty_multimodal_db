@@ -125,6 +125,20 @@ required-features = ["server"]
 name = "server_entity_integration"
 required-features = ["server"]
 
+# `ECO-FR-003` (ADR-0043): proves the client-only feature set builds and
+# works with no server compiled — framing + protocol round trips and the
+# client library's own refusals, connecting to nothing.
+[[test]]
+name = "server_client_only"
+required-features = ["client"]
+
+# `ECO-FR-008` (ADR-0043): the Python reference client driven against a
+# real `Entity` server. Needs `python3` on `PATH` and fails loudly
+# without it — a skipped test is not a test (see the file's own docs).
+[[test]]
+name = "server_python_client"
+required-features = ["server"]
+
 [[test]]
 name = "server_order_integration"
 required-features = ["server", "research"]
@@ -354,7 +368,13 @@ research = []
 # native-TLS support — `TlsConfig` is `None` unless an operator opts in, so
 # this dependency compiles in but adds no behavior change for an existing
 # deployment that doesn't configure it.
-server = ["dep:rusty_tls"]
+# The client half of `src/server/` alone — framing, protocol, the
+# schema-driven client and its SQL front end, PEM loading, and `rusty_tls`
+# for the client side of TLS. A consumer that only talks to a server
+# depends on this and compiles no `serve`, no domain adapter, no journal
+# (`ECO-FR-001`, ADR-0043). `server` implies it.
+client = ["dep:rusty_tls"]
+server = ["client"]
 perf-events = ["dep:criterion-perf-events", "dep:perfcnt"]
 # The external-database comparison benchmark (benches/external_db.rs, ADR-0015) — SQLite/DuckDB
 # (embedded) and Postgres (a real client against a locally-run server this benchmark does not
