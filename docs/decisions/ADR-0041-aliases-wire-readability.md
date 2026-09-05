@@ -1,6 +1,12 @@
 # ADR-0041: `Entity::aliases` on the wire — `ScanValue::StrList` at protocol 11
 
-- Status: **Proposed**
+- Status: **Accepted** (promoted from Proposed on 2026-09-05 — the
+  owner approved option (a): the design as proposed, `ScanValue::
+  StrList`/`ValueKind::StrList` at protocol 11 with rule-3 content
+  stripping in `downgrade_for_version`; (b) the separator-joined `Str`
+  fallback and (c) closing as not warranted both declined). Acceptance
+  authorizes the design; implementation follows as its own unit — see
+  "Acceptance and implementation" below.
 - Date: 2026-09-05
 - Deciders: baileyrd
 - Related: `docs/design/SERVER-ENTITY-ALIASES-WIRE-DESIGN.md` (the full
@@ -115,4 +121,7 @@ the list itself is demonstrated].
   `Str` fallback instead — `aliases` exposed as one `Str` field, no
   protocol bump, lossy for any alias containing the separator; (c) close
   as not warranted — resolving *by* alias (`FR-042`) is enough until a
-  real consumer of the list itself appears. Proposed in this PR.
+  real consumer of the list itself appears. Proposed in PR #188.
+- 2026-09-05: accepted as proposed (option (a); (b) and (c) declined).
+  Implementation follows as `SERVER-001`'s next minor / FR (protocol
+  11), per `docs/design/SERVER-ENTITY-ALIASES-WIRE-DESIGN.md`. (PR #188.)

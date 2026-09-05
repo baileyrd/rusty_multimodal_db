@@ -1,6 +1,14 @@
-# Server Entity Aliases on the Wire
+# Server Entity Aliases on the Wire (Accepted)
 
-- Status: **Proposed**
+- Status: **Accepted** (promoted from Proposed on 2026-09-05 — the
+  owner approved the design as proposed, `ADR-0041` option (a):
+  `ScanValue::StrList`/`ValueKind::StrList` at protocol 11, `aliases`
+  readable via `GetById`/`Query` with every capability flag `false`,
+  rule-3 content stripping in `downgrade_for_version` for every client
+  below 11; (b) the separator-joined `Str` fallback and (c) closing as
+  not warranted both declined). Acceptance authorizes the design;
+  implementation follows as its own unit — see `ADR-0041`'s
+  "Acceptance and implementation" section.
 - Date: 2026-09-05
 - Related: `ADR-0040`/`docs/design/SERVER-ENTITY-ALIASES-DESIGN.md`
   (named `aliases`' own wire-readability as the one deferred piece of
@@ -354,3 +362,5 @@ pub const FIELD_ALIASES: FieldRef = 3;
   StrList`/`ValueKind::StrList` at protocol 11 so `Entity::aliases` can
   be read back, with rule-3 content stripping in `downgrade_for_version`
   for every client negotiated below 11.
+- 2026-09-05: Accepted as proposed, `ADR-0041` option (a); (b) and (c)
+  declined.
