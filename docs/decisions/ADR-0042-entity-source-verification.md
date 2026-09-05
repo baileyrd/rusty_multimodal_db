@@ -1,6 +1,12 @@
 # ADR-0042: `Entity` verified against `rusty_remind_me`'s source — findings and two follow-ups
 
-- Status: **Proposed**
+- Status: **Accepted** (promoted from Proposed on 2026-09-05 — the
+  owner approved option (a): the ten findings accepted, and both
+  follow-ups (`ENT5-FR-001` normalization, `ENT5-FR-002` derived
+  `entity_id`, adds `sha2`) taken as one implementation unit; (b)
+  normalization-only and (c) informational-only both declined.
+  Acceptance authorizes the follow-ups; implementation follows as its
+  own unit — see "Acceptance and implementation" below.)
 - Date: 2026-09-05
 - Deciders: baileyrd
 - Related: `docs/design/SERVER-ENTITY-SOURCE-VERIFICATION-DESIGN.md`
@@ -109,4 +115,8 @@ gain].
   dependency; (c) accept the findings as informational — retire the
   "source unread" caveat everywhere, no engine change. In every option
   the open-label/directed-edge/traverse-result divergences (F3/F4/F5)
-  are named for a future design round, not built. Proposed in this PR.
+  are named for a future design round, not built. Proposed in PR #189.
+- 2026-09-05: accepted as proposed (option (a); (b) and (c) declined).
+  Implementation of `ENT5-FR-001`/`002` follows as `SERVER-001`'s next
+  minor / FR, per `docs/design/SERVER-ENTITY-SOURCE-VERIFICATION-
+  DESIGN.md`. F3/F4/F5 remain named, not built. (PR #189.)

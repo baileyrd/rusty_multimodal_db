@@ -1,6 +1,16 @@
-# Server Entity Source Verification
+# Server Entity Source Verification (Accepted)
 
-- Status: **Proposed**
+- Status: **Accepted** (promoted from Proposed on 2026-09-05 — the
+  owner approved option (a): the ten findings accepted as the record of
+  what `rusty_remind_me` does, and both follow-ups — `ENT5-FR-001`
+  (normalization collapses internal whitespace) and `ENT5-FR-002`
+  (derived `entity_id(name) -> Uuid`, adds `sha2`) — taken as one
+  implementation unit; (b) normalization-only and (c) informational-
+  only both declined. Acceptance authorizes the follow-ups;
+  implementation follows as its own unit — see `ADR-0042`'s
+  "Acceptance and implementation" section. The open-label/directed-
+  edge/edges-with-hops divergences (F3/F4/F5) stay named for a future
+  design round, not built.)
 - Date: 2026-09-05
 - Related: `docs/design/SERVER-ENTITY-INTEGRATION-VERIFICATION-DESIGN.md`/
   `ADR-0038` (Unit 41 — the same question asked of the MCP *tool
@@ -348,3 +358,5 @@ pub fn entity_id(name: &str) -> Uuid {
   directly at `29602f1`; ten findings, two proposed follow-ups
   (`ENT5-FR-001`/`002`), three larger divergences named for a future
   round.
+- 2026-09-05: Accepted as proposed, `ADR-0042` option (a); (b) and (c)
+  declined.
