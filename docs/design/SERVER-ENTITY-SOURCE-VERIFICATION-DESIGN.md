@@ -298,7 +298,11 @@ pub fn entity_id(name: &str) -> Uuid {
 - No `PROTOCOL_VERSION` change, no wire change, no schema change.
 - `sha2` as a new dependency (`ENT5-FR-002`) — named plainly; the first
   new `Cargo.toml` dependency since `rusty_tls` (`FR-019`). Pure Rust,
-  RustCrypto, no build script. If the owner prefers zero new
+  RustCrypto, no build script. *Corrected at implementation: the three
+  external-database bench crates (ADR-0015) came after `rusty_tls`, so
+  the accurate statement is the first new **unconditional** dependency
+  since `subtle` (ADR-0012) — `rusty_tls` and the bench crates are all
+  `optional = true`.* If the owner prefers zero new
   dependencies, option (b) drops `ENT5-FR-002` and with it the
   dependency.
 
@@ -360,3 +364,10 @@ pub fn entity_id(name: &str) -> Uuid {
   round.
 - 2026-09-05: Accepted as proposed, `ADR-0042` option (a); (b) and (c)
   declined.
+- 2026-09-05: **Implemented** (`SERVER-001-FR-043`, v0.33.0). Both
+  follow-ups landed as this document's "Proposed shape" sketched them,
+  with one implementation detail (`normalize` became `pub(crate)` so
+  `entity_id` shares the single rule) and one correction to this
+  document's own "Security, privacy, and compatibility" section (the
+  dependency claim — see the note there). Every "source unread" caveat
+  this round retired now points here. F3/F4/F5 stand as named.

@@ -433,7 +433,12 @@ respectively (mirroring how every pre-`Employee` adapter answered
   than two — named, not solved; real cost, not yet shown to matter.
 - Whether `rusty_remind_me`'s real relation label vocabulary is ever
   confirmed (still unread source) — `MentionedWith` stays an honest
-  placeholder, not a verified real label, until then.
+  placeholder, not a verified real label, until then. *Resolved by
+  `ADR-0042` (`docs/design/SERVER-ENTITY-SOURCE-VERIFICATION-DESIGN.md`,
+  Finding F3): the source was read at `29602f1` — there is no
+  vocabulary; `entity_relations.relation` is free-form text per triple.
+  The placeholder label was never the mismatch; this document's own
+  fixed-set model is, named there for a future round.*
 
 ## Change history
 

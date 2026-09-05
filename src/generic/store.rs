@@ -842,7 +842,11 @@ where
 ///
 /// # Normalization lives here, in exactly one place
 ///
-/// `normalize` (private) — `str::trim` then `str::to_lowercase` — is
+/// `normalize` (`pub(crate)`) — every run of whitespace collapsed to one
+/// space, then `str::to_lowercase` (`ENT5-FR-001`, ADR-0042: matching
+/// `rusty_remind_me`'s own `normalize_entity_name`, whose doc comment
+/// records that a trim-only version split `"Bailey  Robertson"` and
+/// `"Bailey Robertson"` into two entities) — is
 /// applied to every key at build time *and* to every query in
 /// [`FindByName::find_by_name`](super::query::FindByName::find_by_name),
 /// so a caller may pass raw text and a record's own `index_keys` may
@@ -854,9 +858,18 @@ pub struct NameIndex<S, R: super::query::NameIndexed> {
     index: HashMap<String, Vec<R::Id>>,
 }
 
-/// `ENT3-FR-003`: the one normalization rule, shared by build and query.
-fn normalize(key: &str) -> String {
-    key.trim().to_lowercase()
+/// `ENT3-FR-003`/`ENT5-FR-001`: the one normalization rule, shared by
+/// build and query — and by [`super::entity::entity_id`], so a derived
+/// id and the name index agree on what "the same name" means. Collapses
+/// every run of Unicode whitespace (tabs, newlines, doubled spaces) to a
+/// single space and trims the ends, then lowercases. `pub(crate)` so
+/// `entity_id` can reuse it; not `pub` — the rule is an implementation
+/// detail of the index, not a public API.
+pub(crate) fn normalize(key: &str) -> String {
+    key.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
 }
 
 impl<S, R> NameIndex<S, R>
@@ -1174,6 +1187,23 @@ mod tests {
     use super::*;
     use crate::test_support::fresh_temp_dir;
     use std::path::PathBuf;
+
+    /// `ENT5-FR-001`: the three cases `rusty_remind_me`'s own
+    /// `entity_id_test.rs` pins (a tab and a newline inside the name, a
+    /// doubled space, and the empty string), plus this crate's own
+    /// pre-existing case/trim cases — every variant of one name is one
+    /// key.
+    #[test]
+    fn normalize_collapses_internal_whitespace_and_case() {
+        assert_eq!(normalize(" Bailey\t Robertson\n"), "bailey robertson");
+        assert_eq!(normalize("  Bailey   Robertson  "), "bailey robertson");
+        assert_eq!(normalize("bailey robertson"), "bailey robertson");
+        assert_eq!(normalize("BAILEY ROBERTSON"), "bailey robertson");
+        assert_eq!(normalize(""), "");
+        assert_eq!(normalize("   "), "");
+        // Collapsing is not stripping: distinct words stay distinct.
+        assert_ne!(normalize("Bailey Robertson"), normalize("BaileyRobertson"));
+    }
 
     // The smallest record type that can sit under a `Symmetric` layer —
     // the blob is independent of what `S` is, so nothing here needs a

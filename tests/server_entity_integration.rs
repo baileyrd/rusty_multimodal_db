@@ -6,7 +6,7 @@
 //! ["server"]` only, no `research` — `Entity` is front-door, matching
 //! `tests/server_reminder_integration.rs`'s own precedent.
 
-use rusty_multimodal_db::generic::entity::{create_entity_production_stack, Entity};
+use rusty_multimodal_db::generic::entity::{create_entity_production_stack, entity_id, Entity};
 use rusty_multimodal_db::generic::production::GenericProductionStore;
 use rusty_multimodal_db::generic::reminder::{
     create_reminder_production_stack, Reminder, ReminderStatus,
@@ -250,6 +250,56 @@ fn filter_eq_by_label_resolves_label_and_aliases_case_insensitively() {
         .unwrap();
     babbage.sort();
     assert_eq!(babbage, vec![Uuid::from_u128(4), Uuid::from_u128(5)]);
+}
+
+/// `ENT5` acceptance criteria 1 and 3 (ADR-0042) over a real socket: an
+/// entity minted with `entity_id(&label)` is fetched by `GetById` on the
+/// id re-derived from a differently-spelled query — one round trip, no
+/// `FilterEq` — and `FilterEq` on `label` collapses an internal
+/// whitespace run the same way. Its own server: the shared fixture's
+/// `GROUP BY kind` counts must not change.
+#[test]
+fn get_by_derived_entity_id_resolves_a_name_in_one_round_trip() {
+    let dir = unique_dir("entity_v5_derived_id");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("entities.mmap");
+    let entities = vec![Entity {
+        id: entity_id("Grace Hopper"),
+        label: "Grace Hopper".into(),
+        kind: "person".into(),
+        mention_count: 0,
+        aliases: vec!["Amazing Grace".into()],
+    }];
+    let stack = create_entity_production_stack(entities, &[], &[], &path).unwrap();
+    let connection_store = Arc::new(EntityConnectionStore::new(GenericProductionStore::new(
+        stack,
+    )));
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    thread::spawn(move || serve(listener, connection_store, ServeOptions::default()));
+    let mut client = SchemaDrivenClient::connect(addr).unwrap();
+
+    let fields = client
+        .get(entity_id("  grace   HOPPER\t"))
+        .unwrap()
+        .expect("the derived id from any spelling resolves in one GetById");
+    assert_eq!(
+        fields[0],
+        ("label".to_string(), ScanValue::Str("Grace Hopper".into()))
+    );
+    // A different name is a different id — and a miss, not an error.
+    assert!(client.get(entity_id("Grace Hopper II")).unwrap().is_none());
+    // `ENT5-FR-001` over the wire: internal whitespace collapses in
+    // `FilterEq` on `label`, for the label and for an alias alike.
+    for query in ["grace   hopper", "Grace\tHopper", "amazing   grace"] {
+        assert_eq!(
+            client
+                .filter_eq("label", ScanValue::Str(query.into()))
+                .unwrap(),
+            vec![entity_id("Grace Hopper")],
+            "query {query:?}"
+        );
+    }
 }
 
 /// Acceptance criterion 4 (v2, narrowed — see `crate::generic::entity`'s
