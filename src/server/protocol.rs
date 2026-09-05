@@ -66,6 +66,7 @@
 //! | 9 | `SERVER-001` v0.28.0 | + [`Request::Aggregate`] (16) and [`Response::Groups`] (13) — `GROUP BY`/`COUNT`/`SUM`/`AVG`/`MIN`/`MAX` on top of [`Request::Query`]'s own machinery: `group_by` buckets `ConnectionStore::scan_all`'s already-filtered rows (empty `group_by` is one implicit whole-table group), `aggregates` reduces each bucket (`AggregateFn`/`AggregateSpec`), `filter` reuses [`Predicate`]/[`CompareOp`] unchanged. [`ScanValue`] gains `F64(f64)` — [`AggregateFn::Avg`]'s result, the wire's first fractional value; never a stored field's `ValueKind`. No new `ErrorCode`. Not overlaid, not read-set-tracked — the identical line `SQL-FR-009` already draws. `Malformed` below 9 is not reachable (`AGG-FR-010`); `Request::Query`/`Response::Rows` and every byte at version 8 and below are unchanged — a plain `SELECT` still only needs version 8. ADR-0035 |
 //! | 10 | `SERVER-001` v0.31.0 | + [`Request::NeighborsByRelation`] (17), [`Request::ListRelationKinds`] (18), and [`Response::RelationKinds`] (14) — `ENT2-FR-004`/`005`, ADR-0039: a one-hop neighbor lookup filtered to one named relation label (`NeighborsByRelation`, answered by the existing [`Response::RecordList`] unchanged), and relation-label discovery (`ListRelationKinds`/`RelationKinds`) for a domain with more than one named `SymmetricRelation` — [`crate::generic::entity::Entity`], the first. No field added to any pre-existing `Request`/`Response` variant or to `DomainSchema`/`RelationCapabilities` — `bincode`'s positional struct encoding makes that unsafe (rule 1); both are brand-new, appended variants instead. No new `ErrorCode` — an unknown relation label reuses `Malformed`. Gated entirely client-side, the same posture `Query`/`Aggregate` already established: `dispatch` itself performs no version check (as it never has for `Query`/`Aggregate` either), relying on `SchemaDrivenClient` never sending either request below version 10. Not overlaid, not read-set-tracked. ADR-0039 |
 //! | 11 | `SERVER-001` v0.34.0 | + [`ScanValue::StrList`] (5) and [`ValueKind::StrList`] (4) — `ENT4-FR-001`, ADR-0041: a stored list-of-strings field, [`crate::generic::entity::Entity`]'s `aliases` the first (`FIELD_ALIASES = 3`, every capability flag `false`, read-only). Unlike `F64`, `StrList` describes a stored field's real type, so its `ValueKind` exists. **The first appended value variant that reaches an ungated response** — `GetById`/`Query`/`DescribeSchema` are protocol-1/8/1 requests a silent client can send — so rule 3 rewrites *content* for the first time: `downgrade_for_version` strips every `StrList` pair from `Response::Record`/`Rows` and every `StrList` descriptor from `Response::Schema` on a connection negotiated below 11, leaving exactly the three-field `Entity` of `FR-042`. No new `Request`/`ErrorCode`. ADR-0041 |
+//! | 12 | `SERVER-001` v0.35.0 | + [`Request::Join`] (19) and [`Request::DescribeRelations`] (20), [`Response::JoinedRows`] (15) and [`Response::Relations`] (16) — `JOIN-FR-001`/`002`, ADR-0044: an inner join over a *declared relation* of one table ([`JoinRelation`]: every symmetric relation, one named label, `parent`, or `children`), evaluated server-side as an index nested loop over the adapter's own relation methods and answered as [`JoinedRow`]s carrying both ids and both projected field lists; [`RelationDescriptor`] names what `ON` may say. `right_table`/`target_table` are carried from day one for ADR-0045 (more than one table per connection, gated) and are `None` here. Gated: `Malformed` below 12 (rule 3), sent only after negotiating ≥ 12 (rule 4); `JoinedRows`/`Relations` only ever answer the two gated requests, so no `downgrade_for_version` arm is needed — the `Query`/`Rows` precedent. No new `ErrorCode`. ADR-0044 |
 //!
 //! ## Compatibility rules (`PROTO-FR-005`)
 //!
@@ -100,7 +101,7 @@ use uuid::Uuid;
 /// versions" table. Bumped by exactly one in any change that appends a
 /// variant (rule 2). Version 1 is retroactively the `SERVER-001` v0.9.1
 /// shape: what a client that never sends [`Request::Hello`] speaks.
-pub const PROTOCOL_VERSION: u32 = 11;
+pub const PROTOCOL_VERSION: u32 = 12;
 
 /// `Request::BeginWith` flag bit 0 (protocol 5, `RYW-FR-001`, ADR-0027):
 /// the session's own point reads (`GetById`) see its staged writes —
@@ -272,6 +273,70 @@ pub struct AggregateSpec {
 pub struct AggregateGroup {
     pub key: Vec<(FieldRef, ScanValue)>,
     pub values: Vec<ScanValue>,
+}
+
+/// Which declared relation of a [`Request::Join`]'s left row yields its
+/// right rows — `JOIN-FR-001`, ADR-0044, protocol 12. The join key is
+/// the relation's own index, never a column predicate: `Neighbors(None)`
+/// is every symmetric relation this domain has (`ConnectionStore::
+/// neighbors`), `Neighbors(Some(label))` one named label
+/// (`neighbors_by_relation`), `Parent` the left row's parent (at most
+/// one right row), `Children` the left row's children. Which of these a
+/// domain admits is what [`RelationDescriptor`] reports.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum JoinRelation {
+    Neighbors(Option<String>),
+    Parent,
+    Children,
+}
+
+/// [`Request::Join`]'s body — `JOIN-FR-001`, ADR-0044, protocol 12. Both
+/// sides are projected and filtered independently with the same
+/// [`Selection`]/[`Predicate`] shapes [`Request::Query`] uses; `limit`
+/// truncates the *pair* count and stops the evaluation early. `right_
+/// table` is `None` for the join this crate can answer today (the
+/// connection's own table on both sides); `Some(_)` is reserved for
+/// ADR-0045 (more than one table per connection) and is `Malformed`
+/// until that lands — carried from day one so that round is a pure
+/// append, not a second `Join` variant.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct JoinSpec {
+    pub relation: JoinRelation,
+    pub right_table: Option<String>,
+    pub left: Selection,
+    pub right: Selection,
+    pub left_filter: Vec<Predicate>,
+    pub right_filter: Vec<Predicate>,
+    pub limit: Option<usize>,
+}
+
+/// One row of a [`Response::JoinedRows`] result: the left record's id and
+/// projected fields, then the related right record's — two records, so
+/// two ids; never folded into one [`Response::Record`]-shaped row.
+/// `JOIN-FR-001`, ADR-0044.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct JoinedRow {
+    pub left_id: RecordId,
+    pub left: Vec<(FieldRef, ScanValue)>,
+    pub right_id: RecordId,
+    pub right: Vec<(FieldRef, ScanValue)>,
+}
+
+/// One relation a [`Request::Join`] may name — `JOIN-FR-002`, ADR-0044,
+/// protocol 12; answers [`Request::DescribeRelations`]. `name` is what
+/// SQL's `ON` says (`"neighbors"`, a symmetric label such as
+/// `"relates_to"`, `"parent"`, `"children"`); `kind` is the
+/// [`JoinRelation`] it compiles to. `target_table: None` means the
+/// related rows are this table's own, so a self-join is legal;
+/// `Some(table)` means they live in another table (ADR-0045) and a join
+/// with `right_table: None` is `Unsupported`. `DomainSchema` is a struct
+/// and cannot grow a field (`STORAGE-018`'s evolution rules), so relation
+/// detail is its own request — exactly as `ListRelationKinds` was.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RelationDescriptor {
+    pub name: String,
+    pub kind: JoinRelation,
+    pub target_table: Option<String>,
 }
 
 /// The outcome of a `Parent` lookup — kept as a three-way enum, not a
@@ -578,6 +643,25 @@ pub enum Request {
     /// one for `Entity`. Lets a client discover the real label set
     /// without hardcoding one. Answered by [`Response::RelationKinds`].
     ListRelationKinds,
+    /// Protocol 12 (`JOIN-FR-001`, ADR-0044): an inner join of this
+    /// table with itself over one declared relation — see [`JoinSpec`].
+    /// Evaluated server-side as an index nested loop over the adapter's
+    /// own `neighbors`/`neighbors_by_relation`/`parent`/`children`, one
+    /// `get` per related id: Σ degree work over the filtered left side,
+    /// never |L|·|R|. A symmetric relation yields both orientations of
+    /// an edge (SQL semantics). A relation not listed by
+    /// [`Request::DescribeRelations`] is `Malformed`; one listed with a
+    /// `target_table` while `right_table` is `None` is `Unsupported`;
+    /// `right_table: Some(_)` is `Malformed` until ADR-0045. Gated:
+    /// `Malformed` below 12; never overlaid by a session, never
+    /// read-set-tracked (`Query`'s line). Answered by
+    /// [`Response::JoinedRows`].
+    Join(JoinSpec),
+    /// Protocol 12 (`JOIN-FR-002`, ADR-0044): every relation this table
+    /// admits in a [`Request::Join`], with its [`JoinRelation`] and
+    /// whether its rows are this table's own. Answered by
+    /// [`Response::Relations`]. Gated: `Malformed` below 12.
+    DescribeRelations,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -647,6 +731,19 @@ pub enum Response {
     /// relation label this domain knows, unspecified order.
     RelationKinds {
         kinds: Vec<String>,
+    },
+    /// Protocol 12 (`JOIN-FR-001`, ADR-0044). Answers [`Request::Join`]:
+    /// one [`JoinedRow`] per (left row, related right row) pair passing
+    /// both filters, in `scan_all`-then-relation order — unspecified,
+    /// like every other row-returning response. Only ever answers the
+    /// gated `Join`, so it needs no `downgrade_for_version` arm.
+    JoinedRows {
+        rows: Vec<JoinedRow>,
+    },
+    /// Protocol 12 (`JOIN-FR-002`, ADR-0044). Answers
+    /// [`Request::DescribeRelations`].
+    Relations {
+        relations: Vec<RelationDescriptor>,
     },
 }
 
@@ -896,6 +993,43 @@ mod tests {
             "ListRelationKinds",
             &Request::ListRelationKinds,
             &[0x12, 0x00, 0x00, 0x00],
+        );
+        // Protocol 12 (`JOIN-FR-001`/`002`, ADR-0044): `Join` at 19 —
+        // exercises every `JoinSpec` field, including the `None`
+        // `right_table` reserved for ADR-0045 — and `DescribeRelations`
+        // at 20 (no fields).
+        assert_golden(
+            "Join",
+            &Request::Join(JoinSpec {
+                relation: JoinRelation::Neighbors(Some("relates_to".into())),
+                right_table: None,
+                left: Selection::Fields(vec![0]),
+                right: Selection::All,
+                left_filter: vec![],
+                right_filter: vec![],
+                limit: Some(2),
+            }),
+            &bytes(&[
+                &[0x13, 0x00, 0x00, 0x00], // Join
+                &[0x00, 0x00, 0x00, 0x00], // JoinRelation::Neighbors
+                &[0x01],                   // Some(label)
+                &[0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+                b"relates_to",
+                &[0x00],                   // right_table: None
+                &[0x01, 0x00, 0x00, 0x00], // left: Selection::Fields
+                &LEN1,
+                &[0x00, 0x00],                                     // tag 0
+                &[0x00, 0x00, 0x00, 0x00],                         // right: Selection::All
+                &[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], // left_filter: empty
+                &[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], // right_filter: empty
+                &[0x01],                                           // limit: Some
+                &[0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], // usize 2
+            ]),
+        );
+        assert_golden(
+            "DescribeRelations",
+            &Request::DescribeRelations,
+            &[0x14, 0x00, 0x00, 0x00],
         );
     }
 
@@ -1149,6 +1283,50 @@ mod tests {
                 &[0x00, 0x01],             // relations
             ]),
         );
+        // Protocol 12 (`JOIN-FR-001`/`002`, ADR-0044): `JoinedRows` at 15
+        // (one pair: a left row with one projected field, a right row
+        // with none) and `Relations` at 16 (one descriptor).
+        assert_golden_eq(
+            "JoinedRows",
+            &Response::JoinedRows {
+                rows: vec![JoinedRow {
+                    left_id: id,
+                    left: vec![(0, ScanValue::Str("a".into()))],
+                    right_id: Uuid::from_u128(2),
+                    right: vec![],
+                }],
+            },
+            &bytes(&[
+                &[0x0f, 0x00, 0x00, 0x00], // JoinedRows
+                &LEN1,                     // rows: one JoinedRow
+                &ID1,                      // left_id
+                &LEN1,                     // left: one pair
+                &[0x00, 0x00],             // tag 0
+                &[0x03, 0x00, 0x00, 0x00], // ScanValue::Str
+                &LEN1,                     // one byte
+                b"a",
+                &ID2,                                              // right_id
+                &[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], // right: empty
+            ]),
+        );
+        assert_golden_eq(
+            "Relations",
+            &Response::Relations {
+                relations: vec![RelationDescriptor {
+                    name: "parent".into(),
+                    kind: JoinRelation::Parent,
+                    target_table: None,
+                }],
+            },
+            &bytes(&[
+                &[0x10, 0x00, 0x00, 0x00], // Relations
+                &LEN1,                     // one descriptor
+                &[0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+                b"parent",
+                &[0x01, 0x00, 0x00, 0x00], // JoinRelation::Parent
+                &[0x00],                   // target_table: None
+            ]),
+        );
         for (code, index) in [
             (ErrorCode::NoSession, 0x06u8),
             (ErrorCode::SessionOpen, 0x07),
@@ -1175,8 +1353,9 @@ mod tests {
     }
 
     /// `PROTO-FR-001`/`PROTO-FR-005` rule 2: the constant matches the
-    /// module docs' table — version 11 is the one that added
-    /// `ScanValue::StrList`/`ValueKind::StrList` (10 added
+    /// module docs' table — version 12 is the one that added
+    /// `Request::Join`/`DescribeRelations` and `Response::JoinedRows`/
+    /// `Relations` (11 added `ScanValue::StrList`/`ValueKind::StrList`, 10
     /// `NeighborsByRelation`/`ListRelationKinds`/`RelationKinds`, 9
     /// `Request::Aggregate`/`Response::Groups`, 8 `Request::Query`/
     /// `Response::Rows`, 7 `ErrorCode::Conflict` and
@@ -1186,7 +1365,7 @@ mod tests {
     /// table; this test is the reminder.
     #[test]
     fn protocol_version_is_the_one_the_table_names() {
-        assert_eq!(PROTOCOL_VERSION, 11);
+        assert_eq!(PROTOCOL_VERSION, 12);
     }
 
     /// `SESS-FR-001`: the session shapes round-trip through the codec like

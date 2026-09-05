@@ -164,3 +164,34 @@ from a dangling id]; (c) grow `RelationCapabilities` [a format change].
   declined). Implementation follows as `SERVER-001`'s next minor / FR
   (protocol 12), per Part A of `docs/design/SERVER-SQL-JOIN-DESIGN.md`.
   Proposed and accepted in PR #193.
+- 2026-09-05: **implemented** as `SERVER-001-FR-045` (v0.35.0). Landed
+  as proposed: `Request::Join`/`DescribeRelations` (19/20), `Response::
+  JoinedRows`/`Relations` (15/16), `PROTOCOL_VERSION` 12, four golden
+  vectors; `ConnectionStore::describe_relations()` with the conservative
+  default (`default_relation_descriptors`) and `Employee`'s one override;
+  `validate_join`/`evaluate_join` in `dispatch` — the index nested loop
+  over each adapter's existing relation methods, `limit` bounding work
+  and response, both orientations of a symmetric edge; `Malformed`
+  below 12 in `handle_connection` (the session precedent, per this
+  ADR's text; no `downgrade_for_version` arm, pinned by the `Hello
+  { 11 }`/silent-client tests); SQL aliases, `alias.field`, `JOIN … ON
+  <relation>`, the four parse-time rejections; `SchemaDrivenClient::
+  relations()`, `query_join`, `QueryResult::Joined`/`JoinedRowNamed`,
+  `Unsupported("sql join")` below 12. Proven over real sockets on
+  `Entity` (the consumer's one-hop-with-names query in one round trip,
+  `aliases` riding as a `StrList`), `Employee` (`parent`/`children`/
+  `collaborates_with`), and `Dog`; `Order` and `Reminder` refuse as
+  designed. **No deviation from the accepted text.** Two consequences
+  recorded, not folded in: `QueryResult`'s third variant broke three
+  exhaustive `match`es in this crate's own integration suites (the
+  public-API cost named above — each gained a `Joined` arm); and four
+  unplanned protocol-11 literals in Unit 49's tests broke on the bump
+  and were rewritten against `PROTOCOL_VERSION` (or `>= 11` where the
+  claim is "since 11"), so only `tests/server_protocol_version.rs` and
+  `protocol.rs`'s own test pin the literal. Wire-and-client only: no
+  `Cargo.toml`, `src/generic/**`, or on-disk change; `traverse`
+  untouched. Tests: four new unit tests in `src/server/mod.rs`, six in
+  `src/server/sql.rs`, seven new integration tests across the six
+  server suites, the three named pins moved. Full sweep green — see
+  `docs/PROJECT-STATUS.md` item 131 and `SERVER-001-FR-045` for the
+  counts.

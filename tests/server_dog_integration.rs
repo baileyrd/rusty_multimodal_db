@@ -10,6 +10,7 @@
 //! and concurrency correctness, not a claim of process-level isolation.
 
 use rusty_multimodal_db::record::DogRecord;
+use rusty_multimodal_db::server::client::{QueryResult, SchemaDrivenClient};
 use rusty_multimodal_db::server::dog::{DogConnectionStore, FIELD_AGE, FIELD_BREED};
 use rusty_multimodal_db::server::framing::{read_message, write_message};
 use rusty_multimodal_db::server::protocol::{Request, Response, ScanValue};
@@ -364,5 +365,42 @@ fn concurrent_clients_over_the_wire_match_a_sequential_replay() {
             }
             other => panic!("expected a Record response, got {other:?}"),
         }
+    }
+}
+
+/// `JOIN` acceptance criterion 5 (ADR-0044): the first domain's one
+/// relation, `littermate_of`, is joinable with no adapter change — the
+/// conservative default lists `neighbors` and the label. Two dogs, one
+/// edge: a left filter on age keeps one orientation.
+#[test]
+fn join_on_littermate_of_works_with_the_default_relation_list() {
+    let addr = start_server();
+    let mut client = SchemaDrivenClient::connect(addr).unwrap();
+    let mut names: Vec<&str> = client.relations().iter().map(|r| r.name.as_str()).collect();
+    names.sort();
+    assert_eq!(names, vec!["littermate_of", "neighbors"]);
+    let rows = match client
+        .query("SELECT a.breed, b.age FROM dog a JOIN dog b ON littermate_of WHERE a.age < 4")
+        .unwrap()
+    {
+        QueryResult::Joined(rows) => rows,
+        other => panic!("expected Joined, got {other:?}"),
+    };
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].left_id, Uuid::from_u128(1));
+    assert_eq!(rows[0].right_id, Uuid::from_u128(2));
+    assert_eq!(
+        rows[0].fields,
+        vec![
+            ("a.breed".to_string(), ScanValue::Str("labrador".into())),
+            ("b.age".to_string(), ScanValue::U32(5)),
+        ]
+    );
+    match client
+        .query("SELECT a.age FROM dog a JOIN dog b ON neighbors")
+        .unwrap()
+    {
+        QueryResult::Joined(rows) => assert_eq!(rows.len(), 2, "both orientations"),
+        other => panic!("expected Joined, got {other:?}"),
     }
 }

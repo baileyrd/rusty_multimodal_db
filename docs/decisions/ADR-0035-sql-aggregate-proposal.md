@@ -230,6 +230,9 @@ implementation:
 - Revisit if: multi-table joins are ever taken up — `docs/FUTURE-
   GROWTH.md`'s own separate "big three" item, deliberately untouched
   by this ADR.
+  *Fired: `ADR-0044` (relation joins within one table, implemented as
+  `SERVER-001-FR-045`) and `ADR-0045` (multi-table connections, accepted
+  as gated direction) — `docs/design/SERVER-SQL-JOIN-DESIGN.md`.*
 
 ## Acceptance and implementation
 

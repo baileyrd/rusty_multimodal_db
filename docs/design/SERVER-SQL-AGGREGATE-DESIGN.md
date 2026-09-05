@@ -85,6 +85,9 @@ already is).
   three" item; `ADR-0010`'s one-domain-per-connection architecture gives
   this design nothing to join against, unchanged from `ADR-0034`'s
   identical reasoning.
+  *Revisited by `ADR-0044` / `SERVER-001-FR-045` (v0.35.0): relation
+  joins within one table exist at protocol 12 (aggregation over a join
+  remains a Non-goal there too); multi-table is `ADR-0045`, gated.*
 - **`ORDER BY` on grouped results.** `Response::Groups` carries groups
   in whatever unspecified order the grouping computation produces them
   in — the same "unspecified order" convention `ScanField`/

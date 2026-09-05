@@ -71,6 +71,10 @@ pub enum RequestKind {
     NeighborsByRelation,
     /// Protocol 10, ADR-0039.
     ListRelationKinds,
+    /// Protocol 12, ADR-0044.
+    Join,
+    /// Protocol 12, ADR-0044.
+    DescribeRelations,
 }
 
 impl RequestKind {
@@ -95,6 +99,8 @@ impl RequestKind {
             Request::Aggregate { .. } => RequestKind::Aggregate,
             Request::NeighborsByRelation { .. } => RequestKind::NeighborsByRelation,
             Request::ListRelationKinds => RequestKind::ListRelationKinds,
+            Request::Join(_) => RequestKind::Join,
+            Request::DescribeRelations => RequestKind::DescribeRelations,
         }
     }
 }

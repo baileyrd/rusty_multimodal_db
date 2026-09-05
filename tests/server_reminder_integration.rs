@@ -75,6 +75,7 @@ fn rows(result: QueryResult) -> Vec<(Uuid, Vec<(String, ScanValue)>)> {
         QueryResult::Groups(groups) => {
             panic!("expected QueryResult::Rows, got Groups: {groups:?}")
         }
+        QueryResult::Joined(joined) => panic!("expected Rows or Groups, got Joined: {joined:?}"),
     }
 }
 
@@ -82,6 +83,7 @@ fn groups(result: QueryResult) -> Vec<Vec<(String, ScanValue)>> {
     match result {
         QueryResult::Groups(groups) => groups,
         QueryResult::Rows(rows) => panic!("expected QueryResult::Groups, got Rows: {rows:?}"),
+        QueryResult::Joined(joined) => panic!("expected Rows or Groups, got Joined: {joined:?}"),
     }
 }
 
@@ -335,4 +337,24 @@ fn parent_lookup_type_is_unreachable_client_side() {
     let mut client = SchemaDrivenClient::connect(addr).unwrap();
     let result: Result<ParentLookup, ClientError> = client.parent(Uuid::from_u128(1));
     assert!(matches!(result, Err(ClientError::Unsupported(_))));
+}
+
+/// `JOIN` acceptance criterion 5 (ADR-0044): a domain with no relation of
+/// any kind lists nothing, so every `JOIN` is refused client-side with
+/// no frame sent.
+#[test]
+fn a_domain_with_no_relation_lists_nothing_and_refuses_every_join() {
+    let addr = start_server();
+    let mut client = SchemaDrivenClient::connect(addr).unwrap();
+    assert!(client.relations().is_empty());
+    for sql in [
+        "SELECT a.title, b.title FROM reminder a JOIN reminder b ON neighbors",
+        "SELECT a.title, b.title FROM reminder a JOIN reminder b ON parent",
+    ] {
+        assert!(
+            matches!(client.query(sql), Err(ClientError::Sql(_))),
+            "{sql}"
+        );
+    }
+    assert!(client.get(Uuid::from_u128(1)).unwrap().is_some());
 }

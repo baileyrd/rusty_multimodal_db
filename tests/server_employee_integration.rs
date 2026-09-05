@@ -12,6 +12,7 @@ use rusty_multimodal_db::generic::production::GenericProductionStore;
 use rusty_multimodal_db::generic_spike::employee_impl::{
     create_employee_production_stack, Department, Employee,
 };
+use rusty_multimodal_db::server::client::{JoinedRowNamed, QueryResult, SchemaDrivenClient};
 use rusty_multimodal_db::server::employee::{
     EmployeeConnectionStore, FIELD_DEPARTMENT, FIELD_NAME, FIELD_SALARY,
 };
@@ -307,4 +308,93 @@ fn parent_and_neighbors_report_empty_correctly_not_as_errors() {
         Response::RecordList { records } => assert!(records.is_empty()),
         other => panic!("expected an empty RecordList, got {other:?}"),
     }
+}
+
+fn joined(result: QueryResult) -> Vec<JoinedRowNamed> {
+    match result {
+        QueryResult::Joined(rows) => rows,
+        other => panic!("expected Joined, got {other:?}"),
+    }
+}
+
+fn name_pairs(rows: &[JoinedRowNamed]) -> Vec<(String, String)> {
+    let mut pairs: Vec<(String, String)> = rows
+        .iter()
+        .map(|r| {
+            let s = |i: usize| match &r.fields[i].1 {
+                ScanValue::Str(s) => s.clone(),
+                other => panic!("expected Str, got {other:?}"),
+            };
+            (s(0), s(1))
+        })
+        .collect();
+    pairs.sort();
+    pairs
+}
+
+/// `JOIN` acceptance criterion 3 (ADR-0044): `Employee` is the one
+/// domain whose directed relation is self-referential, so its adapter
+/// lists `parent`/`children` (`JOIN-FR-002`'s override) and both are
+/// joinable — each report paired with its manager (Alex, who has no
+/// manager, produces no row), the inverse pairs, a right-side salary
+/// filter, and the symmetric `collaborates_with` pairs.
+#[test]
+fn join_on_parent_children_and_collaborates_with_over_the_wire() {
+    let addr = start_server();
+    let mut client = SchemaDrivenClient::connect(addr).unwrap();
+    let mut names: Vec<&str> = client.relations().iter().map(|r| r.name.as_str()).collect();
+    names.sort();
+    assert_eq!(
+        names,
+        vec!["children", "collaborates_with", "neighbors", "parent"]
+    );
+
+    let rows = joined(
+        client
+            .query("SELECT e.name, m.name FROM employee e JOIN employee m ON parent")
+            .unwrap(),
+    );
+    assert_eq!(
+        name_pairs(&rows),
+        vec![
+            ("Bel".to_string(), "Alex".to_string()),
+            ("Cas".to_string(), "Alex".to_string()),
+        ]
+    );
+    let rows = joined(
+        client
+            .query("SELECT m.name, e.name FROM employee m JOIN employee e ON children")
+            .unwrap(),
+    );
+    assert_eq!(
+        name_pairs(&rows),
+        vec![
+            ("Alex".to_string(), "Bel".to_string()),
+            ("Alex".to_string(), "Cas".to_string()),
+        ]
+    );
+    let rows = joined(
+        client
+            .query(
+                "SELECT m.name, e.name FROM employee m JOIN employee e ON children \
+                 WHERE e.salary_cents > 900000",
+            )
+            .unwrap(),
+    );
+    assert_eq!(
+        name_pairs(&rows),
+        vec![("Alex".to_string(), "Bel".to_string())]
+    );
+    let rows = joined(
+        client
+            .query("SELECT a.name, b.name FROM employee a JOIN employee b ON collaborates_with")
+            .unwrap(),
+    );
+    assert_eq!(
+        name_pairs(&rows),
+        vec![
+            ("Bel".to_string(), "Cas".to_string()),
+            ("Cas".to_string(), "Bel".to_string()),
+        ]
+    );
 }

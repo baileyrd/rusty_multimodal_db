@@ -12,10 +12,11 @@
 
 use super::journal::{CheckpointFlush, CommitError, CommitGroup, JournalError};
 use super::protocol::{
-    DomainSchema, ErrorCode, FieldCapabilities, FieldDescriptor, FieldRef, ParentLookup, RecordId,
-    RelationCapabilities, ScanValue, TransactionOp, ValueKind,
+    DomainSchema, ErrorCode, FieldCapabilities, FieldDescriptor, FieldRef, JoinRelation,
+    ParentLookup, RecordId, RelationCapabilities, RelationDescriptor, ScanValue, TransactionOp,
+    ValueKind,
 };
-use super::ConnectionStore;
+use super::{default_relation_descriptors, ConnectionStore};
 use crate::generic::production::GenericProductionStore;
 use crate::generic::query::{GetById, UpdateField};
 use crate::generic_spike::employee_impl::{
@@ -246,6 +247,28 @@ impl ConnectionStore for EmployeeConnectionStore {
 
     fn list_relation_kinds(&self) -> Vec<String> {
         vec!["collaborates_with".to_string()]
+    }
+
+    /// `JOIN-FR-002` (ADR-0044): `reports_to` is self-referential — an
+    /// employee's manager is an employee — so `parent`/`children` are
+    /// joinable within this table. The conservative default omits them
+    /// (it cannot know the parent type); this is the one adapter today
+    /// that can honestly say otherwise. `Order` keeps the default: its
+    /// parent is a `Customer` no store holds (ADR-0045).
+    fn describe_relations(&self) -> Vec<RelationDescriptor> {
+        let mut relations =
+            default_relation_descriptors(&self.describe(), self.list_relation_kinds());
+        relations.push(RelationDescriptor {
+            name: "parent".to_string(),
+            kind: JoinRelation::Parent,
+            target_table: None,
+        });
+        relations.push(RelationDescriptor {
+            name: "children".to_string(),
+            kind: JoinRelation::Children,
+            target_table: None,
+        });
+        relations
     }
 
     /// `STV-FR-002`: `validate_batch` on this one operation, with the

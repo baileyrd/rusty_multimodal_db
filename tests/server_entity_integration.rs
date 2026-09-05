@@ -15,15 +15,15 @@ use rusty_multimodal_db::generic::reminder::{
     create_reminder_production_stack, Reminder, ReminderStatus,
 };
 use rusty_multimodal_db::server::client::{
-    ClientError, QueryResult, SchemaDrivenClient, SessionOptions,
+    ClientError, JoinedRowNamed, QueryResult, SchemaDrivenClient, SessionOptions,
 };
 use rusty_multimodal_db::server::entity::{
     EntityConnectionStore, FIELD_ALIASES, FIELD_MENTION_COUNT,
 };
 use rusty_multimodal_db::server::framing::{read_message, write_message};
 use rusty_multimodal_db::server::protocol::{
-    AggregateFn, AggregateSpec, CompareOp, ErrorCode, Predicate, Request, Response, ScanValue,
-    Selection, TransactionOp, ValueKind, PROTOCOL_VERSION,
+    AggregateFn, AggregateSpec, CompareOp, ErrorCode, JoinRelation, Predicate, Request, Response,
+    ScanValue, Selection, TransactionOp, ValueKind, PROTOCOL_VERSION,
 };
 use rusty_multimodal_db::server::reminder::ReminderConnectionStore;
 use rusty_multimodal_db::server::{serve, ServeOptions};
@@ -147,6 +147,7 @@ fn groups(result: QueryResult) -> Vec<Vec<(String, ScanValue)>> {
     match result {
         QueryResult::Groups(groups) => groups,
         QueryResult::Rows(rows) => panic!("expected QueryResult::Groups, got Rows: {rows:?}"),
+        QueryResult::Joined(joined) => panic!("expected Rows or Groups, got Joined: {joined:?}"),
     }
 }
 
@@ -607,6 +608,7 @@ fn label_is_filterable_but_not_scannable_or_updatable_and_still_sql_queryable() 
     match result {
         QueryResult::Rows(rows) => assert_eq!(rows.len(), 1),
         QueryResult::Groups(groups) => panic!("expected Rows, got Groups: {groups:?}"),
+        QueryResult::Joined(joined) => panic!("expected Rows or Groups, got Joined: {joined:?}"),
     }
 }
 
@@ -633,7 +635,9 @@ fn tags(fields: &[(u16, ScanValue)]) -> Vec<u16> {
 fn aliases_is_readable_at_protocol_11_and_projected_by_sql() {
     let addr = start_server();
     let mut client = SchemaDrivenClient::connect(addr).unwrap();
-    assert_eq!(client.server_protocol_version(), 11);
+    // Readable *since* 11 — not a pin on the current version (that is
+    // `tests/server_protocol_version.rs`'s job).
+    assert!(client.server_protocol_version() >= 11);
 
     let aliases = client
         .schema()
@@ -680,6 +684,7 @@ fn aliases_is_readable_at_protocol_11_and_projected_by_sql() {
             );
         }
         QueryResult::Groups(groups) => panic!("expected Rows, got Groups: {groups:?}"),
+        QueryResult::Joined(joined) => panic!("expected Rows or Groups, got Joined: {joined:?}"),
     }
     match client
         .query("SELECT * FROM entity WHERE label = 'Charles Babbage'")
@@ -697,6 +702,7 @@ fn aliases_is_readable_at_protocol_11_and_projected_by_sql() {
             );
         }
         QueryResult::Groups(groups) => panic!("expected Rows, got Groups: {groups:?}"),
+        QueryResult::Joined(joined) => panic!("expected Rows or Groups, got Joined: {joined:?}"),
     }
 }
 
@@ -780,7 +786,7 @@ fn aliases_is_stripped_for_a_version_10_client_and_a_silent_client() {
             }
         ),
         Response::Hello {
-            protocol_version: 11
+            protocol_version: PROTOCOL_VERSION
         }
     );
     match raw(&mut v11, &Request::GetById { id: ada }) {
@@ -843,7 +849,7 @@ fn aliases_refuses_every_write_filter_and_group_client_and_server_side() {
             }
         ),
         Response::Hello {
-            protocol_version: 11
+            protocol_version: PROTOCOL_VERSION
         }
     );
     assert!(matches!(
@@ -911,5 +917,234 @@ fn aliases_refuses_every_write_filter_and_group_client_and_server_side() {
             )
         ),
         other => panic!("expected Record, got {other:?}"),
+    }
+}
+
+fn joined(result: QueryResult) -> Vec<JoinedRowNamed> {
+    match result {
+        QueryResult::Joined(rows) => rows,
+        other => panic!("expected Joined, got {other:?}"),
+    }
+}
+
+fn id_pairs(rows: &[JoinedRowNamed]) -> Vec<(u128, u128)> {
+    let mut pairs: Vec<(u128, u128)> = rows
+        .iter()
+        .map(|r| (r.left_id.as_u128(), r.right_id.as_u128()))
+        .collect();
+    pairs.sort();
+    pairs
+}
+
+/// `JOIN` acceptance criterion 2 (`JOIN-FR-001`–`006`, ADR-0044): over a
+/// real socket, `SELECT a.label, b.label FROM entity a JOIN entity b ON
+/// relates_to` returns the `relates_to` edge set in both orientations with
+/// the right labels; `mentioned_with` the disjoint edge; `neighbors` the
+/// union; a left filter, a right filter, and `LIMIT` each apply; `aliases`
+/// rides in a joined row as a `StrList`; `DescribeRelations` lists the
+/// three names `ON` may say and no `parent`/`children`. One round trip
+/// where `traverse` + a `GetById` per id was the only way before.
+#[test]
+fn join_over_a_declared_relation_returns_both_endpoints_in_one_round_trip() {
+    let addr = start_server();
+    let mut client = SchemaDrivenClient::connect(addr).unwrap();
+    assert_eq!(client.server_protocol_version(), 12);
+
+    let mut names: Vec<&str> = client.relations().iter().map(|r| r.name.as_str()).collect();
+    names.sort();
+    assert_eq!(names, vec!["mentioned_with", "neighbors", "relates_to"]);
+    assert!(client.relations().iter().all(|r| r.target_table.is_none()));
+
+    // The fixture's relates_to edges: 1–2, 2–3, 3–1, 3–4 — eight rows,
+    // both orientations, SQL semantics (`JOIN-FR-004`).
+    let rows = joined(
+        client
+            .query("SELECT a.label, b.label FROM entity a JOIN entity b ON relates_to")
+            .unwrap(),
+    );
+    assert_eq!(
+        id_pairs(&rows),
+        vec![
+            (1, 2),
+            (1, 3),
+            (2, 1),
+            (2, 3),
+            (3, 1),
+            (3, 2),
+            (3, 4),
+            (4, 3)
+        ]
+    );
+    let ada_to_engine = rows
+        .iter()
+        .find(|r| r.left_id == Uuid::from_u128(1) && r.right_id == Uuid::from_u128(2))
+        .unwrap();
+    assert_eq!(
+        ada_to_engine.fields,
+        vec![
+            ("a.label".to_string(), ScanValue::Str("Ada Lovelace".into())),
+            (
+                "b.label".to_string(),
+                ScanValue::Str("Analytical Engine".into())
+            ),
+        ]
+    );
+
+    // The disjoint edge, and the union of both labels.
+    let rows = joined(
+        client
+            .query("SELECT a.label, b.label FROM entity a JOIN entity b ON mentioned_with")
+            .unwrap(),
+    );
+    assert_eq!(id_pairs(&rows), vec![(1, 5), (5, 1)]);
+    let rows = joined(
+        client
+            .query("SELECT a.label FROM entity a JOIN entity b ON neighbors")
+            .unwrap(),
+    );
+    assert_eq!(rows.len(), 10);
+
+    // Left filter: only Ada (1) and Babbage (5) are persons; 5 has no
+    // relates_to edge.
+    let rows = joined(
+        client
+            .query(
+                "SELECT a.label, b.label FROM entity a JOIN entity b ON relates_to \
+                 WHERE a.kind = 'person'",
+            )
+            .unwrap(),
+    );
+    assert_eq!(id_pairs(&rows), vec![(1, 2), (1, 3)]);
+    // Right filter: only the Analytical Engine (2) has mention_count > 4.
+    let rows = joined(
+        client
+            .query(
+                "SELECT a.label, b.mention_count FROM entity a JOIN entity b ON relates_to \
+                 WHERE b.mention_count > 4",
+            )
+            .unwrap(),
+    );
+    assert_eq!(id_pairs(&rows), vec![(1, 2), (3, 2)]);
+    assert!(rows
+        .iter()
+        .all(|r| r.fields[1] == ("b.mention_count".to_string(), ScanValue::I64(5))));
+    // Both filters and LIMIT compose.
+    let rows = joined(
+        client
+            .query(
+                "SELECT a.label FROM entity a JOIN entity b ON neighbors \
+                 WHERE a.kind = 'person' AND b.kind = 'person' LIMIT 1",
+            )
+            .unwrap(),
+    );
+    assert_eq!(rows.len(), 1);
+    let rows = joined(
+        client
+            .query("SELECT * FROM entity a JOIN entity b ON relates_to LIMIT 2")
+            .unwrap(),
+    );
+    assert_eq!(rows.len(), 2);
+    assert_eq!(
+        rows[0].fields.len(),
+        8,
+        "SELECT * projects every field of both sides"
+    );
+    assert_eq!(rows[0].fields[0].0, "a.label");
+    assert_eq!(rows[0].fields[4].0, "b.label");
+
+    // `aliases` rides in a joined row intact — a `StrList` at 12 (FR-044).
+    let rows = joined(
+        client
+            .query("SELECT a.aliases, b.label FROM entity a JOIN entity b ON mentioned_with")
+            .unwrap(),
+    );
+    let ada_side = rows
+        .iter()
+        .find(|r| r.left_id == Uuid::from_u128(1))
+        .unwrap();
+    assert_eq!(
+        ada_side.fields[0],
+        (
+            "a.aliases".to_string(),
+            ScanValue::StrList(vec!["Ada".into(), "Countess of Lovelace".into()])
+        )
+    );
+}
+
+/// `JOIN` acceptance criterion 6 (client side) and `JOIN-FR-007`: every
+/// refusal is client-side with no frame sent — `GROUP BY`/an aggregate
+/// with `JOIN`, an unqualified column, an unknown alias, an unknown
+/// relation, `parent` (not listed for `Entity`), and a different right
+/// table (ADR-0045, not yet). Server side, against raw frames the client
+/// would never send: `right_table: Some(_)` is `Malformed`; an unlisted
+/// relation is `Malformed`.
+#[test]
+fn join_refusals_are_client_side_and_the_raw_server_rejections_use_existing_codes() {
+    let addr = start_server();
+    let mut client = SchemaDrivenClient::connect(addr).unwrap();
+    for sql in [
+        "SELECT a.kind, COUNT(*) FROM entity a JOIN entity b ON neighbors GROUP BY kind",
+        "SELECT label FROM entity a JOIN entity b ON neighbors",
+        "SELECT c.label FROM entity a JOIN entity b ON neighbors",
+        "SELECT a.label FROM entity a JOIN entity b ON knows",
+        "SELECT a.label FROM entity a JOIN entity b ON parent",
+        "SELECT a.label FROM entity a JOIN reminder b ON neighbors",
+        "SELECT * FROM entity JOIN entity ON neighbors",
+    ] {
+        assert!(
+            matches!(client.query(sql), Err(ClientError::Sql(_))),
+            "{sql}"
+        );
+    }
+    // The client refused before any frame: the connection is still good.
+    assert!(client.get(Uuid::from_u128(1)).unwrap().is_some());
+
+    let mut wire = TcpStream::connect(addr).unwrap();
+    wire.set_nodelay(true).unwrap();
+    assert_eq!(
+        raw(
+            &mut wire,
+            &Request::Hello {
+                protocol_version: PROTOCOL_VERSION
+            }
+        ),
+        Response::Hello {
+            protocol_version: 12
+        }
+    );
+    let spec = |relation: JoinRelation, right_table: Option<String>| {
+        Request::Join(rusty_multimodal_db::server::protocol::JoinSpec {
+            relation,
+            right_table,
+            left: Selection::All,
+            right: Selection::All,
+            left_filter: vec![],
+            right_filter: vec![],
+            limit: None,
+        })
+    };
+    assert!(matches!(
+        raw(
+            &mut wire,
+            &spec(JoinRelation::Neighbors(None), Some("customer".into()))
+        ),
+        Response::Err {
+            code: ErrorCode::Malformed,
+            ..
+        }
+    ));
+    assert!(matches!(
+        raw(&mut wire, &spec(JoinRelation::Parent, None)),
+        Response::Err {
+            code: ErrorCode::Malformed,
+            ..
+        }
+    ));
+    match raw(
+        &mut wire,
+        &spec(JoinRelation::Neighbors(Some("mentioned_with".into())), None),
+    ) {
+        Response::JoinedRows { rows } => assert_eq!(rows.len(), 2),
+        other => panic!("expected JoinedRows, got {other:?}"),
     }
 }

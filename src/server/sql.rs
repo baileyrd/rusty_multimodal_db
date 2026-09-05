@@ -12,18 +12,39 @@
 //! plain identifiers, never quoted):
 //!
 //! ```text
-//! query         := "SELECT" columns "FROM" ident [where_clause] [group_by_clause] [limit_clause]
+//! query         := "SELECT" columns "FROM" table_ref [join_clause] [where_clause] [group_by_clause] [limit_clause]
+//! table_ref     := ident [["AS"] ident]                      -- optional alias (JOIN-FR-005)
+//! join_clause   := "JOIN" table_ref "ON" ident               -- ident names a declared relation
 //! columns       := "*" | column_item ("," column_item)*
-//! column_item   := ident | agg_call
+//! column_item   := qualified | ident | agg_call
+//! qualified     := ident "." ident                           -- alias.field
 //! agg_call      := agg_fn "(" ( "*" | ident ) ")"
 //! agg_fn        := "COUNT" | "SUM" | "AVG" | "MIN" | "MAX"
 //! where_clause  := "WHERE" condition ("AND" condition)*
-//! condition     := ident comparator literal
+//! condition     := (qualified | ident) comparator literal
 //! comparator    := "=" | "!=" | "<" | "<=" | ">" | ">="
 //! literal       := number | "'" ... "'" | "true" | "false"
 //! group_by_clause := "GROUP" "BY" ident ("," ident)*
 //! limit_clause  := "LIMIT" number
 //! ```
+//!
+//! # `JOIN` (`JOIN-FR-005`, ADR-0044, protocol 12)
+//!
+//! `JOIN`'s `ON` names a *declared relation* (`neighbors`, a symmetric
+//! label such as `relates_to`, `parent`, `children`), never a column
+//! predicate — see `docs/design/SERVER-SQL-JOIN-DESIGN.md`. Three rules
+//! are enforced here, at parse time, so they are syntax errors and never
+//! a round trip: a `JOIN` query may not carry `GROUP BY` or an aggregate
+//! call (`JoinWithAggregate`); in a `JOIN` query every column and every
+//! condition must be qualified (`UnqualifiedInJoin`), because both sides
+//! have the same field names and this parser does no ambiguity
+//! resolution; and a qualifier must be one of the two sides' aliases (or
+//! table names, when unaliased) — `UnknownQualifier` — with the two sides
+//! distinguishable (`AmbiguousQualifiers` for `FROM entity JOIN entity`
+//! with no aliases). Without `JOIN`, a qualified name whose qualifier is
+//! the `FROM` alias or table name resolves exactly as the bare name would.
+//! The right table name is *not* checked against the left here — the
+//! client refuses a different one until ADR-0045 lands.
 //!
 //! `*` is only ever valid as `COUNT`'s own argument (`COUNT(*)`); every
 //! other `agg_fn` requires a plain field `ident` — `SUM(*)` and
@@ -55,6 +76,9 @@ pub(crate) enum Literal {
 /// [`super::protocol::FieldRef`].
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ParsedCondition {
+    /// `alias.field`'s alias — `None` for a bare `field`. Validated
+    /// against the query's table refs by [`parse`] (`JOIN-FR-005`).
+    pub qualifier: Option<String>,
     pub name: String,
     pub op: CompareOp,
     pub value: Literal,
@@ -65,6 +89,13 @@ pub(crate) struct ParsedCondition {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum ParsedColumnItem {
     Plain(String),
+    /// `alias.field` — `JOIN-FR-005`, ADR-0044. In a `JOIN` query every
+    /// plain column takes this form; without `JOIN` the qualifier must
+    /// be the `FROM` alias/table and the item means the same as `Plain`.
+    Qualified {
+        qualifier: String,
+        name: String,
+    },
     Aggregate {
         func: AggregateFn,
         arg: AggregateArg,
@@ -92,15 +123,29 @@ pub(crate) enum ParsedColumns {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ParsedQuery {
     pub columns: ParsedColumns,
-    /// The `FROM` identifier — carried for completeness, never validated
-    /// against anything (see this module's own doc comment).
-    #[allow(dead_code)]
+    /// The `FROM` identifier — never validated against a server (a
+    /// connection serves exactly one domain); since `JOIN-FR-005` it is
+    /// compared against a `JOIN`'s table by the client.
     pub table: String,
+    /// The `FROM` table's alias, if written (`JOIN-FR-005`).
+    pub alias: Option<String>,
+    /// The `JOIN` clause, if written (`JOIN-FR-005`, ADR-0044).
+    pub join: Option<ParsedJoin>,
     pub conditions: Vec<ParsedCondition>,
     /// `GROUP BY`'s field list — empty when the clause was omitted.
     /// `AGG-FR-001`, ADR-0035.
     pub group_by: Vec<String>,
     pub limit: Option<usize>,
+}
+
+/// A parsed `JOIN table_ref ON relation` clause — `JOIN-FR-005`,
+/// ADR-0044. `relation` is a declared relation's *name*, resolved by the
+/// client against `Request::DescribeRelations`, never a column predicate.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ParsedJoin {
+    pub table: String,
+    pub alias: Option<String>,
+    pub relation: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -125,6 +170,17 @@ pub(crate) enum SqlParseError {
     /// `SUM`/`AVG`/`MIN`/`MAX` given `*` instead of a field — only
     /// `COUNT` accepts `*`.
     AggregateRequiresField(String),
+    /// A `JOIN` query with `GROUP BY` or an aggregate call — aggregation
+    /// over a join is a Non-goal (`JOIN-FR-005`, ADR-0044).
+    JoinWithAggregate,
+    /// A bare column or condition name in a `JOIN` query — both sides
+    /// share field names, so every name must be `alias.field`.
+    UnqualifiedInJoin(String),
+    /// `alias.field` whose alias is neither side's alias or table name.
+    UnknownQualifier(String),
+    /// `FROM t JOIN t` with no aliases (or the same alias twice) — the
+    /// two sides cannot be told apart.
+    AmbiguousQualifiers(String),
 }
 
 impl fmt::Display for SqlParseError {
@@ -153,6 +209,27 @@ impl fmt::Display for SqlParseError {
             SqlParseError::AggregateRequiresField(func) => {
                 write!(f, "{func} requires a field name as its argument, not *")
             }
+            SqlParseError::JoinWithAggregate => {
+                write!(
+                    f,
+                    "GROUP BY and aggregate functions are not supported with JOIN"
+                )
+            }
+            SqlParseError::UnqualifiedInJoin(name) => {
+                write!(
+                    f,
+                    "{name:?} must be qualified (alias.field) in a JOIN query"
+                )
+            }
+            SqlParseError::UnknownQualifier(alias) => {
+                write!(f, "{alias:?} is not an alias or table named in FROM/JOIN")
+            }
+            SqlParseError::AmbiguousQualifiers(name) => {
+                write!(
+                    f,
+                    "{name:?} names both sides of the JOIN; give each side a distinct alias"
+                )
+            }
         }
     }
 }
@@ -175,6 +252,10 @@ enum Token {
     /// parentheses (`WHERE` stays a flat `AND`-list, unparenthesized).
     LParen,
     RParen,
+    /// `JOIN-FR-005`, ADR-0044 — `alias.field`. The only use of `.`;
+    /// numbers are integers here, so there is no fractional-literal
+    /// ambiguity.
+    Dot,
 }
 
 impl fmt::Display for Token {
@@ -193,6 +274,7 @@ impl fmt::Display for Token {
             Token::Ge => write!(f, ">="),
             Token::LParen => write!(f, "("),
             Token::RParen => write!(f, ")"),
+            Token::Dot => write!(f, "."),
         }
     }
 }
@@ -222,6 +304,10 @@ fn tokenize(input: &str) -> Result<Vec<Token>, SqlParseError> {
             }
             ')' => {
                 tokens.push(Token::RParen);
+                i += 1;
+            }
+            '.' => {
+                tokens.push(Token::Dot);
                 i += 1;
             }
             '=' => {
@@ -385,10 +471,46 @@ impl<'a> Parser<'a> {
     }
 
     fn condition(&mut self) -> Result<ParsedCondition, SqlParseError> {
-        let name = self.ident()?;
+        let (qualifier, name) = self.maybe_qualified()?;
         let op = self.comparator()?;
         let value = self.literal()?;
-        Ok(ParsedCondition { name, op, value })
+        Ok(ParsedCondition {
+            qualifier,
+            name,
+            op,
+            value,
+        })
+    }
+
+    /// `ident` or `ident "." ident` — `JOIN-FR-005`.
+    fn maybe_qualified(&mut self) -> Result<(Option<String>, String), SqlParseError> {
+        let first = self.ident()?;
+        if matches!(self.peek(), Some(Token::Dot)) {
+            self.advance();
+            let name = self.ident()?;
+            Ok((Some(first), name))
+        } else {
+            Ok((None, first))
+        }
+    }
+
+    /// `table_ref := ident [["AS"] ident]` — `JOIN-FR-005`. An alias is
+    /// any identifier that is not one of this grammar's own keywords, so
+    /// `FROM dog WHERE …` still parses `WHERE` as the clause it is.
+    fn table_ref(&mut self) -> Result<(String, Option<String>), SqlParseError> {
+        let table = self.ident()?;
+        if self.peek_keyword("AS") {
+            self.advance();
+            return Ok((table, Some(self.ident()?)));
+        }
+        match self.peek() {
+            Some(Token::Ident(s)) if !is_keyword(s) => {
+                let alias = s.clone();
+                self.advance();
+                Ok((table, Some(alias)))
+            }
+            _ => Ok((table, None)),
+        }
     }
 
     fn columns(&mut self) -> Result<ParsedColumns, SqlParseError> {
@@ -410,6 +532,14 @@ impl<'a> Parser<'a> {
     /// `Star` argument; every other function needs a plain field.
     fn column_item(&mut self) -> Result<ParsedColumnItem, SqlParseError> {
         let name = self.ident()?;
+        if matches!(self.peek(), Some(Token::Dot)) {
+            self.advance();
+            let field = self.ident()?;
+            return Ok(ParsedColumnItem::Qualified {
+                qualifier: name,
+                name: field,
+            });
+        }
         if !matches!(self.peek(), Some(Token::LParen)) {
             return Ok(ParsedColumnItem::Plain(name));
         }
@@ -457,6 +587,16 @@ impl<'a> Parser<'a> {
     }
 }
 
+/// The grammar's own keywords — what a `table_ref` alias may not be
+/// (`JOIN-FR-005`), so `FROM dog WHERE` never reads `WHERE` as an alias.
+fn is_keyword(ident: &str) -> bool {
+    [
+        "SELECT", "FROM", "WHERE", "AND", "GROUP", "BY", "LIMIT", "JOIN", "ON", "AS",
+    ]
+    .iter()
+    .any(|k| ident.eq_ignore_ascii_case(k))
+}
+
 /// Maps a `column_item`'s call-site identifier to the aggregate function
 /// it names, case-insensitively — `AGG-FR-001`, ADR-0035.
 fn agg_fn(name: &str) -> Result<AggregateFn, SqlParseError> {
@@ -480,7 +620,20 @@ pub(crate) fn parse(sql: &str) -> Result<ParsedQuery, SqlParseError> {
     parser.expect_keyword("SELECT")?;
     let columns = parser.columns()?;
     parser.expect_keyword("FROM")?;
-    let table = parser.ident()?;
+    let (table, alias) = parser.table_ref()?;
+
+    let mut join = None;
+    if parser.peek_keyword("JOIN") {
+        parser.advance();
+        let (right_table, right_alias) = parser.table_ref()?;
+        parser.expect_keyword("ON")?;
+        let relation = parser.ident()?;
+        join = Some(ParsedJoin {
+            table: right_table,
+            alias: right_alias,
+            relation,
+        });
+    }
 
     let mut conditions = Vec::new();
     if parser.peek_keyword("WHERE") {
@@ -513,13 +666,80 @@ pub(crate) fn parse(sql: &str) -> Result<ParsedQuery, SqlParseError> {
         return Err(SqlParseError::TrailingInput(remaining.to_string()));
     }
 
-    Ok(ParsedQuery {
+    let query = ParsedQuery {
         columns,
         table,
+        alias,
+        join,
         conditions,
         group_by,
         limit,
-    })
+    };
+    validate_qualifiers(&query)?;
+    Ok(query)
+}
+
+/// `JOIN-FR-005`'s three parse-time rules (see the module doc's own
+/// "`JOIN`" section): no aggregation with `JOIN`; every name qualified
+/// in a `JOIN` query; every qualifier one of the sides, and the two
+/// sides distinguishable. Without `JOIN`, a qualifier must be the `FROM`
+/// alias or table name.
+fn validate_qualifiers(query: &ParsedQuery) -> Result<(), SqlParseError> {
+    let left_names: Vec<&str> = std::iter::once(query.table.as_str())
+        .chain(query.alias.as_deref())
+        .collect();
+    let right_names: Vec<&str> = match &query.join {
+        Some(join) => std::iter::once(join.table.as_str())
+            .chain(join.alias.as_deref())
+            .collect(),
+        None => Vec::new(),
+    };
+    let check = |qualifier: &str| -> Result<(), SqlParseError> {
+        let is_left = left_names.iter().any(|n| n.eq_ignore_ascii_case(qualifier));
+        let is_right = right_names
+            .iter()
+            .any(|n| n.eq_ignore_ascii_case(qualifier));
+        match (is_left, is_right) {
+            (true, true) => Err(SqlParseError::AmbiguousQualifiers(qualifier.to_string())),
+            (false, false) => Err(SqlParseError::UnknownQualifier(qualifier.to_string())),
+            _ => Ok(()),
+        }
+    };
+    if let Some(join) = &query.join {
+        let has_aggregate = matches!(&query.columns, ParsedColumns::Named(items)
+            if items.iter().any(|i| matches!(i, ParsedColumnItem::Aggregate { .. })));
+        if has_aggregate || !query.group_by.is_empty() {
+            return Err(SqlParseError::JoinWithAggregate);
+        }
+        // Both sides must be tellable apart *before* any name is checked,
+        // so `FROM entity JOIN entity ON r` is refused even for `SELECT *`.
+        let left_alias = query.alias.as_deref().unwrap_or(&query.table);
+        let right_alias = join.alias.as_deref().unwrap_or(&join.table);
+        if left_alias.eq_ignore_ascii_case(right_alias) {
+            return Err(SqlParseError::AmbiguousQualifiers(left_alias.to_string()));
+        }
+    }
+    if let ParsedColumns::Named(items) = &query.columns {
+        for item in items {
+            match item {
+                ParsedColumnItem::Plain(name) if query.join.is_some() => {
+                    return Err(SqlParseError::UnqualifiedInJoin(name.clone()));
+                }
+                ParsedColumnItem::Qualified { qualifier, .. } => check(qualifier)?,
+                _ => {}
+            }
+        }
+    }
+    for condition in &query.conditions {
+        match &condition.qualifier {
+            None if query.join.is_some() => {
+                return Err(SqlParseError::UnqualifiedInJoin(condition.name.clone()));
+            }
+            Some(qualifier) => check(qualifier)?,
+            None => {}
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -759,6 +979,125 @@ mod tests {
     fn an_aggregate_call_with_no_closing_paren_is_a_syntax_error() {
         assert!(matches!(
             parse("SELECT COUNT(* FROM dog"),
+            Err(SqlParseError::Expected { .. })
+        ));
+    }
+
+    // `JOIN-FR-005` (ADR-0044): aliases, qualified names, `JOIN … ON`,
+    // and every parse-time rejection.
+
+    #[test]
+    fn parses_a_from_alias_with_and_without_as() {
+        let q = parse("SELECT d.age FROM dog d WHERE d.age > 3").unwrap();
+        assert_eq!(q.table, "dog");
+        assert_eq!(q.alias.as_deref(), Some("d"));
+        assert_eq!(
+            q.columns,
+            ParsedColumns::Named(vec![ParsedColumnItem::Qualified {
+                qualifier: "d".into(),
+                name: "age".into(),
+            }])
+        );
+        assert_eq!(q.conditions[0].qualifier.as_deref(), Some("d"));
+        assert_eq!(q.conditions[0].name, "age");
+        let q = parse("SELECT age FROM dog AS d").unwrap();
+        assert_eq!(q.alias.as_deref(), Some("d"));
+        // A keyword after the table is a clause, never an alias.
+        let q = parse("SELECT age FROM dog WHERE age = 1 LIMIT 2").unwrap();
+        assert_eq!(q.alias, None);
+        // The table name itself qualifies, alias or not.
+        assert!(parse("SELECT dog.age FROM dog").is_ok());
+    }
+
+    #[test]
+    fn parses_join_on_a_relation_with_qualified_columns_and_conditions() {
+        let q = parse(
+            "SELECT a.label, b.label FROM entity a JOIN entity b ON relates_to \
+             WHERE a.kind = 'person' AND b.mention_count > 4 LIMIT 10",
+        )
+        .unwrap();
+        let join = q.join.as_ref().expect("a JOIN clause");
+        assert_eq!(join.table, "entity");
+        assert_eq!(join.alias.as_deref(), Some("b"));
+        assert_eq!(join.relation, "relates_to");
+        assert_eq!(q.alias.as_deref(), Some("a"));
+        assert_eq!(
+            q.columns,
+            ParsedColumns::Named(vec![
+                ParsedColumnItem::Qualified {
+                    qualifier: "a".into(),
+                    name: "label".into(),
+                },
+                ParsedColumnItem::Qualified {
+                    qualifier: "b".into(),
+                    name: "label".into(),
+                },
+            ])
+        );
+        assert_eq!(q.conditions.len(), 2);
+        assert_eq!(q.conditions[0].qualifier.as_deref(), Some("a"));
+        assert_eq!(q.conditions[1].qualifier.as_deref(), Some("b"));
+        assert_eq!(q.limit, Some(10));
+        // `SELECT *` over a join, `AS` aliases, `parent`/`children` names.
+        let q = parse("SELECT * FROM employee AS e JOIN employee AS m ON parent").unwrap();
+        assert_eq!(q.columns, ParsedColumns::All);
+        assert_eq!(q.join.unwrap().relation, "parent");
+    }
+
+    #[test]
+    fn a_join_with_group_by_or_an_aggregate_is_a_syntax_error() {
+        assert_eq!(
+            parse("SELECT a.kind, COUNT(*) FROM entity a JOIN entity b ON neighbors GROUP BY kind"),
+            Err(SqlParseError::JoinWithAggregate)
+        );
+        assert_eq!(
+            parse("SELECT COUNT(*) FROM entity a JOIN entity b ON neighbors"),
+            Err(SqlParseError::JoinWithAggregate)
+        );
+    }
+
+    #[test]
+    fn an_unqualified_name_in_a_join_query_is_a_syntax_error() {
+        assert_eq!(
+            parse("SELECT label FROM entity a JOIN entity b ON neighbors"),
+            Err(SqlParseError::UnqualifiedInJoin("label".into()))
+        );
+        assert_eq!(
+            parse("SELECT a.label FROM entity a JOIN entity b ON neighbors WHERE kind = 'x'"),
+            Err(SqlParseError::UnqualifiedInJoin("kind".into()))
+        );
+    }
+
+    #[test]
+    fn an_unknown_or_ambiguous_qualifier_is_a_syntax_error() {
+        assert_eq!(
+            parse("SELECT c.label FROM entity a JOIN entity b ON neighbors"),
+            Err(SqlParseError::UnknownQualifier("c".into()))
+        );
+        assert_eq!(
+            parse("SELECT x.age FROM dog"),
+            Err(SqlParseError::UnknownQualifier("x".into()))
+        );
+        // Same table, no aliases: the sides cannot be told apart.
+        assert_eq!(
+            parse("SELECT * FROM entity JOIN entity ON neighbors"),
+            Err(SqlParseError::AmbiguousQualifiers("entity".into()))
+        );
+        // The table name qualifies a side only when it is unambiguous.
+        assert_eq!(
+            parse("SELECT entity.label FROM entity a JOIN entity b ON neighbors"),
+            Err(SqlParseError::AmbiguousQualifiers("entity".into()))
+        );
+    }
+
+    #[test]
+    fn a_join_without_on_or_a_relation_is_a_syntax_error() {
+        assert!(matches!(
+            parse("SELECT a.label FROM entity a JOIN entity b"),
+            Err(SqlParseError::UnexpectedEnd)
+        ));
+        assert!(matches!(
+            parse("SELECT a.label FROM entity a JOIN entity b WHERE a.kind = 'x'"),
             Err(SqlParseError::Expected { .. })
         ));
     }

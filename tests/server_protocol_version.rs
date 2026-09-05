@@ -29,7 +29,8 @@ use rusty_multimodal_db::server::entity::EntityConnectionStore;
 use rusty_multimodal_db::server::framing::{read_message, write_message};
 use rusty_multimodal_db::server::order::OrderConnectionStore;
 use rusty_multimodal_db::server::protocol::{
-    ErrorCode, Request, Response, ScanValue, ValueKind, PROTOCOL_VERSION,
+    ErrorCode, JoinRelation, JoinSpec, Request, Response, ScanValue, Selection, ValueKind,
+    PROTOCOL_VERSION,
 };
 use rusty_multimodal_db::server::{dispatch, serve, ServeOptions};
 use rusty_multimodal_db::ProductionStore;
@@ -282,7 +283,7 @@ fn hello_zero_and_a_late_hello_are_malformed_and_a_silent_client_is_served() {
 fn schema_driven_client_negotiates_the_current_version_on_every_domain() {
     let mut dog = SchemaDrivenClient::connect(start_dog_server(ServeOptions::default())).unwrap();
     assert_eq!(dog.server_protocol_version(), PROTOCOL_VERSION);
-    assert_eq!(dog.server_protocol_version(), 11);
+    assert_eq!(dog.server_protocol_version(), 12);
     let fields = dog.get(Uuid::from_u128(1)).unwrap().unwrap();
     assert!(fields
         .iter()
@@ -359,7 +360,7 @@ fn a_version_10_client_never_sees_entity_aliases() {
             }
         ),
         Response::Hello {
-            protocol_version: 11
+            protocol_version: PROTOCOL_VERSION
         }
     );
     match roundtrip(&mut reader, &mut writer, &Request::DescribeSchema) {
@@ -382,6 +383,92 @@ fn a_version_10_client_never_sees_entity_aliases() {
         }
         other => panic!("expected Record, got {other:?}"),
     }
+}
+
+/// `JOIN-FR-001`/`002` (ADR-0044), compatibility rule 3: `Join` and
+/// `DescribeRelations` are protocol 12 — a connection negotiated at 11
+/// (and a silent, version-1 one) is answered `Malformed` for both, with
+/// the connection left open; the same requests at 12 are served. And
+/// rule 4 from the client side: against a pre-hello server (version 1)
+/// a `JOIN` query is `Unsupported("sql join")` with no frame sent.
+#[test]
+fn join_and_describe_relations_are_malformed_below_version_12() {
+    let addr = start_entity_server();
+    let join = Request::Join(JoinSpec {
+        relation: JoinRelation::Neighbors(None),
+        right_table: None,
+        left: Selection::All,
+        right: Selection::All,
+        left_filter: vec![],
+        right_filter: vec![],
+        limit: None,
+    });
+
+    for hello in [Some(11u32), None] {
+        let (mut reader, mut writer) = connect(addr);
+        if let Some(v) = hello {
+            assert_eq!(
+                roundtrip(
+                    &mut reader,
+                    &mut writer,
+                    &Request::Hello {
+                        protocol_version: v
+                    }
+                ),
+                Response::Hello {
+                    protocol_version: v
+                }
+            );
+        }
+        for req in [&join, &Request::DescribeRelations] {
+            assert!(
+                matches!(
+                    roundtrip(&mut reader, &mut writer, req),
+                    Response::Err {
+                        code: ErrorCode::Malformed,
+                        ..
+                    }
+                ),
+                "{hello:?}: {req:?}"
+            );
+        }
+        // Still open, still serving.
+        assert!(matches!(
+            roundtrip(&mut reader, &mut writer, &Request::DescribeSchema),
+            Response::Schema(_)
+        ));
+    }
+
+    let (mut reader, mut writer) = connect(addr);
+    assert_eq!(
+        roundtrip(
+            &mut reader,
+            &mut writer,
+            &Request::Hello {
+                protocol_version: PROTOCOL_VERSION
+            }
+        ),
+        Response::Hello {
+            protocol_version: 12
+        }
+    );
+    match roundtrip(&mut reader, &mut writer, &Request::DescribeRelations) {
+        Response::Relations { relations } => assert_eq!(relations.len(), 3),
+        other => panic!("expected Relations, got {other:?}"),
+    }
+    match roundtrip(&mut reader, &mut writer, &join) {
+        Response::JoinedRows { rows } => assert!(rows.is_empty(), "one entity, no edges"),
+        other => panic!("expected JoinedRows, got {other:?}"),
+    }
+
+    // Client side, rule 4: a version-1 server never receives a `Join`.
+    let mut old = SchemaDrivenClient::connect(start_pre_hello_dog_server(false)).unwrap();
+    assert_eq!(old.server_protocol_version(), 1);
+    assert!(old.relations().is_empty());
+    assert!(matches!(
+        old.query("SELECT a.age, b.age FROM dog a JOIN dog b ON littermate_of"),
+        Err(ClientError::Unsupported("sql join"))
+    ));
 }
 
 /// Criterion 8: a request index this build does not know (the one just

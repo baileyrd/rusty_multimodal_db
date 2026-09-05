@@ -80,6 +80,27 @@
 //! plaintext `connect_authenticated` there fails at the `Hello`, before
 //! any token is written, so it never leaks the token.
 //!
+//! # `JOIN` over a declared relation (`Request::Join`), `SERVER-001-FR-045`
+//!
+//! `JOIN-FR-005`/`006` (ADR-0044, protocol 12): [`SchemaDrivenClient::query`]
+//! accepts `SELECT a.label, b.label FROM entity a JOIN entity b ON
+//! relates_to WHERE a.kind = 'person'` — a join of this domain's one
+//! table with *itself* over one declared relation (`neighbors`, a
+//! symmetric label, `parent`, `children`), never a column predicate. It
+//! compiles to `Request::Join` and answers [`QueryResult::Joined`]: one
+//! [`JoinedRowNamed`] per (left, right) pair, both ids kept, every field
+//! alias-qualified (`"a.label"`) in `SELECT`-list order. The `ON` name is
+//! resolved against `Request::DescribeRelations`, fetched once at connect
+//! when the negotiated version is ≥ 12 ([`SchemaDrivenClient::relations`]);
+//! an unknown relation, an unqualified name, a `GROUP BY`/aggregate with
+//! `JOIN`, or a right table that is not the `FROM` table (ADR-0045, not
+//! yet) is [`ClientError::Sql`] with no frame sent. Below protocol 12 a
+//! `JOIN` query is [`ClientError::Unsupported`]`("sql join")`, the
+//! identical gate `GROUP BY` has at 9 (compatibility rule 4). Cost on the
+//! server is Σ degree `get`s over the filtered left side — the same work
+//! [`SchemaDrivenClient::traverse`] plus a `get` per id does today across
+//! N+1 round trips, in one.
+//!
 //! # Transaction sessions (`Begin`/`Commit`/`Rollback`), `SERVER-001-FR-024`
 //!
 //! [`SchemaDrivenClient::begin`] opens a server-side session (ADR-0024,
@@ -149,9 +170,10 @@
 
 use super::framing::{self, FrameError};
 use super::protocol::{
-    AggregateFn, AggregateSpec, DomainSchema, ErrorCode, FieldDescriptor, FieldRef, ParentLookup,
-    Predicate, RecordId, Request, Response, ScanValue, Selection, ValueKind, PROTOCOL_VERSION,
-    SESSION_READ_YOUR_WRITES, SESSION_SNAPSHOT_ISOLATION, SESSION_VALIDATE_ON_STAGE,
+    AggregateFn, AggregateSpec, DomainSchema, ErrorCode, FieldDescriptor, FieldRef, JoinSpec,
+    ParentLookup, Predicate, RecordId, RelationDescriptor, Request, Response, ScanValue, Selection,
+    ValueKind, PROTOCOL_VERSION, SESSION_READ_YOUR_WRITES, SESSION_SNAPSHOT_ISOLATION,
+    SESSION_VALIDATE_ON_STAGE,
 };
 use super::sql;
 use super::{pem, TlsConfigError};
@@ -641,6 +663,21 @@ pub type AggregateRow = Vec<(String, ScanValue)>;
 pub enum QueryResult {
     Rows(Vec<QueryRow>),
     Groups(Vec<AggregateRow>),
+    /// `JOIN-FR-006` (ADR-0044, protocol 12): a `JOIN` query's rows —
+    /// two records per row, so a third shape rather than a synthetic
+    /// fold into [`QueryResult::Rows`].
+    Joined(Vec<JoinedRowNamed>),
+}
+
+/// One [`QueryResult::Joined`] row: both records' ids, and the selected
+/// fields of both sides named `alias.field` in `SELECT`-list order
+/// (`"a.label"`, `"b.label"`; for `SELECT *`, every left field then every
+/// right field). `JOIN-FR-006`, ADR-0044.
+#[derive(Debug, Clone, PartialEq)]
+pub struct JoinedRowNamed {
+    pub left_id: RecordId,
+    pub right_id: RecordId,
+    pub fields: Vec<(String, ScanValue)>,
 }
 
 /// The SQL keyword an [`AggregateFn`] parses from — used to build a
@@ -691,6 +728,9 @@ fn resolve_literal(
 pub struct SchemaDrivenClient {
     stream: BufReader<Transport>,
     schema: DomainSchema,
+    /// `JOIN-FR-006`: what `ON` may name — fetched at connect when the
+    /// negotiated version is ≥ 12, empty otherwise.
+    relations: Vec<RelationDescriptor>,
     server_protocol_version: u32,
 }
 
@@ -774,10 +814,23 @@ impl SchemaDrivenClient {
             Response::Err { code, message } => return Err(ClientError::Server(code, message)),
             _ => return Err(ClientError::UnexpectedResponse("Schema")),
         };
+        // `JOIN-FR-006` (ADR-0044): the relation list is protocol 12 —
+        // never asked for below it (rule 4), so an older server is never
+        // sent a frame it cannot decode.
+        let relations = if server_protocol_version >= 12 {
+            match Self::exchange(&mut stream, &Request::DescribeRelations)? {
+                Response::Relations { relations } => relations,
+                Response::Err { code, message } => return Err(ClientError::Server(code, message)),
+                _ => return Err(ClientError::UnexpectedResponse("Relations")),
+            }
+        } else {
+            Vec::new()
+        };
 
         Ok(Self {
             stream,
             schema,
+            relations,
             server_protocol_version,
         })
     }
@@ -953,6 +1006,14 @@ impl SchemaDrivenClient {
         &self.schema
     }
 
+    /// `JOIN-FR-002`/`006` (ADR-0044): every relation a `JOIN … ON` may
+    /// name on this domain, as the server reported at connect — empty on
+    /// a server below protocol 12, and for a domain with no joinable
+    /// relation (`Reminder`; `Order`, whose parent is another table).
+    pub fn relations(&self) -> &[RelationDescriptor] {
+        &self.relations
+    }
+
     fn field(&self, name: &str) -> Result<&FieldDescriptor, ClientError> {
         self.schema
             .fields
@@ -1049,6 +1110,9 @@ impl SchemaDrivenClient {
     /// `AGG-FR-010`).
     pub fn query(&mut self, sql: &str) -> Result<QueryResult, ClientError> {
         let parsed = sql::parse(sql).map_err(|e| ClientError::Sql(e.to_string()))?;
+        if parsed.join.is_some() {
+            return self.query_join(parsed).map(QueryResult::Joined);
+        }
         let is_aggregate = !parsed.group_by.is_empty()
             || matches!(&parsed.columns, sql::ParsedColumns::Named(items)
                 if items.iter().any(|item| matches!(item, sql::ParsedColumnItem::Aggregate { .. })));
@@ -1069,8 +1133,14 @@ impl SchemaDrivenClient {
             sql::ParsedColumns::Named(items) => {
                 let mut tags: Vec<FieldRef> = Vec::with_capacity(items.len());
                 for item in &items {
-                    let sql::ParsedColumnItem::Plain(name) = item else {
-                        unreachable!("query() routes any aggregate column to query_aggregate")
+                    // A qualifier on a non-`JOIN` query was validated by the
+                    // parser to be the `FROM` alias — the same field.
+                    let name = match item {
+                        sql::ParsedColumnItem::Plain(name)
+                        | sql::ParsedColumnItem::Qualified { name, .. } => name,
+                        sql::ParsedColumnItem::Aggregate { .. } => {
+                            unreachable!("query() routes any aggregate column to query_aggregate")
+                        }
                     };
                     tags.push(self.field(name)?.tag);
                 }
@@ -1096,6 +1166,135 @@ impl SchemaDrivenClient {
                 .collect()),
             Response::Err { code, message } => Err(ClientError::Server(code, message)),
             _ => Err(ClientError::UnexpectedResponse("Rows")),
+        }
+    }
+
+    /// `JOIN-FR-005`/`006` (ADR-0044): compiles a `JOIN`-bearing
+    /// `ParsedQuery` to `Request::Join` and translates
+    /// `Response::JoinedRows` back to [`JoinedRowNamed`]s with
+    /// alias-qualified names in `SELECT`-list order. Every refusal below
+    /// is client-side with no frame sent: the version gate (rule 4), a
+    /// right table that is not the `FROM` table (ADR-0045 territory), an
+    /// `ON` name the server did not list, and a listed relation whose
+    /// rows live in another table.
+    fn query_join(&mut self, parsed: sql::ParsedQuery) -> Result<Vec<JoinedRowNamed>, ClientError> {
+        if self.server_protocol_version < 12 {
+            return Err(ClientError::Unsupported("sql join"));
+        }
+        let join = parsed
+            .join
+            .expect("query() routes only JOIN-bearing queries here");
+        if !join.table.eq_ignore_ascii_case(&parsed.table) {
+            return Err(ClientError::Sql(format!(
+                "JOIN {}: a join may only name the FROM table ({}) — one table per connection",
+                join.table, parsed.table
+            )));
+        }
+        let relation = match self.relations.iter().find(|r| r.name == join.relation) {
+            Some(r) if r.target_table.is_some() => {
+                return Err(ClientError::Sql(format!(
+                    "ON {}: this relation's rows live in another table ({}), not joinable here",
+                    join.relation,
+                    r.target_table.as_deref().unwrap_or_default()
+                )))
+            }
+            Some(r) => r.kind.clone(),
+            None => {
+                return Err(ClientError::Sql(format!(
+                    "ON {}: not a relation this domain lists (see SchemaDrivenClient::relations)",
+                    join.relation
+                )))
+            }
+        };
+
+        let left_alias = parsed.alias.clone().unwrap_or_else(|| parsed.table.clone());
+        let right_alias = join.alias.clone().unwrap_or_else(|| join.table.clone());
+        let is_left = |qualifier: &str| qualifier.eq_ignore_ascii_case(&left_alias);
+
+        // The output plan: which side, which tag, and the qualified label.
+        enum Side {
+            Left,
+            Right,
+        }
+        let (left, right, plan): (Selection, Selection, Vec<(Side, FieldRef, String)>) =
+            match parsed.columns {
+                sql::ParsedColumns::All => {
+                    let mut plan = Vec::new();
+                    for f in &self.schema.fields {
+                        plan.push((Side::Left, f.tag, format!("{left_alias}.{}", f.name)));
+                    }
+                    for f in &self.schema.fields {
+                        plan.push((Side::Right, f.tag, format!("{right_alias}.{}", f.name)));
+                    }
+                    (Selection::All, Selection::All, plan)
+                }
+                sql::ParsedColumns::Named(items) => {
+                    let mut left_tags = Vec::new();
+                    let mut right_tags = Vec::new();
+                    let mut plan = Vec::with_capacity(items.len());
+                    for item in items {
+                        let sql::ParsedColumnItem::Qualified { qualifier, name } = item else {
+                            unreachable!("the parser requires qualified, non-aggregate columns in a JOIN query")
+                        };
+                        let tag = self.field(&name)?.tag;
+                        let label = format!("{qualifier}.{name}");
+                        if is_left(&qualifier) {
+                            left_tags.push(tag);
+                            plan.push((Side::Left, tag, label));
+                        } else {
+                            right_tags.push(tag);
+                            plan.push((Side::Right, tag, label));
+                        }
+                    }
+                    (
+                        Selection::Fields(left_tags),
+                        Selection::Fields(right_tags),
+                        plan,
+                    )
+                }
+            };
+
+        let (left_conditions, right_conditions): (Vec<_>, Vec<_>) = parsed
+            .conditions
+            .into_iter()
+            .partition(|c| c.qualifier.as_deref().is_some_and(is_left));
+        let left_filter = self.resolve_filter(&left_conditions)?;
+        let right_filter = self.resolve_filter(&right_conditions)?;
+
+        match self.roundtrip(Request::Join(JoinSpec {
+            relation,
+            right_table: None,
+            left,
+            right,
+            left_filter,
+            right_filter,
+            limit: parsed.limit,
+        }))? {
+            Response::JoinedRows { rows } => Ok(rows
+                .into_iter()
+                .map(|row| {
+                    let fields = plan
+                        .iter()
+                        .filter_map(|(side, tag, label)| {
+                            let source = match side {
+                                Side::Left => &row.left,
+                                Side::Right => &row.right,
+                            };
+                            source
+                                .iter()
+                                .find(|(t, _)| t == tag)
+                                .map(|(_, v)| (label.clone(), v.clone()))
+                        })
+                        .collect();
+                    JoinedRowNamed {
+                        left_id: row.left_id,
+                        right_id: row.right_id,
+                        fields,
+                    }
+                })
+                .collect()),
+            Response::Err { code, message } => Err(ClientError::Server(code, message)),
+            _ => Err(ClientError::UnexpectedResponse("JoinedRows")),
         }
     }
 
@@ -1140,7 +1339,8 @@ impl SchemaDrivenClient {
         let mut plan: Vec<OutputColumn> = Vec::with_capacity(items.len());
         for item in items {
             match item {
-                sql::ParsedColumnItem::Plain(name) => {
+                sql::ParsedColumnItem::Plain(name)
+                | sql::ParsedColumnItem::Qualified { name, .. } => {
                     if !parsed.group_by.contains(&name) {
                         return Err(ClientError::Sql(format!(
                             "{name}: every non-aggregated column must also appear in GROUP BY"
