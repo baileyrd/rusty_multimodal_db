@@ -1,6 +1,13 @@
-# Server Entity Aliases and Case-Insensitive Name Lookup
+# Server Entity Aliases and Case-Insensitive Name Lookup (Accepted)
 
-- Status: **Proposed**
+- Status: **Accepted** (promoted from Proposed on 2026-09-05 — the
+  owner approved the design as proposed, `ADR-0040` option (a):
+  `aliases` as a durable field, `NameIndex` as the new secondary-index
+  primitive, `label`/alias lookup via the existing `FilterEq` shapes,
+  no protocol bump; (b) lookup-only without `aliases` and (c) closing
+  as not warranted both declined). Acceptance authorizes the design;
+  implementation follows as its own unit — see `ADR-0040`'s
+  "Acceptance and implementation" section.
 - Date: 2026-09-05
 - Related: `ADR-0039`/`docs/design/SERVER-ENTITY-V2-REDESIGN-DESIGN.md`
   (named both `aliases` and case/whitespace-insensitive name
@@ -487,3 +494,5 @@ fn filter_eq(&self, field: FieldRef, value: &ScanValue) -> Result<Vec<RecordId>,
   0039`'s own paired `aliases`/case-insensitive-name-resolution
   Non-goals via a new secondary-index primitive, `NameIndex`, needing
   no `PROTOCOL_VERSION` change for the headline lookup capability.
+- 2026-09-05: Accepted as proposed, `ADR-0040` option (a); (b) and (c)
+  declined.

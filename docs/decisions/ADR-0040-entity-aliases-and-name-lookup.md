@@ -1,6 +1,12 @@
 # ADR-0040: `Entity` aliases and case-insensitive name lookup
 
-- Status: **Proposed**
+- Status: **Accepted** (promoted from Proposed on 2026-09-05 — the
+  owner approved option (a): the design as proposed, `aliases` as a
+  durable field plus the `NameIndex` secondary-index primitive, no
+  protocol bump; (b) lookup-only without `aliases` and (c) closing as
+  not warranted both declined). Acceptance authorizes the design;
+  implementation follows as its own unit — see "Acceptance and
+  implementation" below.
 - Date: 2026-09-05
 - Deciders: baileyrd
 - Related: `docs/design/SERVER-ENTITY-ALIASES-DESIGN.md` (the full
@@ -131,3 +137,6 @@ disproportionate primitive].
   a name-based caller already pays today is judged acceptable as-is,
   and neither gap is pursued further absent new evidence they matter.
   Proposed in this PR.
+- 2026-09-05: accepted as proposed (option (a); (b) and (c) declined).
+  Implementation follows as `SERVER-001`'s next minor / FR, per
+  `docs/design/SERVER-ENTITY-ALIASES-DESIGN.md`. (This PR.)
