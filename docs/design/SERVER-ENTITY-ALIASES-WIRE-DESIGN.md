@@ -364,3 +364,13 @@ pub const FIELD_ALIASES: FieldRef = 3;
   for every client negotiated below 11.
 - 2026-09-05: Accepted as proposed, `ADR-0041` option (a); (b) and (c)
   declined.
+- 2026-09-05: **Implemented** (`SERVER-001-FR-044`, v0.34.0). Landed as
+  this document's "Proposed shape" sketched it, with one additive
+  completion recorded in `ADR-0041`'s implementation log: the
+  "Data/state and invariants" invariant that a `StrList` never
+  appears inside `Response::Groups` needed one more guard this document
+  did not name — `GROUP BY` a `StrList`-kinded field, refused server-side
+  (`validate_aggregate`, `Malformed`) and client-side (`query_aggregate`,
+  `ClientError::Sql`). Acceptance criteria 1–7 hold; the verification
+  plan ran as written, including the hand-negotiated `Hello { 10 }` and
+  silent-client cases over raw framing in both suites named.

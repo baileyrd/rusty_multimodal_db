@@ -31,8 +31,20 @@
 //! `Request::FilterEq`/`ScanValue::Str`/`Response::RecordList` exactly as
 //! they are — **no `PROTOCOL_VERSION` change**; the only thing a client
 //! sees differently is `DomainSchema` now reporting `filter_eq: true` for
-//! `label`, a data value, not a shape. `aliases` itself has no `FieldRef`
-//! and appears in no response (`ScanValue` has no list variant).
+//! `label`, a data value, not a shape.
+//!
+//! # `aliases` is readable — protocol 11 — and nothing else
+//!
+//! `ENT4-FR-002` (ADR-0041): `aliases` has `FIELD_ALIASES = 3`, a
+//! `FieldDescriptor` with every capability flag `false`, and rides in
+//! `get`/`scan_all` as `ScanValue::StrList` — the raw stored `Vec<String>`
+//! in stored order, un-normalized (the `NameIndex` keys are derived from
+//! it, never the reverse). Every write/filter/scan path on it is
+//! `Unsupported` — a known field that supports nothing, not `UnknownField`.
+//! A connection negotiated below 11 never sees the field at all:
+//! `downgrade_for_version` in `super` strips the pair from `Record`/`Rows`
+//! and the descriptor from `Schema` (rule 3, `ENT4-FR-003`), leaving
+//! exactly the three-field shape `FR-042` returned.
 
 use super::journal::{CheckpointFlush, CommitError, CommitGroup, JournalError};
 use super::protocol::{
@@ -48,6 +60,8 @@ use std::path::Path;
 pub const FIELD_LABEL: FieldRef = 0;
 pub const FIELD_KIND: FieldRef = 1;
 pub const FIELD_MENTION_COUNT: FieldRef = 2;
+/// `ENT4-FR-002` (ADR-0041, protocol 11): read-only; see module docs.
+pub const FIELD_ALIASES: FieldRef = 3;
 
 pub struct EntityConnectionStore {
     store: GenericProductionStore<EntityProductionStack>,
@@ -102,7 +116,9 @@ impl EntityConnectionStore {
                     }
                 }
                 (FIELD_MENTION_COUNT, _) => return Err((i, ErrorCode::Malformed)),
-                (FIELD_LABEL | FIELD_KIND, _) => return Err((i, ErrorCode::Unsupported)),
+                (FIELD_LABEL | FIELD_KIND | FIELD_ALIASES, _) => {
+                    return Err((i, ErrorCode::Unsupported))
+                }
                 _ => return Err((i, ErrorCode::UnknownField)),
             }
         }
@@ -133,6 +149,7 @@ impl EntityConnectionStore {
                 FIELD_LABEL => Some(ScanValue::Str(entity.label)),
                 FIELD_KIND => Some(ScanValue::Str(entity.kind)),
                 FIELD_MENTION_COUNT => Some(ScanValue::I64(entity.mention_count)),
+                FIELD_ALIASES => Some(ScanValue::StrList(entity.aliases)),
                 _ => None,
             });
             if current.as_ref() != Some(value) {
@@ -150,6 +167,8 @@ impl ConnectionStore for EntityConnectionStore {
                 (FIELD_LABEL, ScanValue::Str(entity.label)),
                 (FIELD_KIND, ScanValue::Str(entity.kind)),
                 (FIELD_MENTION_COUNT, ScanValue::I64(entity.mention_count)),
+                // `ENT4-FR-002`: raw, stored order, un-normalized.
+                (FIELD_ALIASES, ScanValue::StrList(entity.aliases)),
             ]
         })
     }
@@ -173,7 +192,7 @@ impl ConnectionStore for EntityConnectionStore {
             // `ENT3-FR-005`: `label` or any alias, normalized by the store.
             (FIELD_LABEL, ScanValue::Str(name)) => Ok(self.store.find_by_name::<Entity>(name)),
             (FIELD_LABEL, _) => Err(ErrorCode::Malformed),
-            (FIELD_MENTION_COUNT, _) => Err(ErrorCode::Unsupported),
+            (FIELD_MENTION_COUNT | FIELD_ALIASES, _) => Err(ErrorCode::Unsupported),
             _ => Err(ErrorCode::UnknownField),
         }
     }
@@ -186,7 +205,7 @@ impl ConnectionStore for EntityConnectionStore {
                 .into_iter()
                 .map(ScanValue::I64)
                 .collect()),
-            FIELD_LABEL | FIELD_KIND => Err(ErrorCode::Unsupported),
+            FIELD_LABEL | FIELD_KIND | FIELD_ALIASES => Err(ErrorCode::Unsupported),
             _ => Err(ErrorCode::UnknownField),
         }
     }
@@ -208,7 +227,7 @@ impl ConnectionStore for EntityConnectionStore {
                 }
             }
             (FIELD_MENTION_COUNT, _) => Err(ErrorCode::Malformed),
-            (FIELD_LABEL | FIELD_KIND, _) => Err(ErrorCode::Unsupported),
+            (FIELD_LABEL | FIELD_KIND | FIELD_ALIASES, _) => Err(ErrorCode::Unsupported),
             _ => Err(ErrorCode::UnknownField),
         }
     }
@@ -283,6 +302,19 @@ impl ConnectionStore for EntityConnectionStore {
                         filter_eq: false,
                         scan: true,
                         update: true,
+                    },
+                },
+                // `ENT4-FR-002` (ADR-0041): read-only — stripped from this
+                // schema by `downgrade_for_version` for a connection
+                // negotiated below 11.
+                FieldDescriptor {
+                    tag: FIELD_ALIASES,
+                    name: "aliases".into(),
+                    value_kind: ValueKind::StrList,
+                    capabilities: FieldCapabilities {
+                        filter_eq: false,
+                        scan: false,
+                        update: false,
                     },
                 },
             ],
@@ -376,7 +408,17 @@ mod tests {
                 (FIELD_LABEL, ScanValue::Str("Ada Lovelace".into())),
                 (FIELD_KIND, ScanValue::Str("person".into())),
                 (FIELD_MENTION_COUNT, ScanValue::I64(3)),
+                // `ENT4-FR-002`: raw, stored order, un-normalized.
+                (
+                    FIELD_ALIASES,
+                    ScanValue::StrList(vec!["Ada".into(), "Countess of Lovelace".into()])
+                ),
             ]
+        );
+        assert_eq!(
+            adapter.get(Uuid::from_u128(2)).unwrap()[3],
+            (FIELD_ALIASES, ScanValue::StrList(vec![])),
+            "an empty list is still a present field"
         );
         assert!(adapter.get(Uuid::from_u128(99)).is_none());
     }
@@ -495,12 +537,66 @@ mod tests {
         );
     }
 
+    /// `ENT4-FR-002`: `aliases` is a *known* field that supports nothing —
+    /// every write/filter/scan path is `Unsupported`, never `UnknownField`
+    /// (which tag 3 was before this round) and never `Malformed`.
     #[test]
-    fn describe_names_all_three_fields_and_reports_neighbors_only() {
+    fn aliases_is_a_known_field_every_operation_refuses_as_unsupported() {
+        let adapter = sample_adapter();
+        let list = ScanValue::StrList(vec!["x".into()]);
+        assert_eq!(
+            adapter.filter_eq(FIELD_ALIASES, &list),
+            Err(ErrorCode::Unsupported)
+        );
+        assert_eq!(
+            adapter.filter_eq(FIELD_ALIASES, &ScanValue::Str("Ada".into())),
+            Err(ErrorCode::Unsupported)
+        );
+        assert_eq!(
+            adapter.scan_field(FIELD_ALIASES),
+            Err(ErrorCode::Unsupported)
+        );
+        assert_eq!(
+            adapter.update_field(Uuid::from_u128(1), FIELD_ALIASES, list.clone()),
+            Err(ErrorCode::Unsupported)
+        );
+        assert_eq!(
+            adapter.validate_op(&TransactionOp {
+                id: Uuid::from_u128(1),
+                field: FIELD_ALIASES,
+                value: list,
+            }),
+            Err(ErrorCode::Unsupported)
+        );
+        // Tag 4 is still unknown — the boundary moved by exactly one.
+        assert_eq!(adapter.scan_field(4), Err(ErrorCode::UnknownField));
+        // A read-set entry naming `aliases` compares against the raw list.
+        assert!(EntityConnectionStore::check_read_set(
+            &[(
+                Uuid::from_u128(3),
+                FIELD_ALIASES,
+                ScanValue::StrList(vec!["Londinium".into()])
+            )],
+            |id| adapter.store.get::<Entity>(id),
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn describe_names_all_four_fields_and_reports_neighbors_only() {
         let adapter = sample_adapter();
         let schema = adapter.describe();
-        // Three wire fields — `aliases` has no `FieldRef` (`ENT3-FR-001`).
-        assert_eq!(schema.fields.len(), 3);
+        // Four wire fields since protocol 11 — `aliases` gained
+        // `FIELD_ALIASES` in `ENT4-FR-002` with every flag `false`.
+        assert_eq!(schema.fields.len(), 4);
+        let aliases = schema.fields.iter().find(|f| f.name == "aliases").unwrap();
+        assert_eq!(aliases.tag, FIELD_ALIASES);
+        assert_eq!(aliases.value_kind, ValueKind::StrList);
+        assert!(
+            !aliases.capabilities.filter_eq
+                && !aliases.capabilities.scan
+                && !aliases.capabilities.update
+        );
         let label = schema.fields.iter().find(|f| f.name == "label").unwrap();
         assert!(
             label.capabilities.filter_eq && !label.capabilities.scan && !label.capabilities.update

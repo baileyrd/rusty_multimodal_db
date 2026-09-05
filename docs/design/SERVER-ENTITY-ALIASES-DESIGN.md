@@ -67,6 +67,8 @@ expose over the wire this round.
   appended wire addition, precedent: `F64`, ADR-0035) or remodeling
   aliases as edges to synthetic string-keyed nodes (examined below,
   rejected). Deferred explicitly — see "Open questions."
+  *Deferred no longer: `ADR-0041` / `SERVER-001-FR-044` (v0.34.0) added
+  `ScanValue::StrList` at protocol 11.*
 - **Not changing `RecordId` or `Entity`'s identity.** `Entity` stays
   `Uuid`-keyed, unchanged from `ADR-0039`. Resolving a name/alias to
   an id remains a real, separate round trip for a caller who only has
@@ -480,7 +482,9 @@ fn filter_eq(&self, field: FieldRef, value: &ScanValue) -> Result<Vec<RecordId>,
 
 - Whether `aliases` ever becomes wire-readable, and via which
   mechanism (`ScanValue::StrList` vs. a relation-based remodeling) —
-  named, not decided (see Non-goals).
+  named, not decided (see Non-goals). *Decided and built: `ScanValue::StrList` at
+  protocol 11, `ADR-0041` / `SERVER-001-FR-044` (v0.34.0), with a
+  rule-3 content strip so pre-11 clients see this round's shape.*
 - Whether Unicode-aware case folding ever matters for real
   `rusty_remind_me` data — no evidence yet either way, that
   repository's own source still unread. *Source since read (`ADR-0042`,

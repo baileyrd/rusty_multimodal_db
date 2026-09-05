@@ -37,10 +37,12 @@
 //! index rebuilt from each record's own `NameIndexed::index_keys` at every
 //! `create`/`open`/`open_portable`, normalized (trim + lowercase) at
 //! build and query alike. `label` plus every alias all resolve to the
-//! entity's id; `aliases` itself has **no wire representation** this
-//! round (`ScanValue` has no list variant — a genuinely new "durable but
-//! not wire-representable" category, not `label`'s prior "every
-//! capability flag `false` but still returned" shape).
+//! entity's id. `aliases` itself shipped in ADR-0040 with **no wire
+//! representation** (`ScanValue` had no list variant — a genuinely new
+//! "durable but not wire-representable" category); ADR-0041 (`ENT4-FR-001`,
+//! protocol 11) closed that with `ScanValue::StrList`, so `aliases` is
+//! now readable over the wire — raw, in stored order — and nothing more
+//! (every capability flag `false`; see `crate::server::entity`).
 //!
 //! # Two relations: `RelatesTo` and `MentionedWith`
 //!
@@ -132,8 +134,8 @@ pub struct Entity {
     /// `ENT3-FR-001` (ADR-0040): alternate names this entity also
     /// resolves under, each normalized into the same [`NameIndex`] as
     /// `label`. Durable for free — the record blob is `Vec<Entity>`
-    /// serialized whole. No `FieldRef`, no `GetById`/`Query` exposure
-    /// this round: `ScanValue` has no list variant (see module docs).
+    /// serialized whole. Readable over the wire since protocol 11
+    /// (`ENT4-FR-002`, ADR-0041) as `ScanValue::StrList`, read-only.
     pub aliases: Vec<String>,
 }
 

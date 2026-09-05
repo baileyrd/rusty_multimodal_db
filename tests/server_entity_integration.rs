@@ -1,8 +1,11 @@
 //! Real end-to-end coverage of `Entity` v2 (`ENT2-FR-001`–`007`,
 //! ADR-0039, `docs/design/SERVER-ENTITY-V2-REDESIGN-DESIGN.md`) and its
 //! `aliases`/normalized-name-lookup extension (`ENT3-FR-001`–`007`,
-//! ADR-0040, `docs/design/SERVER-ENTITY-ALIASES-DESIGN.md`) — a real
-//! `TcpListener`, a real `SchemaDrivenClient`. `required-features =
+//! ADR-0040, `docs/design/SERVER-ENTITY-ALIASES-DESIGN.md`), plus
+//! `aliases` on the wire at protocol 11 (`ENT4-FR-001`–`006`, ADR-0041,
+//! `docs/design/SERVER-ENTITY-ALIASES-WIRE-DESIGN.md`) — a real
+//! `TcpListener`, a real `SchemaDrivenClient`, and raw framing where the
+//! negotiated version itself is what is under test. `required-features =
 //! ["server"]` only, no `research` — `Entity` is front-door, matching
 //! `tests/server_reminder_integration.rs`'s own precedent.
 
@@ -14,9 +17,14 @@ use rusty_multimodal_db::generic::reminder::{
 use rusty_multimodal_db::server::client::{
     ClientError, QueryResult, SchemaDrivenClient, SessionOptions,
 };
-use rusty_multimodal_db::server::entity::{EntityConnectionStore, FIELD_MENTION_COUNT};
+use rusty_multimodal_db::server::entity::{
+    EntityConnectionStore, FIELD_ALIASES, FIELD_MENTION_COUNT,
+};
 use rusty_multimodal_db::server::framing::{read_message, write_message};
-use rusty_multimodal_db::server::protocol::{Request, Response, ScanValue, TransactionOp};
+use rusty_multimodal_db::server::protocol::{
+    AggregateFn, AggregateSpec, CompareOp, ErrorCode, Predicate, Request, Response, ScanValue,
+    Selection, TransactionOp, ValueKind, PROTOCOL_VERSION,
+};
 use rusty_multimodal_db::server::reminder::ReminderConnectionStore;
 use rusty_multimodal_db::server::{serve, ServeOptions};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -156,6 +164,11 @@ fn get_returns_every_field_and_group_by_kind_counts_correctly() {
             ("label".to_string(), ScanValue::Str("Ada Lovelace".into())),
             ("kind".to_string(), ScanValue::Str("person".into())),
             ("mention_count".to_string(), ScanValue::I64(3)),
+            // `ENT4-FR-002` (ADR-0041, protocol 11): the raw stored list.
+            (
+                "aliases".to_string(),
+                ScanValue::StrList(vec!["Ada".into(), "Countess of Lovelace".into()])
+            ),
         ]
     );
     assert!(client.get(Uuid::from_u128(99)).unwrap().is_none());
@@ -563,7 +576,9 @@ fn label_is_filterable_but_not_scannable_or_updatable_and_still_sql_queryable() 
     let addr = start_server();
     let mut client = SchemaDrivenClient::connect(addr).unwrap();
     // `ENT3-FR-006`: `filter_eq` flipped to `true` (ADR-0040); the other
-    // two flags are unchanged. `aliases` is not a schema field at all.
+    // two flags are unchanged. `aliases` became a schema field at protocol
+    // 11 (`ENT4-FR-002`, ADR-0041) with every flag `false` — see
+    // `aliases_is_readable_at_protocol_11_and_projected_by_sql`.
     let label = client
         .schema()
         .fields
@@ -572,7 +587,17 @@ fn label_is_filterable_but_not_scannable_or_updatable_and_still_sql_queryable() 
         .expect("label is a schema field");
     assert!(label.capabilities.filter_eq);
     assert!(!label.capabilities.scan && !label.capabilities.update);
-    assert!(!client.schema().fields.iter().any(|f| f.name == "aliases"));
+    let aliases = client
+        .schema()
+        .fields
+        .iter()
+        .find(|f| f.name == "aliases")
+        .expect("aliases is a schema field since protocol 11");
+    assert!(
+        !aliases.capabilities.filter_eq
+            && !aliases.capabilities.scan
+            && !aliases.capabilities.update
+    );
     // The SQL path is a full scan with exact-string equality, unchanged
     // by the index: still one row for the exact label, none for a
     // case-varied one — the two mechanisms are deliberately distinct.
@@ -582,5 +607,309 @@ fn label_is_filterable_but_not_scannable_or_updatable_and_still_sql_queryable() 
     match result {
         QueryResult::Rows(rows) => assert_eq!(rows.len(), 1),
         QueryResult::Groups(groups) => panic!("expected Rows, got Groups: {groups:?}"),
+    }
+}
+
+/// Raw-framing helper for the tests below: one request, one response, no
+/// `SchemaDrivenClient` in between — so the negotiated version is exactly
+/// what the test says it is (the precedent `transaction_applies_every_write`
+/// set).
+fn raw(wire: &mut TcpStream, req: &Request) -> Response {
+    write_message(wire, req).unwrap();
+    read_message(wire).unwrap()
+}
+
+fn tags(fields: &[(u16, ScanValue)]) -> Vec<u16> {
+    fields.iter().map(|(tag, _)| *tag).collect()
+}
+
+/// `ENT4` acceptance criterion 2 (ADR-0041): over a version-11
+/// connection, `GetById` returns four fields including `aliases` as the
+/// raw stored list in stored order (an empty list is still a present
+/// field); `SELECT aliases FROM entity` and `SELECT *` project it; the
+/// schema describes it as `StrList` with every capability flag `false`.
+/// No new client API — `get`/`query` return it as one more pair.
+#[test]
+fn aliases_is_readable_at_protocol_11_and_projected_by_sql() {
+    let addr = start_server();
+    let mut client = SchemaDrivenClient::connect(addr).unwrap();
+    assert_eq!(client.server_protocol_version(), 11);
+
+    let aliases = client
+        .schema()
+        .fields
+        .iter()
+        .find(|f| f.name == "aliases")
+        .expect("aliases descriptor");
+    assert_eq!(aliases.tag, FIELD_ALIASES);
+    assert_eq!(aliases.value_kind, ValueKind::StrList);
+    assert!(
+        !aliases.capabilities.filter_eq
+            && !aliases.capabilities.scan
+            && !aliases.capabilities.update
+    );
+
+    let ada = client.get(Uuid::from_u128(1)).unwrap().unwrap();
+    assert_eq!(ada.len(), 4);
+    assert_eq!(
+        ada[3],
+        (
+            "aliases".to_string(),
+            // Raw and in stored order — not the lowercased index keys.
+            ScanValue::StrList(vec!["Ada".into(), "Countess of Lovelace".into()])
+        )
+    );
+    let engine = client.get(Uuid::from_u128(2)).unwrap().unwrap();
+    assert_eq!(
+        engine[3],
+        ("aliases".to_string(), ScanValue::StrList(vec![]))
+    );
+
+    match client
+        .query("SELECT aliases FROM entity WHERE label = 'London'")
+        .unwrap()
+    {
+        QueryResult::Rows(rows) => {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(
+                rows[0].1,
+                vec![(
+                    "aliases".to_string(),
+                    ScanValue::StrList(vec!["Londinium".into()])
+                )]
+            );
+        }
+        QueryResult::Groups(groups) => panic!("expected Rows, got Groups: {groups:?}"),
+    }
+    match client
+        .query("SELECT * FROM entity WHERE label = 'Charles Babbage'")
+        .unwrap()
+    {
+        QueryResult::Rows(rows) => {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].1.len(), 4);
+            assert_eq!(
+                rows[0].1[3],
+                (
+                    "aliases".to_string(),
+                    ScanValue::StrList(vec!["Babbage".into()])
+                )
+            );
+        }
+        QueryResult::Groups(groups) => panic!("expected Rows, got Groups: {groups:?}"),
+    }
+}
+
+/// `ENT4` acceptance criterion 3 (`ENT4-FR-003`, ADR-0041): the same
+/// `GetById`, `SELECT *`-shaped `Query`, and `DescribeSchema` over a
+/// connection hand-negotiated at `Hello { 10 }`, and over a silent
+/// (version-1) connection, return exactly the three-field shape `FR-042`
+/// returned — no `aliases` pair, no `aliases` descriptor. The protocol's
+/// first content-rewriting downgrade, proven against a real server: the
+/// server has the field; these clients never see it.
+#[test]
+fn aliases_is_stripped_for_a_version_10_client_and_a_silent_client() {
+    let addr = start_server();
+    let ada = Uuid::from_u128(1);
+    let every_row = Request::Query {
+        select: Selection::All,
+        filter: vec![],
+        limit: None,
+    };
+    let three_fields = vec![0u16, 1, 2];
+
+    let assert_fr_042_shape = |wire: &mut TcpStream, who: &str| {
+        match raw(wire, &Request::GetById { id: ada }) {
+            Response::Record { fields, .. } => {
+                assert_eq!(tags(&fields), three_fields, "{who}: GetById");
+            }
+            other => panic!("{who}: expected Record, got {other:?}"),
+        }
+        match raw(wire, &every_row) {
+            Response::Rows { rows } => {
+                assert_eq!(rows.len(), 5, "{who}: every row still returned");
+                for (_, fields) in &rows {
+                    assert_eq!(tags(fields), three_fields, "{who}: Query row");
+                }
+            }
+            other => panic!("{who}: expected Rows, got {other:?}"),
+        }
+        match raw(wire, &Request::DescribeSchema) {
+            Response::Schema(schema) => {
+                assert_eq!(schema.fields.len(), 3, "{who}: DescribeSchema");
+                assert!(!schema.fields.iter().any(|f| f.name == "aliases"));
+                assert!(!schema
+                    .fields
+                    .iter()
+                    .any(|f| f.value_kind == ValueKind::StrList));
+            }
+            other => panic!("{who}: expected Schema, got {other:?}"),
+        }
+    };
+
+    // A version-10 client — the build immediately before this one.
+    let mut v10 = TcpStream::connect(addr).unwrap();
+    v10.set_nodelay(true).unwrap();
+    assert_eq!(
+        raw(
+            &mut v10,
+            &Request::Hello {
+                protocol_version: 10
+            }
+        ),
+        Response::Hello {
+            protocol_version: 10
+        }
+    );
+    assert_fr_042_shape(&mut v10, "version 10");
+
+    // A silent client — served at version 1, never said hello.
+    let mut silent = TcpStream::connect(addr).unwrap();
+    silent.set_nodelay(true).unwrap();
+    assert_fr_042_shape(&mut silent, "silent");
+
+    // Control: the same three requests at this build's version carry the
+    // fourth field — the strip is the version's, not the server's.
+    let mut v11 = TcpStream::connect(addr).unwrap();
+    v11.set_nodelay(true).unwrap();
+    assert_eq!(
+        raw(
+            &mut v11,
+            &Request::Hello {
+                protocol_version: PROTOCOL_VERSION
+            }
+        ),
+        Response::Hello {
+            protocol_version: 11
+        }
+    );
+    match raw(&mut v11, &Request::GetById { id: ada }) {
+        Response::Record { fields, .. } => assert_eq!(tags(&fields), vec![0, 1, 2, 3]),
+        other => panic!("expected Record, got {other:?}"),
+    }
+    match raw(&mut v11, &Request::DescribeSchema) {
+        Response::Schema(schema) => assert_eq!(schema.fields.len(), 4),
+        other => panic!("expected Schema, got {other:?}"),
+    }
+}
+
+/// `ENT4` acceptance criterion 4 (`ENT4-FR-002`/`004`/`005`, ADR-0041):
+/// `aliases` is read-only from every direction. Client-side, with no
+/// round trip: `filter_eq`/`update`/`Session::update` on `"aliases"` are
+/// `Unsupported` (the existing capability checks), `WHERE aliases = 'x'`
+/// and `GROUP BY aliases` are `Sql` errors. Server-side, against a raw
+/// frame the client library would never send: `UpdateField` carrying a
+/// `StrList` is `Unsupported`, a `Query` predicate carrying one is
+/// `Malformed`, and `GROUP BY` the `aliases` tag is `Malformed` — so no
+/// `StrList` can ever reach `Response::Groups`. No new `ErrorCode`.
+#[test]
+fn aliases_refuses_every_write_filter_and_group_client_and_server_side() {
+    let addr = start_server();
+    let mut client = SchemaDrivenClient::connect(addr).unwrap();
+    let list = ScanValue::StrList(vec!["x".into()]);
+
+    assert!(matches!(
+        client.filter_eq("aliases", ScanValue::Str("Ada".into())),
+        Err(ClientError::Unsupported(_))
+    ));
+    assert!(matches!(
+        client.update(Uuid::from_u128(1), "aliases", list.clone()),
+        Err(ClientError::Unsupported(_))
+    ));
+    let mut session = client.begin().unwrap();
+    assert!(matches!(
+        session.update(Uuid::from_u128(1), "aliases", list.clone()),
+        Err(ClientError::Unsupported(_))
+    ));
+    session.rollback().unwrap();
+    assert!(matches!(
+        client.query("SELECT label FROM entity WHERE aliases = 'Ada'"),
+        Err(ClientError::Sql(_))
+    ));
+    assert!(matches!(
+        client.query("SELECT aliases, COUNT(*) FROM entity GROUP BY aliases"),
+        Err(ClientError::Sql(_))
+    ));
+    // The client refused before any frame: the connection is still good.
+    assert!(client.get(Uuid::from_u128(1)).unwrap().is_some());
+
+    let mut wire = TcpStream::connect(addr).unwrap();
+    wire.set_nodelay(true).unwrap();
+    assert_eq!(
+        raw(
+            &mut wire,
+            &Request::Hello {
+                protocol_version: PROTOCOL_VERSION
+            }
+        ),
+        Response::Hello {
+            protocol_version: 11
+        }
+    );
+    assert!(matches!(
+        raw(
+            &mut wire,
+            &Request::UpdateField {
+                id: Uuid::from_u128(1),
+                field: FIELD_ALIASES,
+                value: list.clone(),
+            }
+        ),
+        Response::Err {
+            code: ErrorCode::Unsupported,
+            ..
+        }
+    ));
+    assert!(matches!(
+        raw(
+            &mut wire,
+            &Request::Query {
+                select: Selection::All,
+                filter: vec![Predicate {
+                    field: FIELD_ALIASES,
+                    op: CompareOp::Eq,
+                    value: list.clone(),
+                }],
+                limit: None,
+            }
+        ),
+        Response::Err {
+            code: ErrorCode::Malformed,
+            ..
+        }
+    ));
+    assert!(matches!(
+        raw(
+            &mut wire,
+            &Request::Aggregate {
+                group_by: vec![FIELD_ALIASES],
+                filter: vec![],
+                aggregates: vec![AggregateSpec {
+                    func: AggregateFn::Count,
+                    field: None,
+                }],
+                limit: None,
+            }
+        ),
+        Response::Err {
+            code: ErrorCode::Malformed,
+            ..
+        }
+    ));
+    // Nothing above changed the record.
+    match raw(
+        &mut wire,
+        &Request::GetById {
+            id: Uuid::from_u128(1),
+        },
+    ) {
+        Response::Record { fields, .. } => assert_eq!(
+            fields[3],
+            (
+                FIELD_ALIASES,
+                ScanValue::StrList(vec!["Ada".into(), "Countess of Lovelace".into()])
+            )
+        ),
+        other => panic!("expected Record, got {other:?}"),
     }
 }

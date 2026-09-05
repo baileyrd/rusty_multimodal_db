@@ -413,6 +413,10 @@ fn validate_query(
     Ok(())
 }
 
+/// Deliberately no `StrList` arm (`ENT4-FR-002`, ADR-0041): a predicate
+/// against a list-kinded field, whatever value it carries, is `Malformed`
+/// — `aliases` is read-only over the wire; resolving *by* alias is
+/// `FilterEq` on `label`.
 fn value_matches_kind(kind: protocol::ValueKind, value: &ScanValue) -> bool {
     matches!(
         (kind, value),
@@ -498,7 +502,9 @@ fn select_fields(
 /// `ConnectionStore::scan_all` ever runs. `filter` is validated exactly
 /// like `Request::Query`'s own filter (`validate_query`'s identical
 /// checks). An unknown tag in `group_by` or an `AggregateSpec::field` is
-/// `ErrorCode::UnknownField`; a `Count` whose `field` is `Some(_)` (only
+/// `ErrorCode::UnknownField`; a `StrList`-kinded tag in `group_by` is
+/// `ErrorCode::Malformed` (`ENT4-FR-003`, ADR-0041 — a list is never a
+/// group key, so `Response::Groups` never carries one); a `Count` whose `field` is `Some(_)` (only
 /// `COUNT(*)` is supported — this schema has no `NULL` concept, so
 /// `COUNT(field)` would be unconditionally identical), or a
 /// `Sum`/`Avg`/`Min`/`Max` with no field or a non-`U32`/`I64` field (the
@@ -518,8 +524,15 @@ fn validate_aggregate(
             .map(|f| f.value_kind)
     };
     for &tag in group_by {
-        if kind_of(tag).is_none() {
-            return Err(ErrorCode::UnknownField);
+        match kind_of(tag) {
+            None => return Err(ErrorCode::UnknownField),
+            // `ENT4-FR-003` (ADR-0041): a `StrList` field is not groupable
+            // — the one way a `StrList` could otherwise reach
+            // `Response::Groups`, which `downgrade_for_version` cannot
+            // strip. `Malformed`, the code every other kind-shaped
+            // aggregate rejection already uses.
+            Some(protocol::ValueKind::StrList) => return Err(ErrorCode::Malformed),
+            Some(_) => {}
         }
     }
     for predicate in filter {
@@ -706,15 +719,59 @@ fn reduce_extreme(
 
 /// Compatibility rule 3's "nearest older shape" (`protocol.rs`): a
 /// response carrying a variant introduced after the connection's
-/// negotiated version is rewritten before it is sent. Two cases exist —
-/// `ErrorCode::Journal` (version 4, ADR-0025) and `ErrorCode::Conflict`
-/// (version 7, ADR-0033), both inside `TransactionFailed`, each seen as
-/// `Unsupported` by a connection below the version that introduced it.
+/// negotiated version is rewritten before it is sent. Three cases exist.
+/// Two remap an error code — `ErrorCode::Journal` (version 4, ADR-0025)
+/// and `ErrorCode::Conflict` (version 7, ADR-0033), both inside
+/// `TransactionFailed`, each seen as `Unsupported` by a connection below
+/// the version that introduced it. The third rewrites *content* —
+/// `ENT4-FR-003` (version 11, ADR-0041): `ScanValue::StrList` is the
+/// first appended value variant that reaches an ungated response
+/// (`GetById`/`Query`/`DescribeSchema` are protocol-1/8/1 requests a
+/// silent client can send), so below 11 every `StrList` pair is stripped
+/// from `Record` and from each `Rows` row, and every `StrList`
+/// descriptor from `Schema` — the field did not exist for that client at
+/// `FR-042` and does not now. `ScanValues`/`Groups` never carry one (the
+/// adapter refuses `ScanField` on such a field; `validate_aggregate`
+/// refuses it in `group_by`/aggregates), pinned by a debug assertion.
 /// The session shapes (version 3) and `Request::Query`/`Response::Rows`
-/// (version 8) never need this: neither can arise on a connection that
-/// could not send the gated request that produces it.
+/// themselves (version 8) never need this: neither can arise on a
+/// connection that could not send the gated request that produces it.
 fn downgrade_for_version(resp: Response, negotiated: u32) -> Response {
+    fn is_str_list(pair: &(FieldRef, ScanValue)) -> bool {
+        matches!(pair.1, ScanValue::StrList(_))
+    }
     match resp {
+        Response::Record { id, fields } if negotiated < 11 => Response::Record {
+            id,
+            fields: fields.into_iter().filter(|p| !is_str_list(p)).collect(),
+        },
+        Response::Rows { rows } if negotiated < 11 => Response::Rows {
+            rows: rows
+                .into_iter()
+                .map(|(id, fields)| (id, fields.into_iter().filter(|p| !is_str_list(p)).collect()))
+                .collect(),
+        },
+        Response::Schema(mut schema) if negotiated < 11 => {
+            schema
+                .fields
+                .retain(|f| f.value_kind != protocol::ValueKind::StrList);
+            Response::Schema(schema)
+        }
+        Response::ScanValues { ref values } => {
+            debug_assert!(
+                !values.iter().any(|v| matches!(v, ScanValue::StrList(_))),
+                "a StrList field is never scannable (ENT4-FR-003)"
+            );
+            resp
+        }
+        Response::Groups { ref groups } => {
+            debug_assert!(
+                !groups.iter().any(|g| g.key.iter().any(is_str_list)
+                    || g.values.iter().any(|v| matches!(v, ScanValue::StrList(_)))),
+                "a StrList field is never groupable or aggregatable (ENT4-FR-003)"
+            );
+            resp
+        }
         Response::TransactionFailed {
             index,
             code: ErrorCode::Journal,
@@ -2606,6 +2663,104 @@ mod tests {
         assert_eq!(downgrade_for_version(untouched.clone(), 1), untouched);
     }
 
+    /// `ENT4-FR-003`/`ENT4-FR-006` (ADR-0041), acceptance criterion 5:
+    /// the protocol's first content-rewriting downgrade. Below 11 every
+    /// `StrList` pair is stripped from `Record` and from each `Rows` row
+    /// and every `StrList` descriptor from `Schema`, other fields kept in
+    /// order; at 11 all three are untouched; a `Record` with no `StrList`
+    /// is untouched at 1 (every other domain's regression); the two
+    /// `ErrorCode` cases are unchanged.
+    #[test]
+    fn str_list_content_is_stripped_below_version_11() {
+        let id = uuid::Uuid::from_u128(1);
+        let aliases = || (3u16, ScanValue::StrList(vec!["Ada".into()]));
+        let label = || (0u16, ScanValue::Str("Ada Lovelace".into()));
+        let count = || (2u16, ScanValue::I64(3));
+
+        let record = Response::Record {
+            id,
+            fields: vec![label(), aliases(), count()],
+        };
+        let stripped_record = Response::Record {
+            id,
+            fields: vec![label(), count()],
+        };
+        let rows = Response::Rows {
+            rows: vec![(id, vec![aliases(), label()]), (id, vec![aliases()])],
+        };
+        let stripped_rows = Response::Rows {
+            rows: vec![(id, vec![label()]), (id, vec![])],
+        };
+        let descriptor = |name: &str, value_kind: protocol::ValueKind| protocol::FieldDescriptor {
+            tag: 0,
+            name: name.into(),
+            value_kind,
+            capabilities: protocol::FieldCapabilities {
+                filter_eq: false,
+                scan: false,
+                update: false,
+            },
+        };
+        let schema = Response::Schema(DomainSchema {
+            fields: vec![
+                descriptor("label", protocol::ValueKind::Str),
+                descriptor("aliases", protocol::ValueKind::StrList),
+            ],
+            relations: protocol::RelationCapabilities {
+                parent_children: false,
+                neighbors: true,
+            },
+        });
+        let stripped_schema = Response::Schema(DomainSchema {
+            fields: vec![descriptor("label", protocol::ValueKind::Str)],
+            relations: protocol::RelationCapabilities {
+                parent_children: false,
+                neighbors: true,
+            },
+        });
+
+        for older in [1, 10] {
+            assert_eq!(
+                downgrade_for_version(record.clone(), older),
+                stripped_record
+            );
+            assert_eq!(downgrade_for_version(rows.clone(), older), stripped_rows);
+            assert_eq!(
+                downgrade_for_version(schema.clone(), older),
+                stripped_schema
+            );
+        }
+        for current in [11, PROTOCOL_VERSION] {
+            assert_eq!(downgrade_for_version(record.clone(), current), record);
+            assert_eq!(downgrade_for_version(rows.clone(), current), rows);
+            assert_eq!(downgrade_for_version(schema.clone(), current), schema);
+        }
+        // Every other domain: no `StrList` anywhere, nothing rewritten.
+        assert_eq!(
+            downgrade_for_version(stripped_record.clone(), 1),
+            stripped_record
+        );
+        assert_eq!(
+            downgrade_for_version(stripped_schema.clone(), 1),
+            stripped_schema
+        );
+        // The two pre-existing cases hold, above and below their versions.
+        let conflict = Response::TransactionFailed {
+            index: 0,
+            code: ErrorCode::Conflict,
+            message: error_message(ErrorCode::Conflict).to_string(),
+        };
+        assert_eq!(downgrade_for_version(conflict.clone(), 11), conflict);
+        assert_eq!(
+            downgrade_for_version(conflict, 6),
+            Response::TransactionFailed {
+                index: 0,
+                code: ErrorCode::Unsupported,
+                message: error_message(ErrorCode::Unsupported).to_string(),
+            }
+        );
+    }
+
     /// `SESS-FR-006`'s dispatch half: the session requests are
     /// per-connection, like `Authenticate` and `Hello`.
     #[test]
@@ -2969,6 +3124,59 @@ mod tests {
         assert_eq!(unbounded.len(), 3);
         let zero = evaluate_query(sql_test_rows(), &Selection::All, &[], Some(0));
         assert!(zero.is_empty());
+    }
+
+    /// `ENT4-FR-003` (ADR-0041): a `StrList`-kinded field in `group_by`
+    /// is `Malformed` — the one path a list could otherwise take into
+    /// `Response::Groups`, which the rule-3 strip does not cover. A
+    /// `StrList` predicate is `Malformed` too (`value_matches_kind` has
+    /// no list arm), and `Sum`/`Avg`/`Min`/`Max` over it fall under the
+    /// existing orderable-kind rule.
+    #[test]
+    fn validate_aggregate_refuses_a_str_list_group_key_and_predicate() {
+        let mut schema = sql_test_schema();
+        schema.fields.push(protocol::FieldDescriptor {
+            tag: 7,
+            name: "aliases".into(),
+            value_kind: protocol::ValueKind::StrList,
+            capabilities: protocol::FieldCapabilities {
+                filter_eq: false,
+                scan: false,
+                update: false,
+            },
+        });
+        assert_eq!(
+            validate_aggregate(&schema, &[7], &[], &[]),
+            Err(ErrorCode::Malformed),
+            "StrList in group_by"
+        );
+        assert_eq!(
+            validate_aggregate(
+                &schema,
+                &[],
+                &[Predicate {
+                    field: 7,
+                    op: CompareOp::Eq,
+                    value: ScanValue::StrList(vec!["Ada".into()]),
+                }],
+                &[]
+            ),
+            Err(ErrorCode::Malformed),
+            "StrList predicate"
+        );
+        assert_eq!(
+            validate_aggregate(
+                &schema,
+                &[],
+                &[],
+                &[AggregateSpec {
+                    func: AggregateFn::Max,
+                    field: Some(7),
+                }]
+            ),
+            Err(ErrorCode::Malformed),
+            "MAX over a StrList"
+        );
     }
 
     /// `AGG-FR-006`: an unknown field in `group_by` or an `AggregateSpec`
