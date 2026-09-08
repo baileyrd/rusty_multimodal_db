@@ -184,7 +184,10 @@ fn upgrade_if_version_1(log: &Path, tag: &str) -> Result<(), DurabilityError> {
     tmp.push(".upgrade");
     let tmp = PathBuf::from(tmp);
     std::fs::write(&tmp, &image)?;
-    std::fs::File::open(&tmp)?.sync_data()?;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&tmp)?
+        .sync_data()?;
     std::fs::rename(&tmp, log)?;
     Ok(())
 }
