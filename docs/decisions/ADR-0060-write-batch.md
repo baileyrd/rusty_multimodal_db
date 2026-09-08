@@ -77,3 +77,64 @@ owner:
   storage follow-on (option (c)'s journal-format path was scoped to that
   follow-on rather than built here, since the append logs fsync per op
   and per-op durability already holds). (PR #229.)
+
+- 2026-09-08, Step 1 part A repair: the server now routes batch Link/Delete
+  through registry-aware validation and cascades. `write_batch_checked` combines
+  foreign and local preconditions in operation order before any write; prior
+  inserts/deletes affect endpoint existence, including both Entity endpoints.
+  The earliest rejection names its op and changes no table. An atomic adapter
+  without this hook refuses with Unsupported without applying anything.
+- One relationship mutex per `serve_tables` instance, allocated only when a
+  registered relation declares a `target_table`, covers only Link, Delete and WriteBatch (both modes). Only Delete, single or
+  batched, removes records; every such request takes this mutex, so a passed
+  far-endpoint check cannot be invalidated before Link applies. Insert adds
+  records; Replace/ReplaceIf preserve identity and adjacency; UpdateField,
+  Transaction and Commit only update fields. MultiSymmetric's replacement
+  forwards without touching adjacency, and its Compact rewrites the existing
+  live edge blobs without deleting records or edges. Those requests, sessions,
+  and reads stay outside the server section and use adapter locks alone.
+- Registries without foreign relations skip the relationship section. On
+  multi-table servers with foreign relations, pipelined batches of up to
+  `MAX_BATCH_OPS` ops hold the section for their duration.
+- Lock order remains relationship mutex then one adapter's internal sections.
+  Far reads release their adapter locks before own-table apply. Detaches visit
+  registered tables in order after own-table apply, inside the relationship
+  mutex but outside the own-table exclusive section. No path holds locks on
+  two adapters, and no adapter acquires the relationship mutex; Commit only
+  acquires its journal/adapter sections and cannot form a lock cycle with
+  Link, Delete or another batch. A poisoned unit mutex is recovered with
+  `into_inner`, not treated as a persistent Storage refusal.
+- Atomic batches remain precondition-atomic across the registry and isolated
+  during own-table preflight/apply by the adapter's exclusive lock. Link/Delete
+  and other batches cannot interleave through cross-table checks and detaches.
+  Individual adapter reads remain consistent; reads spanning tables may observe
+  the interval between own-table deletion and detaches. This is not a global
+  read snapshot. Direct writes through retained store handles or other server
+  instances remain outside the relationship section. Pipelined outcomes remain
+  independent. No throughput claim is made.
+- Memory, Entity, Relation, Reminder and Employee implement atomic
+  preflight/apply under one `with_exclusive`. Reminder has no links and rejects
+  Link with Unsupported during preflight. Employee supports only
+  `collaborates_with` Link, checking both endpoints and self-loops before any
+  apply; other write ops reject with Unsupported at their index. Order has no
+  `link_records` override. Dog/Order, without an atomic
+  implementation, refuse nonempty socket atomic batches at index 0 with
+  Unsupported, applying nothing. This explicitly replaces the baseline trait
+  fallback's per-op application with abort for those socket requests; empty
+  atomic batches still succeed and pipelined requests keep per-op behavior.
+- Detach Unsupported/Malformed is skipped. After successful own-table apply,
+  a detach Storage failure returns BatchResults with Failed(Storage) in that
+  Delete's slot in either mode, preserving the real results elsewhere and
+  attempting subsequent detaches. Precondition failures keep TransactionFailed.
+  The record is already gone; applied own-table ops and earlier detaches remain.
+  An own-table mid-apply Storage failure leaves partial own-table effects and
+  bypasses the detach pass. No I/O rollback or crash-atomicity is claimed;
+  crashes can leave adjacency/CountEdges dangling while Join skips absent rows.
+  Recovery/isolation probes and the snapshot contract remain pending part B.
+  See [implementation notes and regressions](../reports/2026-09-08-batch-cross-table-repair.md).
+
+- The `src/generic/insert_log.rs` write-handle fix was authorized by the host
+  coordinator in the build feedback of 2026-09-08 (F3), outside the work order's
+  file list. The host will commit it separately from the batch repair. It opens
+  the upgrade temporary file with write access before syncing, without changing
+  the log format or replay semantics.

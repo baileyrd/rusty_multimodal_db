@@ -696,14 +696,10 @@ impl DogStore for MmapAgeStore {
             let ages_start = Self::ages_start(record_count);
             let ages_end = ages_start + record_count * AGE_WIDTH;
             return self.mmap[ages_start..ages_end]
-                .chunks_exact(AGE_WIDTH)
-                .map(|chunk| {
-                    u32::from_le_bytes(
-                        chunk.try_into().expect(
-                            "chunks_exact(AGE_WIDTH) always yields exactly AGE_WIDTH bytes",
-                        ),
-                    )
-                })
+                .as_chunks::<AGE_WIDTH>()
+                .0
+                .iter()
+                .map(|chunk| u32::from_le_bytes(*chunk))
                 .collect();
         }
         let mut positions: Vec<usize> = self.position_index.values().copied().collect();

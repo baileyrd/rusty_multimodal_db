@@ -1402,7 +1402,7 @@ fn write_batch_pipelined_applies_each_and_atomic_is_all_or_nothing() {
             WriteResult::Inserted,
             WriteResult::Inserted,
             WriteResult::NotFound,
-            WriteResult::Linked,
+            WriteResult::Failed(ErrorCode::Unsupported),
         ]
     );
     assert!(client.get(id(101)).unwrap().is_some());
@@ -1454,4 +1454,449 @@ fn write_batch_pipelined_applies_each_and_atomic_is_all_or_nothing() {
         client.get(id(105)).unwrap().is_none(),
         "an atomic abort applies nothing, not even the valid op before the failure"
     );
+}
+
+fn joined_rows(result: QueryResult) -> usize {
+    match result {
+        QueryResult::Joined(rows) => rows.len(),
+        other => panic!("expected Joined, got {other:?}"),
+    }
+}
+
+/// R1/R2/R5: real cross-table links and cascades agree for every request mode,
+/// including reverse adjacency, joins, counts, and persisted detach on reopen.
+#[test]
+fn batch_cross_table_link_delete_matches_single_and_survives_reopen() {
+    for mode in [None, Some(false), Some(true)] {
+        let dir = unique_dir("batch_cross_table_delete");
+        let addr = start_three_table_server_at(dir.clone());
+        let mut client = SchemaDrivenClient::connect(addr).unwrap();
+        let memory = Uuid::from_u128(1);
+        let entity = Uuid::from_u128(0xada);
+        assert_eq!(client.count_edges("mentions").unwrap(), 0);
+        match mode {
+            None => client.link(memory, entity, "mentions").unwrap(),
+            Some(atomic) => assert_eq!(
+                client
+                    .write_batch(
+                        &[BatchOp::Link {
+                            left: memory,
+                            right: entity,
+                            relation: "mentions",
+                        }],
+                        atomic
+                    )
+                    .unwrap(),
+                vec![WriteResult::Linked]
+            ),
+        }
+        assert_eq!(
+            client.neighbors_by_relation(memory, "mentions").unwrap(),
+            vec![entity]
+        );
+        assert_eq!(
+            client.neighbors_by_relation(entity, "mentions").unwrap(),
+            vec![memory]
+        );
+        assert_eq!(client.count_edges("mentions").unwrap(), 1);
+        assert_eq!(
+            joined_rows(
+                client
+                    .query("SELECT m.content, e.label FROM memory m JOIN entity e ON mentions")
+                    .unwrap()
+            ),
+            1
+        );
+        client.use_table("entity").unwrap();
+        match mode {
+            None => assert!(client.delete(entity).unwrap()),
+            Some(atomic) => assert_eq!(
+                client
+                    .write_batch(&[BatchOp::Delete { id: entity }], atomic)
+                    .unwrap(),
+                vec![WriteResult::Deleted]
+            ),
+        }
+        // A second delete is NotFound, including both batch modes.
+        match mode {
+            None => assert!(!client.delete(entity).unwrap()),
+            Some(atomic) => assert_eq!(
+                client
+                    .write_batch(&[BatchOp::Delete { id: entity }], atomic)
+                    .unwrap(),
+                vec![WriteResult::NotFound]
+            ),
+        }
+        client.use_table("memory").unwrap();
+        assert!(client
+            .neighbors_by_relation(memory, "mentions")
+            .unwrap()
+            .is_empty());
+        assert!(client
+            .neighbors_by_relation(entity, "mentions")
+            .unwrap()
+            .is_empty());
+        assert_eq!(client.count_edges("mentions").unwrap(), 0);
+        assert!(
+            joined_rows(
+                client
+                    .query("SELECT m.content, e.label FROM memory m JOIN entity e ON mentions")
+                    .unwrap()
+            ) == 0
+        );
+        drop(client);
+        // As in the existing reopen tests, the old listener is idle; all
+        // subsequent access is through new stacks opened from durable files.
+        let mut reopened = SchemaDrivenClient::connect(start_three_table_server_at(dir)).unwrap();
+        assert!(reopened
+            .neighbors_by_relation(memory, "mentions")
+            .unwrap()
+            .is_empty());
+        assert_eq!(reopened.count_edges("mentions").unwrap(), 0);
+        reopened.use_table("entity").unwrap();
+        assert!(reopened.get(entity).unwrap().is_none());
+    }
+}
+
+/// R1/R3/R5: foreign misses, missing-table errors and own-table dependencies.
+#[test]
+fn batch_cross_table_preconditions_and_dependencies() {
+    for single_table in [false, true] {
+        for atomic in [false, true] {
+            let addr = if single_table {
+                start_server()
+            } else {
+                start_three_table_server_at(unique_dir("batch_cross_table_preconditions"))
+            };
+            let mut client = SchemaDrivenClient::connect(addr).unwrap();
+            let fields = client.get(Uuid::from_u128(1)).unwrap().unwrap();
+            let fields: Vec<_> = fields
+                .iter()
+                .map(|(name, value)| (name.as_str(), value.clone()))
+                .collect();
+            let new = Uuid::from_u128(101);
+            let missing = Uuid::from_u128(0xbad);
+            let expected = if single_table {
+                ErrorCode::Unsupported
+            } else {
+                ErrorCode::RecordNotFound
+            };
+            assert!(
+                matches!(client.link(Uuid::from_u128(1), missing, "mentions"),
+                Err(ClientError::Server(code, _)) if code == expected)
+            );
+            let result = client.write_batch(
+                &[
+                    BatchOp::Insert {
+                        id: new,
+                        fields: &fields,
+                    },
+                    BatchOp::Link {
+                        left: new,
+                        right: missing,
+                        relation: "mentions",
+                    },
+                    BatchOp::Delete {
+                        id: Uuid::from_u128(2),
+                    },
+                ],
+                atomic,
+            );
+            if atomic {
+                assert!(
+                    matches!(result, Err(ClientError::TransactionFailed { index: 1, code, .. }) if code == expected)
+                );
+            } else {
+                assert_eq!(
+                    result.unwrap(),
+                    vec![
+                        WriteResult::Inserted,
+                        WriteResult::Failed(expected),
+                        WriteResult::Deleted
+                    ]
+                );
+            }
+            assert_eq!(client.get(new).unwrap().is_none(), atomic);
+            assert_eq!(client.get(Uuid::from_u128(2)).unwrap().is_some(), atomic);
+            assert_eq!(client.count_edges("mentions").unwrap(), 0);
+        }
+    }
+    for atomic in [false, true] {
+        let mut client = SchemaDrivenClient::connect(start_three_table_server_at(unique_dir(
+            "batch_dependencies",
+        )))
+        .unwrap();
+        let memory = Uuid::from_u128(101);
+        let entity = Uuid::from_u128(0xada);
+        let fields = client.get(Uuid::from_u128(1)).unwrap().unwrap();
+        let fields: Vec<_> = fields
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.clone()))
+            .collect();
+        assert_eq!(
+            client
+                .write_batch(
+                    &[
+                        BatchOp::Insert {
+                            id: memory,
+                            fields: &fields
+                        },
+                        BatchOp::Link {
+                            left: memory,
+                            right: entity,
+                            relation: "mentions"
+                        },
+                    ],
+                    atomic
+                )
+                .unwrap(),
+            vec![WriteResult::Inserted, WriteResult::Linked]
+        );
+        let result = client.write_batch(
+            &[
+                BatchOp::Delete { id: memory },
+                BatchOp::Link {
+                    left: memory,
+                    right: entity,
+                    relation: "mentions",
+                },
+            ],
+            atomic,
+        );
+        if atomic {
+            assert!(matches!(
+                result,
+                Err(ClientError::TransactionFailed {
+                    index: 1,
+                    code: ErrorCode::RecordNotFound,
+                    ..
+                })
+            ));
+            assert_eq!(client.count_edges("mentions").unwrap(), 1);
+        } else {
+            assert_eq!(
+                result.unwrap(),
+                vec![
+                    WriteResult::Deleted,
+                    WriteResult::Failed(ErrorCode::RecordNotFound)
+                ]
+            );
+            assert_eq!(client.count_edges("mentions").unwrap(), 0);
+        }
+        assert_eq!(client.get(memory).unwrap().is_some(), atomic);
+    }
+}
+
+/// Entity relations have two own-table endpoints: both must track earlier
+/// inserts/deletes. A local failure before a foreign failure wins by index.
+#[test]
+fn batch_entity_dependencies_rejection_preserves_cross_table_edges() {
+    for atomic in [false, true] {
+        let mut client = SchemaDrivenClient::connect(start_three_table_server_at(unique_dir(
+            "batch_entity_dependencies",
+        )))
+        .unwrap();
+        let ada = Uuid::from_u128(0xada);
+        let new = Uuid::from_u128(101);
+        client.link(Uuid::from_u128(1), ada, "mentions").unwrap();
+        client.use_table("entity").unwrap();
+        let fields = client.get(ada).unwrap().unwrap();
+        let fields: Vec<_> = fields
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.clone()))
+            .collect();
+        assert_eq!(
+            client
+                .write_batch(
+                    &[
+                        BatchOp::Insert {
+                            id: new,
+                            fields: &fields
+                        },
+                        BatchOp::Link {
+                            left: ada,
+                            right: new,
+                            relation: "knows"
+                        },
+                    ],
+                    atomic
+                )
+                .unwrap(),
+            vec![WriteResult::Inserted, WriteResult::Linked]
+        );
+        let result = client.write_batch(
+            &[
+                BatchOp::Delete { id: ada },
+                BatchOp::Link {
+                    left: new,
+                    right: ada,
+                    relation: "knows",
+                },
+            ],
+            atomic,
+        );
+        if atomic {
+            assert!(matches!(
+                result,
+                Err(ClientError::TransactionFailed {
+                    index: 1,
+                    code: ErrorCode::RecordNotFound,
+                    ..
+                })
+            ));
+        } else {
+            assert_eq!(
+                result.unwrap(),
+                vec![
+                    WriteResult::Deleted,
+                    WriteResult::Failed(ErrorCode::RecordNotFound)
+                ]
+            );
+        }
+        assert_eq!(client.get(ada).unwrap().is_some(), atomic);
+        client.use_table("memory").unwrap();
+        assert_eq!(client.count_edges("mentions").unwrap(), u64::from(atomic));
+        // A later bad field list must not mask the earlier missing own endpoint.
+        let short = [("content", ScanValue::Str("incomplete".into()))];
+        assert!(matches!(
+            client.write_batch(
+                &[
+                    BatchOp::Link {
+                        left: Uuid::from_u128(999),
+                        right: Uuid::from_u128(0xe1e),
+                        relation: "mentions"
+                    },
+                    BatchOp::Insert {
+                        id: Uuid::from_u128(102),
+                        fields: &short
+                    },
+                ],
+                true
+            ),
+            Err(ClientError::TransactionFailed {
+                index: 0,
+                code: ErrorCode::RecordNotFound,
+                ..
+            })
+        ));
+        // Earlier local validation wins over a later foreign miss as well.
+        assert!(matches!(
+            client.write_batch(
+                &[
+                    BatchOp::Insert {
+                        id: Uuid::from_u128(102),
+                        fields: &short
+                    },
+                    BatchOp::Link {
+                        left: Uuid::from_u128(1),
+                        right: Uuid::from_u128(999),
+                        relation: "mentions"
+                    },
+                ],
+                true
+            ),
+            Err(ClientError::TransactionFailed {
+                index: 0,
+                code: ErrorCode::Malformed,
+                ..
+            })
+        ));
+        assert!(client.get(Uuid::from_u128(102)).unwrap().is_none());
+    }
+}
+
+/// R4: competing socket writers either link before the delete (which then
+/// detaches), or reject after it. Neither ordering can leave a dangling edge.
+#[test]
+fn batch_concurrent_link_and_delete_leave_no_dangling_edges() {
+    use std::sync::{mpsc, Barrier};
+    use std::time::Duration;
+    let addr = start_three_table_server_at(unique_dir("batch_concurrent_delete"));
+    let mut observer = SchemaDrivenClient::connect(addr).unwrap();
+    let memory_fields = observer.get(Uuid::from_u128(1)).unwrap().unwrap();
+    observer.use_table("entity").unwrap();
+    let entity_fields = observer.get(Uuid::from_u128(0xada)).unwrap().unwrap();
+    for i in 0..12 {
+        let entity = Uuid::from_u128(200 + i);
+        let memory = Uuid::from_u128(100 + i);
+        observer.use_table("entity").unwrap();
+        let fields: Vec<_> = entity_fields
+            .iter()
+            .map(|(n, v)| (n.as_str(), v.clone()))
+            .collect();
+        observer.insert(entity, &fields).unwrap();
+        let mut linker = SchemaDrivenClient::connect(addr).unwrap();
+        let mut deleter = SchemaDrivenClient::connect(addr).unwrap();
+        deleter.use_table("entity").unwrap();
+        let barrier = Arc::new(Barrier::new(2));
+        let other_barrier = Arc::clone(&barrier);
+        let (done, wait) = mpsc::channel();
+        let other_done = done.clone();
+        let fields = memory_fields.clone();
+        let linker_thread = thread::spawn(move || {
+            let fields: Vec<_> = fields
+                .iter()
+                .map(|(n, v)| (n.as_str(), v.clone()))
+                .collect();
+            barrier.wait();
+            let result = linker.write_batch(
+                &[
+                    BatchOp::Insert {
+                        id: memory,
+                        fields: &fields,
+                    },
+                    BatchOp::Link {
+                        left: memory,
+                        right: entity,
+                        relation: "mentions",
+                    },
+                ],
+                true,
+            );
+            assert!(
+                matches!(&result, Ok(results) if results == &vec![WriteResult::Inserted, WriteResult::Linked])
+                    || matches!(
+                        result,
+                        Err(ClientError::TransactionFailed {
+                            index: 1,
+                            code: ErrorCode::RecordNotFound,
+                            ..
+                        })
+                    )
+            );
+            done.send(()).unwrap();
+        });
+        let deleter_thread = thread::spawn(move || {
+            other_barrier.wait();
+            if i % 2 == 0 {
+                assert!(deleter.delete(entity).unwrap());
+            } else {
+                assert_eq!(
+                    deleter
+                        .write_batch(&[BatchOp::Delete { id: entity }], true)
+                        .unwrap(),
+                    vec![WriteResult::Deleted]
+                );
+            }
+            other_done.send(()).unwrap();
+        });
+        let completed =
+            (0..2).try_for_each(|_| wait.recv_timeout(Duration::from_secs(10)).map(|_| ()));
+        for writer in [linker_thread, deleter_thread] {
+            // A disconnected sender may have panicked: join to propagate its
+            // original assertion. Preserve the deadline for an actual deadlock.
+            if !matches!(completed, Err(mpsc::RecvTimeoutError::Timeout)) || writer.is_finished() {
+                writer
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+            }
+        }
+        completed.expect("writers complete without a lock cycle");
+        observer.use_table("memory").unwrap();
+        assert!(observer
+            .neighbors_by_relation(memory, "mentions")
+            .unwrap()
+            .is_empty());
+        assert_eq!(observer.count_edges("mentions").unwrap(), 0);
+    }
 }

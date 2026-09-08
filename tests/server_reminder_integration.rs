@@ -10,11 +10,11 @@ use rusty_multimodal_db::generic::reminder::{
     create_reminder_production_stack, Reminder, ReminderProductionStack, ReminderStatus,
 };
 use rusty_multimodal_db::server::client::{
-    ClientError, QueryResult, SchemaDrivenClient, SessionOptions,
+    BatchOp, ClientError, QueryResult, SchemaDrivenClient, SessionOptions,
 };
 use rusty_multimodal_db::server::framing::{read_message, write_message};
 use rusty_multimodal_db::server::protocol::{
-    ErrorCode, ParentLookup, Request, Response, ScanValue, TransactionOp,
+    CompareOp, ErrorCode, ParentLookup, Request, Response, ScanValue, TransactionOp, WriteResult,
 };
 use rusty_multimodal_db::server::reminder::{ReminderConnectionStore, FIELD_STATUS};
 use rusty_multimodal_db::server::{serve, ServeOptions};
@@ -533,4 +533,195 @@ fn insert_over_the_wire_is_validated_durable_and_served_after_a_restart() {
     assert_eq!(client.get(other).unwrap(), None);
     let all = rows(client.query("SELECT title FROM reminder").unwrap());
     assert_eq!(all.len(), 4);
+}
+
+/// F2: Reminder supports every runtime record write in either batch mode.
+#[test]
+fn reminder_batches_apply_all_record_write_kinds() {
+    let fields = |title: &str, status| {
+        vec![
+            ("title", ScanValue::Str(title.into())),
+            ("due_at_unix_ms", ScanValue::I64(4_000)),
+            ("status", ScanValue::U32(status)),
+        ]
+    };
+    for atomic in [false, true] {
+        let mut client = SchemaDrivenClient::connect(start_server()).unwrap();
+        let id = Uuid::from_u128(4);
+        let initial = fields("new", 0);
+        let replaced = fields("replaced", 1);
+        let guarded = fields("guarded", 2);
+        let result = client
+            .write_batch(
+                &[
+                    BatchOp::Insert {
+                        id,
+                        fields: &initial,
+                    },
+                    BatchOp::Insert {
+                        id,
+                        fields: &initial,
+                    },
+                    BatchOp::Replace {
+                        id,
+                        fields: &replaced,
+                    },
+                    BatchOp::ReplaceIf {
+                        id,
+                        fields: &guarded,
+                        guard: ("status", CompareOp::Eq, ScanValue::U32(1)),
+                    },
+                    BatchOp::ReplaceIf {
+                        id,
+                        fields: &initial,
+                        guard: ("status", CompareOp::Eq, ScanValue::U32(1)),
+                    },
+                    BatchOp::Replace {
+                        id: Uuid::from_u128(99),
+                        fields: &initial,
+                    },
+                    BatchOp::ReplaceIf {
+                        id: Uuid::from_u128(99),
+                        fields: &initial,
+                        guard: ("status", CompareOp::Eq, ScanValue::U32(0)),
+                    },
+                    BatchOp::Delete {
+                        id: Uuid::from_u128(3),
+                    },
+                    BatchOp::Delete {
+                        id: Uuid::from_u128(3),
+                    },
+                ],
+                atomic,
+            )
+            .unwrap();
+        assert_eq!(
+            result,
+            vec![
+                WriteResult::Inserted,
+                WriteResult::Duplicate,
+                WriteResult::Replaced,
+                WriteResult::Replaced,
+                WriteResult::GuardFailed,
+                WriteResult::NotFound,
+                WriteResult::NotFound,
+                WriteResult::Deleted,
+                WriteResult::NotFound
+            ]
+        );
+        let stored = client.get(id).unwrap().unwrap();
+        assert_eq!(stored[0].1, ScanValue::Str("guarded".into()));
+        assert_eq!(stored[2].1, ScanValue::U32(2));
+        assert!(client.get(Uuid::from_u128(3)).unwrap().is_none());
+    }
+}
+
+/// F2: the earliest malformed op rejects an atomic batch without any writes;
+/// pipelined operations before and after that failure keep their own outcomes.
+#[test]
+fn reminder_batch_rejection_is_atomic_and_pipelined_results_are_independent() {
+    let full = vec![
+        ("title", ScanValue::Str("new".into())),
+        ("due_at_unix_ms", ScanValue::I64(4_000)),
+        ("status", ScanValue::U32(0)),
+    ];
+    let short = vec![("title", ScanValue::Str("incomplete".into()))];
+    let bad_status = vec![
+        ("title", ScanValue::Str("bad status".into())),
+        ("due_at_unix_ms", ScanValue::I64(4_000)),
+        ("status", ScanValue::U32(99)),
+    ];
+    for invalid in [&short, &bad_status] {
+        for atomic in [false, true] {
+            let mut client = SchemaDrivenClient::connect(start_server()).unwrap();
+            let id = Uuid::from_u128(4);
+            let result = client.write_batch(
+                &[
+                    BatchOp::Insert { id, fields: &full },
+                    BatchOp::Insert {
+                        id: Uuid::from_u128(5),
+                        fields: invalid,
+                    },
+                    BatchOp::Delete {
+                        id: Uuid::from_u128(1),
+                    },
+                ],
+                atomic,
+            );
+            if atomic {
+                assert!(matches!(
+                    result,
+                    Err(ClientError::TransactionFailed {
+                        index: 1,
+                        code: ErrorCode::Malformed,
+                        ..
+                    })
+                ));
+            } else {
+                assert_eq!(
+                    result.unwrap(),
+                    vec![
+                        WriteResult::Inserted,
+                        WriteResult::Failed(ErrorCode::Malformed),
+                        WriteResult::Deleted
+                    ]
+                );
+            }
+            assert_eq!(client.get(id).unwrap().is_none(), atomic);
+            assert!(client.get(Uuid::from_u128(5)).unwrap().is_none());
+            assert_eq!(client.get(Uuid::from_u128(1)).unwrap().is_some(), atomic);
+        }
+    }
+    // Send a raw guard field so client-side name resolution cannot mask server validation.
+    use rusty_multimodal_db::server::protocol::{Predicate, WriteOp, PROTOCOL_VERSION};
+    let mut wire = TcpStream::connect(start_server()).unwrap();
+    write_message(
+        &mut wire,
+        &Request::Hello {
+            protocol_version: PROTOCOL_VERSION,
+        },
+    )
+    .unwrap();
+    let _: Response = read_message(&mut wire).unwrap();
+    let id = Uuid::from_u128(1);
+    let fields = vec![
+        (0, ScanValue::Str("new".into())),
+        (1, ScanValue::I64(4_000)),
+        (2, ScanValue::U32(0)),
+    ];
+    let guard = Predicate {
+        field: u16::MAX,
+        op: CompareOp::Eq,
+        value: ScanValue::U32(0),
+    };
+    write_message(
+        &mut wire,
+        &Request::ReplaceIf {
+            id,
+            fields: fields.clone(),
+            guard: guard.clone(),
+        },
+    )
+    .unwrap();
+    assert!(matches!(
+        read_message::<_, Response>(&mut wire).unwrap(),
+        Response::Err {
+            code: ErrorCode::UnknownField,
+            ..
+        }
+    ));
+    write_message(
+        &mut wire,
+        &Request::WriteBatch {
+            ops: vec![WriteOp::ReplaceIf { id, fields, guard }],
+            atomic: false,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        read_message::<_, Response>(&mut wire).unwrap(),
+        Response::BatchResults {
+            results: vec![WriteResult::Failed(ErrorCode::UnknownField)]
+        }
+    );
 }

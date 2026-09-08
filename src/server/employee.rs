@@ -14,11 +14,11 @@ use super::journal::{CheckpointFlush, CommitError, CommitGroup, JournalError};
 use super::protocol::{
     DomainSchema, ErrorCode, FieldCapabilities, FieldDescriptor, FieldRef, JoinRelation,
     ParentLookup, RecordId, RelationCapabilities, RelationDescriptor, ScanValue, TransactionOp,
-    ValueKind,
+    ValueKind, WriteOp, WriteResult,
 };
 use super::{default_relation_descriptors, ConnectionStore, LinkOutcome};
 use crate::generic::production::GenericProductionStore;
-use crate::generic::query::{GetById, UpdateField};
+use crate::generic::query::{GetById, Link, UpdateField};
 use crate::generic::LinkError;
 use crate::generic_spike::employee_impl::{
     CollaboratesWith, Department, DepartmentField, Employee, EmployeeProductionStack, ReportsTo,
@@ -50,6 +50,9 @@ fn department_from_u32(value: u32) -> Option<Department> {
     }
 }
 
+/// Research-only reference adapter: atomic batches support `collaborates_with`
+/// links under one exclusive section. Other atomic write ops refuse with
+/// `Unsupported` before any write; pipelined ops retain independent outcomes.
 pub struct EmployeeConnectionStore {
     store: GenericProductionStore<EmployeeProductionStack>,
     /// `JRN-FR-001` (ADR-0025) — see `DogConnectionStore::with_journal`.
@@ -86,6 +89,20 @@ impl EmployeeConnectionStore {
             store,
             journal: Some(journal),
         })
+    }
+
+    fn apply_link(
+        inner: &mut EmployeeProductionStack,
+        left: RecordId,
+        right: RecordId,
+    ) -> Result<LinkOutcome, ErrorCode> {
+        match Link::<Employee, CollaboratesWith>::link(inner, left, right) {
+            Ok(crate::generic::LinkOutcome::Linked) => Ok(LinkOutcome::Linked),
+            Ok(crate::generic::LinkOutcome::AlreadyLinked) => Ok(LinkOutcome::AlreadyLinked),
+            Err(LinkError::UnknownRecord(_)) => Err(ErrorCode::RecordNotFound),
+            Err(LinkError::SelfLoop(_) | LinkError::InvalidLabel(_)) => Err(ErrorCode::Malformed),
+            Err(LinkError::Durability(_)) => Err(ErrorCode::Storage),
+        }
     }
 
     /// Same validate-then-apply shape `server::dog`'s own uses —
@@ -261,13 +278,70 @@ impl ConnectionStore for EmployeeConnectionStore {
         if relation != "collaborates_with" {
             return Err(ErrorCode::Malformed);
         }
-        match self.store.link::<Employee, CollaboratesWith>(left, right) {
-            Ok(crate::generic::LinkOutcome::Linked) => Ok(LinkOutcome::Linked),
-            Ok(crate::generic::LinkOutcome::AlreadyLinked) => Ok(LinkOutcome::AlreadyLinked),
-            Err(LinkError::UnknownRecord(_)) => Err(ErrorCode::RecordNotFound),
-            Err(LinkError::SelfLoop(_) | LinkError::InvalidLabel(_)) => Err(ErrorCode::Malformed),
-            Err(LinkError::Durability(_)) => Err(ErrorCode::Storage),
+        self.store
+            .with_exclusive(|inner| Self::apply_link(inner, left, right))
+    }
+
+    fn write_batch(
+        &self,
+        ops: &[WriteOp],
+        atomic: bool,
+    ) -> Result<Vec<WriteResult>, (usize, ErrorCode)> {
+        if !atomic {
+            return Ok(ops.iter().map(|op| self.apply_write_op(op)).collect());
         }
+        self.write_batch_checked(ops, &|_| Ok(()))
+    }
+
+    fn write_batch_checked(
+        &self,
+        ops: &[WriteOp],
+        check: &dyn Fn(usize) -> Result<(), ErrorCode>,
+    ) -> Result<Vec<WriteResult>, (usize, ErrorCode)> {
+        self.store.with_exclusive(|inner| {
+            let mut prepared = Vec::with_capacity(ops.len());
+            // Only links are supported, so this existence overlay never changes
+            // after a lookup. Record-changing ops reject before any apply.
+            let mut existence = std::collections::HashMap::new();
+            for (i, op) in ops.iter().enumerate() {
+                check(i).map_err(|code| (i, code))?;
+                let WriteOp::Link {
+                    left,
+                    right,
+                    relation,
+                } = op
+                else {
+                    return Err((i, ErrorCode::Unsupported));
+                };
+                if relation != "collaborates_with" {
+                    return Err((i, ErrorCode::Malformed));
+                }
+                for id in [*left, *right] {
+                    if !*existence
+                        .entry(id)
+                        .or_insert_with(|| GetById::<Employee>::get(inner, id).is_some())
+                    {
+                        return Err((i, ErrorCode::RecordNotFound));
+                    }
+                }
+                if left == right {
+                    return Err((i, ErrorCode::Malformed));
+                }
+                prepared.push((*left, *right));
+            }
+            prepared
+                .into_iter()
+                .enumerate()
+                .map(|(i, (left, right))| {
+                    Self::apply_link(inner, left, right)
+                        .map(|outcome| match outcome {
+                            LinkOutcome::Linked => WriteResult::Linked,
+                            LinkOutcome::AlreadyLinked => WriteResult::AlreadyLinked,
+                        })
+                        .map_err(|code| (i, code))
+                })
+                .collect()
+        })
     }
 
     /// `JOIN-FR-002` (ADR-0044): `reports_to` is self-referential — an

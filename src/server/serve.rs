@@ -330,6 +330,9 @@ pub trait ConnectionStore: Send + Sync {
                 Err(code) => WriteResult::Failed(code),
             },
             WriteOp::ReplaceIf { id, fields, guard } => {
+                if let Err(code) = validate_predicate(&self.describe(), guard) {
+                    return WriteResult::Failed(code);
+                }
                 match self.replace_record_if(*id, fields.clone(), guard) {
                     Ok(ReplaceIfOutcome::Replaced) => WriteResult::Replaced,
                     Ok(ReplaceIfOutcome::GuardFailed) => WriteResult::GuardFailed,
@@ -355,14 +358,16 @@ pub trait ConnectionStore: Send + Sync {
     }
 
     /// `WBT-FR-002`/`WBT-FR-003` (ADR-0060, protocol 22): a batch of
-    /// runtime writes for this table. The default is **pipelined** —
-    /// each op applied through [`Self::apply_write_op`], its outcome
-    /// recorded, each standing on its own; `atomic` here can only abort
-    /// on the first hard `Failed(code)` (a domain with no runtime write
-    /// aborts at op 0 with `Unsupported`), because the default cannot
-    /// hold one lock across the batch. An adapter that supports runtime
-    /// writes overrides this to run the whole atomic batch under one
-    /// exclusive section (`Memory`/`Entity`/`Relation`).
+    /// runtime writes for this table. The table-local default applies each op
+    /// independently and, if `atomic` is passed directly, stops at the first
+    /// hard failure without undoing earlier writes. The served atomic path
+    /// instead calls [`Self::write_batch_checked`], whose default refuses
+    /// nonempty atomic batches with `Unsupported` and applies nothing.
+    /// `Memory`/`Entity`/`Relation`/`Reminder`/`Employee` override atomic execution with
+    /// one exclusive section.
+    /// `dispatch` and `write_batch` are table-local low-level entry points;
+    /// the served path is `write_batch_across`, which adds registry-aware
+    /// Link checks and Delete cascades.
     fn write_batch(
         &self,
         ops: &[WriteOp],
@@ -379,6 +384,25 @@ pub trait ConnectionStore: Send + Sync {
             results.push(result);
         }
         Ok(results)
+    }
+
+    /// Apply an atomic batch with server-resolved cross-table preconditions.
+    /// `check` runs for each op before local validation, in operation order.
+    /// The caller must keep the other tables stable until this returns.
+    /// The default refuses nonempty atomic batches at index 0 with
+    /// `Unsupported` without writing; empty batches succeed.
+    /// `dispatch` and `write_batch` are table-local low-level entry points;
+    /// the served path is `write_batch_across`, which adds registry-aware
+    /// Link checks and Delete cascades.
+    fn write_batch_checked(
+        &self,
+        ops: &[WriteOp],
+        _check: &dyn Fn(usize) -> Result<(), ErrorCode>,
+    ) -> Result<Vec<WriteResult>, (usize, ErrorCode)> {
+        if ops.is_empty() {
+            return Ok(Vec::new());
+        }
+        Err((0, ErrorCode::Unsupported))
     }
 
     /// `DEL-FR-006` (ADR-0051, protocol 17): remove the record at `id`
@@ -2072,6 +2096,9 @@ pub fn dispatch<S: ConnectionStore + ?Sized>(store: &S, req: Request) -> Respons
         // precondition abort is `TransactionFailed`, naming the first
         // failing op. Gated in `handle_connection` (write, session, 22,
         // `MAX_BATCH_OPS`).
+        // `dispatch` and `write_batch` are table-local low-level entry points;
+        // the served path is `write_batch_across`, which adds registry-aware
+        // Link checks and Delete cascades.
         Request::WriteBatch { ops, atomic } => match store.write_batch(&ops, atomic) {
             Ok(results) => Response::BatchResults { results },
             Err((index, code)) => Response::TransactionFailed {
@@ -2343,6 +2370,7 @@ fn handle_connection(
     tables: &[(String, Arc<dyn ConnectionStore>)],
     primary: usize,
     options: &ServeOptions,
+    request_lock: Option<&Mutex<()>>,
 ) {
     // `SRV-FR-004` (ADR-0032): `tls` was `serve`'s own second parameter;
     // now it is read off the one consolidated `options` value.
@@ -2595,6 +2623,11 @@ fn handle_connection(
         // match below consumes `req`.
         let request_kind = audit::RequestKind::of(&req);
 
+        // Only relationship-changing requests share this section. Delete
+        // is the only operation that can invalidate a successful far-end
+        // existence check; single and batched deletes take this same lock.
+        // Other writes and reads keep their adapter-level locking.
+        let section = relationship_section(request_lock, &req);
         // `SESS-FR-002`/`SESS-FR-004`/`SESS-FR-006`: the session intercepts.
         let resp = match req {
             Request::Begin | Request::Commit | Request::Rollback if negotiated < 3 => {
@@ -2801,8 +2834,10 @@ fn handle_connection(
             // `DEL-FR-007` (ADR-0051): a delete here detaches the id from
             // every other table's relation that targets this one.
             Request::Delete { id } => delete_across(tables, store, id),
+            Request::WriteBatch { ops, atomic } => write_batch_across(tables, store, &ops, atomic),
             other => dispatch(store, other),
         };
+        drop(section);
         let resp = downgrade_for_version(resp, negotiated);
         // `ACC-FR-004`: after the audit log's own recording for this path
         // (if any — the gates above already returned), one access event
@@ -2848,6 +2883,31 @@ pub fn serve<S: ConnectionStore + 'static>(
     serve_tables(listener, vec![(name, store)], 0, options);
 }
 
+fn relationship_mutex(tables: &[(String, Arc<dyn ConnectionStore>)]) -> Option<Arc<Mutex<()>>> {
+    tables
+        .iter()
+        .any(|(_, store)| {
+            store
+                .describe_relations()
+                .iter()
+                .any(|relation| relation.target_table.is_some())
+        })
+        .then(|| Arc::new(Mutex::new(())))
+}
+
+fn relationship_section<'a>(
+    lock: Option<&'a Mutex<()>>,
+    request: &Request,
+) -> Option<std::sync::MutexGuard<'a, ()>> {
+    if !matches!(
+        request,
+        Request::Link { .. } | Request::Delete { .. } | Request::WriteBatch { .. }
+    ) {
+        return None;
+    }
+    lock.map(|lock| lock.lock().unwrap_or_else(|p| p.into_inner()))
+}
+
 /// `TBL-FR-001` (ADR-0045, implemented by ADR-0050): [`serve`] for more
 /// than one table. Every adapter in `tables` is served on this one
 /// listener under its name; a connection starts on `tables[primary]`
@@ -2855,6 +2915,18 @@ pub fn serve<S: ConnectionStore + 'static>(
 /// table named by `ConnectionStore::table_name`, so a one-table server
 /// is unchanged. One `options` — tokens, TLS, logs, rate limit — is
 /// shared by every table; per-table authorization is a named non-goal.
+///
+/// When any registered relation declares a target table, Link, Delete and
+/// WriteBatch share a relationship mutex acquired before
+/// adapter locks and held through cross-table checks, apply and detaches.
+/// Registries without foreign relations omit this mutex entirely.
+/// Adapter sections never overlap across tables; detaches visit tables in
+/// registration order. Only Delete removes records, so other requests cannot
+/// invalidate a successful far-endpoint existence check. Reads, other writes,
+/// sessions and Compact use adapter locks alone. Each adapter read is consistent;
+/// a cross-table read can observe the interval between own-table apply and
+/// detaches. Direct writes through retained handles or other server instances
+/// do not participate. Storage failures and crashes have no cross-table rollback.
 ///
 /// # Panics
 ///
@@ -2871,6 +2943,7 @@ pub fn serve_tables(
         "serve_tables: primary {primary} is not one of the {} tables",
         tables.len()
     );
+    let request_lock = relationship_mutex(&tables);
     let tables = Arc::new(tables);
     let options = Arc::new(options);
     for incoming in listener.incoming() {
@@ -2880,7 +2953,16 @@ pub fn serve_tables(
         };
         let tables = Arc::clone(&tables);
         let options = Arc::clone(&options);
-        thread::spawn(move || handle_connection(stream, &tables, primary, options.as_ref()));
+        let request_lock = request_lock.clone();
+        thread::spawn(move || {
+            handle_connection(
+                stream,
+                &tables,
+                primary,
+                options.as_ref(),
+                request_lock.as_deref(),
+            )
+        });
     }
 }
 
@@ -2926,8 +3008,9 @@ fn join_across(
 /// the detach has nothing to drop and is skipped; a `Storage` failure
 /// there is reported in the delete's place, the record itself already
 /// gone (the one partial state, named in the design). A crash between
-/// the two steps leaves edges to a record no table holds, which every
-/// read already skips (`evaluate_join`'s `get` miss).
+/// the two steps leaves edges to a record no table holds: Join skips
+/// missing rows (`evaluate_join`'s `get` miss), but adjacency and
+/// CountEdges can still report those edges until they are detached.
 fn delete_across(
     tables: &[(String, Arc<dyn ConnectionStore>)],
     store: &dyn ConnectionStore,
@@ -2937,6 +3020,19 @@ fn delete_across(
     if resp != Response::Ok {
         return resp;
     }
+    match detach_across(tables, store, id) {
+        Ok(()) => Response::Ok,
+        Err(code) => err_response(code),
+    }
+}
+
+/// Detach in registration order, after the own-table delete has succeeded.
+/// On Storage, the record and any earlier detaches remain applied.
+fn detach_across(
+    tables: &[(String, Arc<dyn ConnectionStore>)],
+    store: &dyn ConnectionStore,
+    id: RecordId,
+) -> Result<(), ErrorCode> {
     let this = store.table_name();
     for (name, other) in tables {
         if name == this {
@@ -2948,11 +3044,11 @@ fn delete_across(
             }
             match other.detach_record(&relation.name, id) {
                 Ok(_) | Err(ErrorCode::Unsupported) | Err(ErrorCode::Malformed) => {}
-                Err(code) => return err_response(code),
+                Err(code) => return Err(code),
             }
         }
     }
-    Response::Ok
+    Ok(())
 }
 
 /// `TBL-FR-007` (ADR-0050): [`Request::Link`] under a relation whose
@@ -2968,19 +3064,8 @@ fn link_across(
     right: RecordId,
     relation: String,
 ) -> Response {
-    let foreign = store
-        .describe_relations()
-        .into_iter()
-        .find(|r| r.name == relation)
-        .and_then(|r| r.target_table);
-    if let Some(target) = foreign {
-        match tables.iter().find(|(n, _)| *n == target) {
-            None => return err_response(ErrorCode::Unsupported),
-            Some((_, other)) if other.get(right).is_none() => {
-                return err_response(ErrorCode::RecordNotFound)
-            }
-            Some(_) => {}
-        }
+    if let Err(code) = check_link_across(tables, store, right, &relation, &HashMap::new()) {
+        return err_response(code);
     }
     dispatch(
         store,
@@ -2992,9 +3077,527 @@ fn link_across(
     )
 }
 
+/// Check a far endpoint against stable tables and prior own-table writes.
+fn check_link_across(
+    tables: &[(String, Arc<dyn ConnectionStore>)],
+    store: &dyn ConnectionStore,
+    right: RecordId,
+    relation: &str,
+    existence: &HashMap<RecordId, bool>,
+) -> Result<(), ErrorCode> {
+    let foreign = store
+        .describe_relations()
+        .into_iter()
+        .find(|r| r.name == relation)
+        .and_then(|r| r.target_table);
+    if let Some(target) = foreign {
+        match tables.iter().find(|(n, _)| *n == target) {
+            None => return Err(ErrorCode::Unsupported),
+            Some((_, other))
+                if !existence
+                    .get(&right)
+                    .copied()
+                    .filter(|_| target == store.table_name())
+                    .unwrap_or_else(|| other.get(right).is_some()) =>
+            {
+                return Err(ErrorCode::RecordNotFound)
+            }
+            Some(_) => {}
+        }
+    }
+    Ok(())
+}
+
+/// Server batch path, called with the request lock held through detaches.
+/// Precondition rejection writes nothing; I/O failures are not rolled back.
+fn write_batch_across(
+    tables: &[(String, Arc<dyn ConnectionStore>)],
+    store: &dyn ConnectionStore,
+    ops: &[WriteOp],
+    atomic: bool,
+) -> Response {
+    let applied = if atomic {
+        let mut existence = HashMap::new();
+        let checks: Vec<_> = ops
+            .iter()
+            .map(|op| {
+                match op {
+                    WriteOp::Insert { id, .. } => {
+                        existence.insert(*id, true);
+                    }
+                    WriteOp::Delete { id } => {
+                        existence.insert(*id, false);
+                    }
+                    WriteOp::Link {
+                        right, relation, ..
+                    } => {
+                        return check_link_across(tables, store, *right, relation, &existence);
+                    }
+                    _ => {}
+                }
+                Ok(())
+            })
+            .collect();
+        store.write_batch_checked(ops, &|i| checks[i])
+    } else {
+        Ok(ops
+            .iter()
+            .map(|op| {
+                if let WriteOp::Link {
+                    right, relation, ..
+                } = op
+                {
+                    if let Err(code) =
+                        check_link_across(tables, store, *right, relation, &HashMap::new())
+                    {
+                        return WriteResult::Failed(code);
+                    }
+                }
+                let result = store.apply_write_op(op);
+                if let (WriteOp::Delete { id }, WriteResult::Deleted) = (op, &result) {
+                    if let Err(code) = detach_across(tables, store, *id) {
+                        return WriteResult::Failed(code);
+                    }
+                }
+                result
+            })
+            .collect())
+    };
+    match applied {
+        Err((index, code)) => Response::TransactionFailed {
+            index,
+            code,
+            message: error_message(code).to_string(),
+        },
+        Ok(mut results) => {
+            if atomic {
+                for (op, result) in ops.iter().zip(&mut results) {
+                    if let (WriteOp::Delete { id }, WriteResult::Deleted) = (op, &*result) {
+                        if let Err(code) = detach_across(tables, store, *id) {
+                            // Own-table apply already succeeded: preserve its
+                            // real outcomes and report this cascade failure per op.
+                            *result = WriteResult::Failed(code);
+                        }
+                    }
+                }
+            }
+            Response::BatchResults { results }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "research")]
+    #[test]
+    fn employee_links_agree_and_atomic_rejection_applies_nothing() {
+        use crate::generic::production::GenericProductionStore;
+        use crate::generic_spike::employee_impl::{
+            create_employee_production_stack, Department, Employee,
+        };
+        use crate::server::employee::EmployeeConnectionStore;
+        for mode in [None, Some(false), Some(true)] {
+            let dir = crate::test_support::fresh_temp_dir("employee_atomic_links").unwrap();
+            let employees = (1..=2)
+                .map(|n| Employee {
+                    id: RecordId::from_u128(n),
+                    name: format!("employee {n}"),
+                    department: Department::Engineering,
+                    salary_cents: 100,
+                    manager_id: None,
+                })
+                .collect();
+            let stack =
+                create_employee_production_stack(employees, &[], &dir.join("salary.mmap")).unwrap();
+            let store = Arc::new(EmployeeConnectionStore::new(GenericProductionStore::new(
+                stack,
+            )));
+            let tables: Vec<(String, Arc<dyn ConnectionStore>)> =
+                vec![("employee".into(), store.clone())];
+            let left = RecordId::from_u128(1);
+            let right = RecordId::from_u128(2);
+            let link = WriteOp::Link {
+                left,
+                right,
+                relation: "collaborates_with".into(),
+            };
+            let before = store.scan_all();
+            for (invalid, code) in [
+                (WriteOp::Delete { id: left }, ErrorCode::Unsupported),
+                (
+                    WriteOp::Link {
+                        left,
+                        right: left,
+                        relation: "collaborates_with".into(),
+                    },
+                    ErrorCode::Malformed,
+                ),
+                (
+                    WriteOp::Link {
+                        left,
+                        right: RecordId::from_u128(99),
+                        relation: "collaborates_with".into(),
+                    },
+                    ErrorCode::RecordNotFound,
+                ),
+                (
+                    WriteOp::Link {
+                        left,
+                        right,
+                        relation: "reports_to".into(),
+                    },
+                    ErrorCode::Malformed,
+                ),
+            ] {
+                assert!(
+                    matches!(write_batch_across(&tables, store.as_ref(), &[link.clone(), invalid], true),
+                    Response::TransactionFailed { index: 1, code: actual, .. } if actual == code)
+                );
+                assert_eq!(store.scan_all(), before);
+                assert!(store
+                    .neighbors_by_relation(left, "collaborates_with")
+                    .unwrap()
+                    .is_empty());
+            }
+            match mode {
+                None => assert_eq!(
+                    link_across(
+                        &tables,
+                        store.as_ref(),
+                        left,
+                        right,
+                        "collaborates_with".into()
+                    ),
+                    Response::Ok
+                ),
+                Some(atomic) => assert_eq!(
+                    write_batch_across(&tables, store.as_ref(), &[link], atomic),
+                    Response::BatchResults {
+                        results: vec![WriteResult::Linked]
+                    }
+                ),
+            }
+            assert_eq!(
+                store
+                    .neighbors_by_relation(left, "collaborates_with")
+                    .unwrap(),
+                vec![right]
+            );
+        }
+    }
+
+    #[test]
+    fn relationship_section_depends_on_foreign_relations() {
+        let local: Vec<(String, Arc<dyn ConnectionStore>)> =
+            vec![("local".into(), Arc::new(FixtureStore))];
+        let request = Request::Delete {
+            id: RecordId::from_u128(1),
+        };
+        let local_lock = relationship_mutex(&local);
+        assert!(local_lock.is_none());
+        assert!(relationship_section(local_lock.as_deref(), &request).is_none());
+        let foreign: Vec<(String, Arc<dyn ConnectionStore>)> = vec![(
+            "source".into(),
+            detach_fixture("source", "target", ErrorCode::Storage),
+        )];
+        let foreign_lock = relationship_mutex(&foreign).unwrap();
+        let section = relationship_section(Some(&foreign_lock), &request);
+        assert!(section.is_some());
+        assert!(foreign_lock.try_lock().is_err());
+        drop(section);
+        assert!(foreign_lock.try_lock().is_ok());
+    }
+
+    #[test]
+    fn relationship_section_allows_reads_and_recovers_poison() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let lock = Arc::new(Mutex::new(()));
+        let server_lock = Arc::clone(&lock);
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let tables: Vec<(String, Arc<dyn ConnectionStore>)> =
+                vec![("table".into(), Arc::new(FixtureStore))];
+            handle_connection(
+                stream,
+                &tables,
+                0,
+                &ServeOptions::default(),
+                Some(&server_lock),
+            );
+        });
+        let mut client = TcpStream::connect(addr).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let id = RecordId::from_u128(1);
+        framing::write_message(
+            &mut client,
+            &Request::Hello {
+                protocol_version: PROTOCOL_VERSION,
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            framing::read_message::<_, Response>(&mut client).unwrap(),
+            Response::Hello { .. }
+        ));
+        let section = lock.lock().unwrap();
+        // A held relationship section must not serialize unrelated reads.
+        framing::write_message(&mut client, &Request::GetById { id }).unwrap();
+        assert!(matches!(
+            framing::read_message::<_, Response>(&mut client).unwrap(),
+            Response::Record { .. }
+        ));
+        drop(section);
+        // Poisoning unit state must not turn future requests into Storage.
+        assert!(std::panic::catch_unwind(|| {
+            let _section = lock.lock().unwrap();
+            panic!("test relationship mutex poisoning");
+        })
+        .is_err());
+        framing::write_message(&mut client, &Request::Delete { id }).unwrap();
+        assert!(matches!(
+            framing::read_message::<_, Response>(&mut client).unwrap(),
+            Response::Err {
+                code: ErrorCode::Unsupported,
+                ..
+            }
+        ));
+        framing::write_message(&mut client, &Request::GetById { id }).unwrap();
+        assert!(matches!(
+            framing::read_message::<_, Response>(&mut client).unwrap(),
+            Response::Record { .. }
+        ));
+        drop(client);
+        server.join().unwrap();
+    }
+
+    struct DetachFixture {
+        name: &'static str,
+        target: &'static str,
+        error: ErrorCode,
+        present: Mutex<bool>,
+        calls: Mutex<Vec<RecordId>>,
+    }
+
+    impl ConnectionStore for DetachFixture {
+        fn validate_op(&self, op: &TransactionOp) -> Result<(), ErrorCode> {
+            FixtureStore.validate_op(op)
+        }
+        fn scan_all(&self) -> Vec<(RecordId, Vec<(FieldRef, ScanValue)>)> {
+            FixtureStore.scan_all()
+        }
+        fn apply_transaction(
+            &self,
+            updates: &[TransactionOp],
+            read_set: &[(RecordId, FieldRef, ScanValue)],
+        ) -> Result<(), (usize, ErrorCode)> {
+            FixtureStore.apply_transaction(updates, read_set)
+        }
+
+        fn get(&self, _id: RecordId) -> Option<Vec<(FieldRef, ScanValue)>> {
+            self.present.lock().unwrap().then(Vec::new)
+        }
+        fn filter_eq(
+            &self,
+            field: FieldRef,
+            value: &ScanValue,
+        ) -> Result<Vec<RecordId>, ErrorCode> {
+            FixtureStore.filter_eq(field, value)
+        }
+        fn scan_field(&self, field: FieldRef) -> Result<Vec<ScanValue>, ErrorCode> {
+            FixtureStore.scan_field(field)
+        }
+        fn update_field(
+            &self,
+            id: RecordId,
+            field: FieldRef,
+            value: ScanValue,
+        ) -> Result<bool, ErrorCode> {
+            FixtureStore.update_field(id, field, value)
+        }
+        fn parent(&self, id: RecordId) -> Result<ParentLookup, ErrorCode> {
+            FixtureStore.parent(id)
+        }
+        fn children(&self, id: RecordId) -> Result<Vec<RecordId>, ErrorCode> {
+            FixtureStore.children(id)
+        }
+        fn neighbors(&self, id: RecordId) -> Result<Vec<RecordId>, ErrorCode> {
+            FixtureStore.neighbors(id)
+        }
+        fn neighbors_by_relation(
+            &self,
+            id: RecordId,
+            relation: &str,
+        ) -> Result<Vec<RecordId>, ErrorCode> {
+            FixtureStore.neighbors_by_relation(id, relation)
+        }
+        fn list_relation_kinds(&self) -> Vec<String> {
+            vec!["edge".into()]
+        }
+        fn describe(&self) -> DomainSchema {
+            FixtureStore.describe()
+        }
+        fn table_name(&self) -> &str {
+            self.name
+        }
+        fn describe_relations(&self) -> Vec<RelationDescriptor> {
+            vec![RelationDescriptor {
+                name: "edge".into(),
+                kind: JoinRelation::Neighbors(Some("edge".into())),
+                target_table: Some(self.target.into()),
+            }]
+        }
+        fn delete_record(&self, _id: RecordId) -> Result<DeleteOutcome, ErrorCode> {
+            let mut present = self.present.lock().unwrap();
+            Ok(if std::mem::take(&mut *present) {
+                DeleteOutcome::Deleted
+            } else {
+                DeleteOutcome::NotFound
+            })
+        }
+        fn detach_record(&self, _relation: &str, id: RecordId) -> Result<usize, ErrorCode> {
+            self.calls.lock().unwrap().push(id);
+            Err(self.error)
+        }
+        fn write_batch_checked(
+            &self,
+            ops: &[WriteOp],
+            check: &dyn Fn(usize) -> Result<(), ErrorCode>,
+        ) -> Result<Vec<WriteResult>, (usize, ErrorCode)> {
+            for i in 0..ops.len() {
+                check(i).map_err(|code| (i, code))?;
+            }
+            Ok(ops.iter().map(|op| self.apply_write_op(op)).collect())
+        }
+    }
+
+    fn detach_fixture(
+        name: &'static str,
+        target: &'static str,
+        error: ErrorCode,
+    ) -> Arc<DetachFixture> {
+        Arc::new(DetachFixture {
+            name,
+            target,
+            error,
+            present: Mutex::new(true),
+            calls: Mutex::new(Vec::new()),
+        })
+    }
+
+    #[test]
+    fn batch_detach_failures_match_single_delete_and_not_found_skips_detach() {
+        let id = RecordId::from_u128(1);
+        for error in [
+            ErrorCode::Unsupported,
+            ErrorCode::Malformed,
+            ErrorCode::Storage,
+        ] {
+            for mode in [None, Some(false), Some(true)] {
+                let own = detach_fixture("own", "own", error);
+                let other = detach_fixture("other", "own", error);
+                let tables: Vec<(String, Arc<dyn ConnectionStore>)> =
+                    vec![("own".into(), own.clone()), ("other".into(), other.clone())];
+                let result = match mode {
+                    None => delete_across(&tables, own.as_ref(), id),
+                    Some(atomic) => {
+                        write_batch_across(&tables, own.as_ref(), &[WriteOp::Delete { id }], atomic)
+                    }
+                };
+                let expected = match (mode, error) {
+                    (None, ErrorCode::Storage) => err_response(error),
+                    (None, _) => Response::Ok,
+                    (Some(_), ErrorCode::Storage) => Response::BatchResults {
+                        results: vec![WriteResult::Failed(error)],
+                    },
+                    (Some(_), _) => Response::BatchResults {
+                        results: vec![WriteResult::Deleted],
+                    },
+                };
+                assert_eq!(result, expected);
+                assert!(
+                    own.get(id).is_none(),
+                    "a detach error cannot restore the deleted record"
+                );
+                assert_eq!(*other.calls.lock().unwrap(), vec![id]);
+                assert!(
+                    own.calls.lock().unwrap().is_empty(),
+                    "only other tables detach"
+                );
+                assert_eq!(
+                    write_batch_across(&tables, own.as_ref(), &[WriteOp::Delete { id }], true),
+                    Response::BatchResults {
+                        results: vec![WriteResult::NotFound]
+                    }
+                );
+                assert_eq!(*other.calls.lock().unwrap(), vec![id]);
+            }
+        }
+    }
+
+    #[test]
+    fn atomic_detach_storage_keeps_other_applied_results() {
+        let own = detach_fixture("own", "own", ErrorCode::Storage);
+        let other = detach_fixture("other", "own", ErrorCode::Storage);
+        let tables: Vec<(String, Arc<dyn ConnectionStore>)> =
+            vec![("own".into(), own.clone()), ("other".into(), other.clone())];
+        let id = RecordId::from_u128(1);
+        assert_eq!(
+            write_batch_across(
+                &tables,
+                own.as_ref(),
+                &[WriteOp::Delete { id }, WriteOp::Delete { id }],
+                true
+            ),
+            Response::BatchResults {
+                results: vec![
+                    WriteResult::Failed(ErrorCode::Storage),
+                    WriteResult::NotFound,
+                ]
+            }
+        );
+        assert!(own.get(id).is_none());
+        assert_eq!(*other.calls.lock().unwrap(), vec![id]);
+    }
+
+    #[test]
+    fn batch_explicit_self_target_uses_prior_existence_but_foreign_target_does_not() {
+        let own = detach_fixture("own", "own", ErrorCode::Unsupported);
+        let foreign = detach_fixture("foreign", "own", ErrorCode::Unsupported);
+        let tables: Vec<(String, Arc<dyn ConnectionStore>)> = vec![
+            ("own".into(), own.clone()),
+            ("foreign".into(), foreign.clone()),
+        ];
+        let id = RecordId::from_u128(1);
+        *own.present.lock().unwrap() = false;
+        assert_eq!(
+            check_link_across(&tables, own.as_ref(), id, "edge", &HashMap::new()),
+            Err(ErrorCode::RecordNotFound)
+        );
+        let inserted = HashMap::from([(id, true)]);
+        assert_eq!(
+            check_link_across(&tables, own.as_ref(), id, "edge", &inserted),
+            Ok(())
+        );
+        assert_eq!(
+            check_link_across(&tables, foreign.as_ref(), id, "edge", &inserted),
+            Err(ErrorCode::RecordNotFound)
+        );
+        *own.present.lock().unwrap() = true;
+        let deleted = HashMap::from([(id, false)]);
+        assert_eq!(
+            check_link_across(&tables, own.as_ref(), id, "edge", &deleted),
+            Err(ErrorCode::RecordNotFound)
+        );
+        assert_eq!(
+            check_link_across(&tables, foreign.as_ref(), id, "edge", &deleted),
+            Ok(())
+        );
+    }
 
     /// `MTLS-FR-004`: `TlsConfig::from_env`'s decision table, driven
     /// through the factored `from_env_values` so no real environment

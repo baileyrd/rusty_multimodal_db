@@ -1,5 +1,7 @@
 # Roadmap
 
+SERVER-001 v0.50.1 batch relationship semantics and verification are recorded in the [batch repair report](../reports/2026-09-08-batch-cross-table-repair.md).
+
 Status vocabulary: `Proposed`, `Draft`, `Accepted`, `In Progress`,
 `Implemented`, `Verified`, `Blocked`, `Deferred`, `Deprecated`,
 `Superseded`.

@@ -30,14 +30,14 @@
 use super::journal::{CheckpointFlush, CommitError, CommitGroup, JournalError};
 use super::protocol::{
     DomainSchema, ErrorCode, FieldCapabilities, FieldDescriptor, FieldRef, ParentLookup, Predicate,
-    RecordId, RelationCapabilities, ScanValue, TransactionOp, ValueKind,
+    RecordId, RelationCapabilities, ScanValue, TransactionOp, ValueKind, WriteOp, WriteResult,
 };
 use super::{
-    predicate_matches, ConnectionStore, DeleteOutcome, InsertOutcome, ReplaceIfOutcome,
-    ReplaceOutcome,
+    predicate_matches, validate_predicate, ConnectionStore, DeleteOutcome, InsertOutcome,
+    ReplaceIfOutcome, ReplaceOutcome,
 };
 use crate::generic::production::GenericProductionStore;
-use crate::generic::query::{GetById, UpdateField};
+use crate::generic::query::{Delete, GetById, Insert, Replace, UpdateField};
 use crate::generic::reminder::{
     status_from_u32, status_to_u32, DueAtField, Reminder, ReminderProductionStack, StatusField,
 };
@@ -200,9 +200,111 @@ impl ReminderConnectionStore {
     }
 }
 
+/// Parsed writes for Reminder's atomic batch; this domain has no links.
+enum PreparedWrite {
+    Insert(Reminder),
+    Replace(Reminder),
+    ReplaceIf(Reminder, Predicate),
+    Delete(RecordId),
+}
+
+impl ReminderConnectionStore {
+    fn prepare_write(schema: &DomainSchema, op: &WriteOp) -> Result<PreparedWrite, ErrorCode> {
+        Ok(match op {
+            WriteOp::Insert { id, fields } => {
+                PreparedWrite::Insert(Self::reminder_from_fields(*id, fields.clone())?)
+            }
+            WriteOp::Replace { id, fields } => {
+                PreparedWrite::Replace(Self::reminder_from_fields(*id, fields.clone())?)
+            }
+            WriteOp::ReplaceIf { id, fields, guard } => {
+                validate_predicate(schema, guard)?;
+                PreparedWrite::ReplaceIf(
+                    Self::reminder_from_fields(*id, fields.clone())?,
+                    guard.clone(),
+                )
+            }
+            WriteOp::Delete { id } => PreparedWrite::Delete(*id),
+            WriteOp::Link { .. } => return Err(ErrorCode::Unsupported),
+        })
+    }
+
+    fn apply_prepared(
+        inner: &mut ReminderProductionStack,
+        prepared: PreparedWrite,
+    ) -> Result<WriteResult, ErrorCode> {
+        Ok(match prepared {
+            PreparedWrite::Insert(reminder) => match Insert::insert(inner, reminder) {
+                Ok(()) => WriteResult::Inserted,
+                Err(InsertError::Duplicate(_)) => WriteResult::Duplicate,
+                Err(InsertError::Durability(_)) => return Err(ErrorCode::Storage),
+            },
+            PreparedWrite::Replace(reminder) => match Replace::replace(inner, reminder) {
+                Ok(()) => WriteResult::Replaced,
+                Err(ReplaceError::NotFound(_)) => WriteResult::NotFound,
+                Err(ReplaceError::Durability(_)) => return Err(ErrorCode::Storage),
+            },
+            PreparedWrite::ReplaceIf(reminder, guard) => {
+                let id = reminder.id;
+                match GetById::<Reminder>::get(inner, id) {
+                    None => WriteResult::NotFound,
+                    Some(stored) => {
+                        if predicate_matches(&Self::fields_of(stored), &guard) {
+                            match Replace::replace(inner, reminder) {
+                                Ok(()) => WriteResult::Replaced,
+                                Err(ReplaceError::NotFound(_)) => WriteResult::NotFound,
+                                Err(ReplaceError::Durability(_)) => return Err(ErrorCode::Storage),
+                            }
+                        } else {
+                            WriteResult::GuardFailed
+                        }
+                    }
+                }
+            }
+            PreparedWrite::Delete(id) => match Delete::<Reminder>::delete(inner, id) {
+                Ok(()) => WriteResult::Deleted,
+                Err(DeleteError::NotFound(_)) => WriteResult::NotFound,
+                Err(DeleteError::Durability(_)) => return Err(ErrorCode::Storage),
+            },
+        })
+    }
+}
+
 impl ConnectionStore for ReminderConnectionStore {
     fn get(&self, id: RecordId) -> Option<Vec<(FieldRef, ScanValue)>> {
         self.store.get::<Reminder>(id).map(Self::fields_of)
+    }
+
+    fn write_batch(
+        &self,
+        ops: &[WriteOp],
+        atomic: bool,
+    ) -> Result<Vec<WriteResult>, (usize, ErrorCode)> {
+        if !atomic {
+            return Ok(ops.iter().map(|op| self.apply_write_op(op)).collect());
+        }
+        self.write_batch_checked(ops, &|_| Ok(()))
+    }
+
+    fn write_batch_checked(
+        &self,
+        ops: &[WriteOp],
+        check: &dyn Fn(usize) -> Result<(), ErrorCode>,
+    ) -> Result<Vec<WriteResult>, (usize, ErrorCode)> {
+        let schema = self.describe();
+        self.store.with_exclusive(|inner| {
+            let mut prepared = Vec::with_capacity(ops.len());
+            for (i, op) in ops.iter().enumerate() {
+                check(i).map_err(|code| (i, code))?;
+                let p = Self::prepare_write(&schema, op).map_err(|code| (i, code))?;
+                prepared.push(p);
+            }
+            let mut results = Vec::with_capacity(prepared.len());
+            for (i, p) in prepared.into_iter().enumerate() {
+                results.push(Self::apply_prepared(inner, p).map_err(|code| (i, code))?);
+            }
+            Ok(results)
+        })
     }
 
     /// `SQL-FR-004`/`SQL-FR-005` (ADR-0034): every id from `all_ids`,

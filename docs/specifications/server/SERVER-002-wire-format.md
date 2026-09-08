@@ -515,7 +515,7 @@ Each item names the `SERVER-001` requirement that owns it.
    21. (`FR-057`)
 20. **`WriteBatch`** (22) — a batch of runtime writes (`Insert`,
    `Replace`, `ReplaceIf`, `Delete`, `Link`, as `WriteOp`) for the
-   selected table, applied in order under one write-lock acquisition,
+   selected table, applied in order,
    answered `BatchResults` with one `WriteResult` per op in order.
    `atomic: false` is pipelined — every op is applied and its outcome
    recorded, each standing on its own. `atomic: true` is precondition-
@@ -527,6 +527,11 @@ Each item names the `SERVER-001` requirement that owns it.
    below 22 or for a batch of more than `MAX_BATCH_OPS` (4096) ops. A
    domain with no runtime write answers every op `Failed(Unsupported)`
    (pipelined) or aborts `Unsupported` (atomic). (`FR-060`)
+   Batch `Link` validates the relation's target table (`Unsupported` when
+   unregistered, `RecordNotFound` when the far row is missing), and batch
+   `Delete` cascades detaches to other registered tables. In atomic mode a
+   post-apply detach `Storage` failure returns `BatchResults` with
+   `Failed(Storage)` in that Delete's slot after the own-table apply succeeded.
 
 Since 16, item 9's `Join` accepts `right_table: Some(name)` when the
 relation's descriptor carries `target_table: Some(name)`: the right rows

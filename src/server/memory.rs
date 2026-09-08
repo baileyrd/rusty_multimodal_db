@@ -300,9 +300,8 @@ impl MemoryConnectionStore {
 }
 
 /// `WBT-FR-003` (ADR-0060): one parsed, pre-validated write of an atomic
-/// [`WriteOp`] batch — the field lists already decoded to a [`Memory`]
-/// and the guard/label already checked, so the exclusive section only
-/// reads endpoints and applies.
+/// [`WriteOp`] batch — the field lists decoded to a [`Memory`] and the
+/// guard/label checked during the exclusive section's preflight pass.
 enum PreparedWrite {
     Insert(Memory),
     Replace(Memory),
@@ -316,7 +315,7 @@ enum PreparedWrite {
 }
 
 impl MemoryConnectionStore {
-    /// Parse and pre-validate one op with no lock held (`WBT-FR-003`):
+    /// Parse and pre-validate one op during atomic preflight (`WBT-FR-003`):
     /// the field list to a `Memory`, the `ReplaceIf` guard as a `Query`
     /// predicate (`GRD-FR-004`), the `Link` label against this table's
     /// relations. Any failure aborts the atomic batch before a write.
@@ -621,8 +620,9 @@ impl ConnectionStore for MemoryConnectionStore {
     /// unknown label is `Malformed`, as for `neighbors_by_relation`.
     /// `WBT-FR-002`/`003` (ADR-0060): pipelined is the trait default
     /// (each op through its single-shot method); atomic parses and
-    /// pre-validates every op, then — under one exclusive section —
-    /// checks each `Link`'s own-table endpoint and applies every op, so
+    /// pre-validates every op under one exclusive section, including the
+    /// server's foreign checks and prior writes to own-table endpoints,
+    /// then applies every op, so
     /// a precondition failure aborts with nothing applied and the batch
     /// is isolated from other connections. Not crash-atomic: a storage
     /// I/O error mid-apply is not rolled back (the named follow-on).
@@ -634,18 +634,45 @@ impl ConnectionStore for MemoryConnectionStore {
         if !atomic {
             return Ok(ops.iter().map(|op| self.apply_write_op(op)).collect());
         }
+        self.write_batch_checked(ops, &|_| Ok(()))
+    }
+
+    fn write_batch_checked(
+        &self,
+        ops: &[WriteOp],
+        check: &dyn Fn(usize) -> Result<(), ErrorCode>,
+    ) -> Result<Vec<WriteResult>, (usize, ErrorCode)> {
         let schema = self.describe();
-        let mut prepared = Vec::with_capacity(ops.len());
-        for (i, op) in ops.iter().enumerate() {
-            prepared.push(Self::prepare_write(&schema, op).map_err(|code| (i, code))?);
-        }
         self.store.with_exclusive(|inner| {
-            for (i, p) in prepared.iter().enumerate() {
-                if let PreparedWrite::Link { left, .. } = p {
-                    if GetById::<Memory>::get(inner, *left).is_none() {
-                        return Err((i, ErrorCode::RecordNotFound));
+            let mut prepared = Vec::with_capacity(ops.len());
+            let mut existence = std::collections::HashMap::new();
+            for (i, op) in ops.iter().enumerate() {
+                check(i).map_err(|code| (i, code))?;
+                let p = Self::prepare_write(&schema, op).map_err(|code| (i, code))?;
+                match &p {
+                    PreparedWrite::Insert(record) => {
+                        existence.insert(record.id, true);
                     }
+                    PreparedWrite::Delete(id) => {
+                        existence.insert(*id, false);
+                    }
+                    PreparedWrite::Link { left, right, .. } => {
+                        let exists = |id| {
+                            existence
+                                .get(&id)
+                                .copied()
+                                .unwrap_or_else(|| GetById::<Memory>::get(inner, id).is_some())
+                        };
+                        if !exists(*left) {
+                            return Err((i, ErrorCode::RecordNotFound));
+                        }
+                        if left == right {
+                            return Err((i, ErrorCode::Malformed));
+                        }
+                    }
+                    _ => {}
                 }
+                prepared.push(p);
             }
             let mut results = Vec::with_capacity(prepared.len());
             for (i, p) in prepared.into_iter().enumerate() {

@@ -317,12 +317,22 @@ impl ConnectionStore for RelationConnectionStore {
         if !atomic {
             return Ok(ops.iter().map(|op| self.apply_write_op(op)).collect());
         }
+        self.write_batch_checked(ops, &|_| Ok(()))
+    }
+
+    fn write_batch_checked(
+        &self,
+        ops: &[WriteOp],
+        check: &dyn Fn(usize) -> Result<(), ErrorCode>,
+    ) -> Result<Vec<WriteResult>, (usize, ErrorCode)> {
         let schema = self.describe();
-        let mut prepared = Vec::with_capacity(ops.len());
-        for (i, op) in ops.iter().enumerate() {
-            prepared.push(Self::prepare_write(&schema, op).map_err(|code| (i, code))?);
-        }
         self.store.with_exclusive(|inner| {
+            let mut prepared = Vec::with_capacity(ops.len());
+            for (i, op) in ops.iter().enumerate() {
+                check(i).map_err(|code| (i, code))?;
+                let p = Self::prepare_write(&schema, op).map_err(|code| (i, code))?;
+                prepared.push(p);
+            }
             let mut results = Vec::with_capacity(prepared.len());
             for (i, p) in prepared.into_iter().enumerate() {
                 results.push(Self::apply_prepared(inner, p).map_err(|code| (i, code))?);

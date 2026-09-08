@@ -536,18 +536,45 @@ impl ConnectionStore for EntityConnectionStore {
         if !atomic {
             return Ok(ops.iter().map(|op| self.apply_write_op(op)).collect());
         }
+        self.write_batch_checked(ops, &|_| Ok(()))
+    }
+
+    fn write_batch_checked(
+        &self,
+        ops: &[WriteOp],
+        check: &dyn Fn(usize) -> Result<(), ErrorCode>,
+    ) -> Result<Vec<WriteResult>, (usize, ErrorCode)> {
         let schema = self.describe();
-        let mut prepared = Vec::with_capacity(ops.len());
-        for (i, op) in ops.iter().enumerate() {
-            prepared.push(Self::prepare_write(&schema, op).map_err(|code| (i, code))?);
-        }
         self.store.with_exclusive(|inner| {
-            for (i, p) in prepared.iter().enumerate() {
-                if let PreparedWrite::Link { left, .. } = p {
-                    if GetById::<Entity>::get(inner, *left).is_none() {
-                        return Err((i, ErrorCode::RecordNotFound));
+            let mut prepared = Vec::with_capacity(ops.len());
+            let mut existence = std::collections::HashMap::new();
+            for (i, op) in ops.iter().enumerate() {
+                check(i).map_err(|code| (i, code))?;
+                let p = Self::prepare_write(&schema, op).map_err(|code| (i, code))?;
+                match &p {
+                    PreparedWrite::Insert(record) => {
+                        existence.insert(record.id, true);
                     }
+                    PreparedWrite::Delete(id) => {
+                        existence.insert(*id, false);
+                    }
+                    PreparedWrite::Link { left, right, .. } => {
+                        let exists = |id| {
+                            existence
+                                .get(&id)
+                                .copied()
+                                .unwrap_or_else(|| GetById::<Entity>::get(inner, id).is_some())
+                        };
+                        if !exists(*left) || !exists(*right) {
+                            return Err((i, ErrorCode::RecordNotFound));
+                        }
+                        if left == right {
+                            return Err((i, ErrorCode::Malformed));
+                        }
+                    }
+                    _ => {}
                 }
+                prepared.push(p);
             }
             let mut results = Vec::with_capacity(prepared.len());
             for (i, p) in prepared.into_iter().enumerate() {
