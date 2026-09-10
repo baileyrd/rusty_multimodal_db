@@ -1,5 +1,16 @@
 # rusty_multimodal_db
 
+> **This repo's development has moved.** `rusty_multimodal_db` now lives
+> at [`crates/rusty_multimodal_db`](https://github.com/Rusty-Mill/rusty_mill/tree/main/crates/rusty_multimodal_db)
+> in the [`Rusty-Mill/rusty_mill`](https://github.com/Rusty-Mill/rusty_mill)
+> monorepo, merged in via `git subtree` with full history preserved (see
+> that repo's `RELEASE_NOTES.md`/`CHANGELOG.md` for the merge, and its
+> `docs/adr/0001-consolidate-crates-into-workspace.md` for why). This
+> repo's own `AGENTS.md`/`WORKFLOW.md`/`docs/` stay the crate's
+> governance of record per that ADR's remit — only where the code lives
+> and how it's built/tested changed. Open new work against the monorepo
+> copy; this repo is not actively developed going forward.
+
 A durable, concurrency-safe key-value record store for Rust: mmap-backed
 persistence and a `RwLock` for safe multi-threaded access, either as a
 fixed `Dog`-shaped store (`ProductionStore`) or generically, for your own
@@ -8,14 +19,24 @@ to crates.io.
 
 ## Getting started
 
-This repo isn't on crates.io, so depend on it by git (or by local path if
-you already have it checked out):
+This repo isn't on crates.io. As of the monorepo migration above, prefer
+depending on the maintained copy — a workspace path dependency if you're
+already inside `rusty_mill`, otherwise git pinned to a commit under
+`crates/rusty_multimodal_db`:
+
+```toml
+[dependencies]
+rusty_multimodal_db = { path = "../rusty_multimodal_db" } # from inside crates/ in rusty_mill
+# or, from outside that workspace:
+# rusty_multimodal_db = { git = "https://github.com/Rusty-Mill/rusty_mill", rev = "<commit>" }
+```
+
+This repo's own history (frozen at the point of migration) still resolves
+by git if you need it:
 
 ```toml
 [dependencies]
 rusty_multimodal_db = { git = "https://github.com/baileyrd/rusty_multimodal_db" }
-# or, from a local checkout:
-# rusty_multimodal_db = { path = "../rusty_multimodal_db" }
 ```
 
 A complete, minimal example — create a store, read a record, update it:
