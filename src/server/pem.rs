@@ -107,7 +107,7 @@ fn base64_decode(input: &str) -> Result<Vec<u8>, PemError> {
     }
 
     let mut out = Vec::with_capacity(cleaned.len() / 4 * 3);
-    for chunk in cleaned.chunks_exact(4) {
+    for chunk in cleaned.as_chunks::<4>().0 {
         let mut vals = [0u8; 4];
         for (slot, &byte) in vals.iter_mut().zip(chunk) {
             *slot = if byte == b'=' {
